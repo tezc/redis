@@ -329,8 +329,8 @@ int checkSignedBitfieldOverflow(int64_t value, int64_t incr, uint64_t bits, int 
     /* Note that maxincr and minincr could overflow, but we use the values
      * only after checking 'value' range, so when we use it no overflow
      * happens. */
-    int64_t maxincr = max-value;
-    int64_t minincr = min-value;
+    int64_t maxincr = (int64_t)((uint64_t)max-(uint64_t)value);
+    int64_t minincr = (int64_t)((uint64_t)min-(uint64_t)value);
 
     if (value > max || (bits != 64 && incr > maxincr) || (value >= 0 && incr > 0 && incr > maxincr))
     {
@@ -598,6 +598,8 @@ void getbitCommand(client *c) {
 
     addReply(c, bitval ? shared.cone : shared.czero);
 }
+
+#define USE_ALIGNED_ACCESS 1
 
 /* BITOP op_name target_key src_key1 src_key2 src_key3 ... src_keyN */
 void bitopCommand(client *c) {

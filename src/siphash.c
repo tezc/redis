@@ -44,6 +44,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdlib.h>
 
 /* Fast tolower() alike function that does not care about locale
  * but just returns a-z instead of A-Z. */
@@ -134,7 +135,7 @@ uint64_t siphash(const uint8_t *in, const size_t inlen, const uint8_t *k) {
     v0 ^= k0;
 
     for (; in != end; in += 8) {
-        m = U8TO64_LE(in);
+        memcpy(&m, in, 8);
         v3 ^= m;
 
         SIPROUND;

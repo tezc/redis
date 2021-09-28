@@ -1285,8 +1285,10 @@ int raxIteratorAddChars(raxIterator *it, unsigned char *s, size_t len) {
     }
     /* Use memmove since there could be an overlap between 's' and
      * it->key when we use the current key in order to re-seek. */
-    memmove(it->key+it->key_len,s,len);
-    it->key_len += len;
+    if (s != NULL) {
+        memmove(it->key + it->key_len, s, len);
+        it->key_len += len;
+    }
     return 1;
 }
 
