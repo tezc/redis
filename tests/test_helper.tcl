@@ -96,7 +96,7 @@ set ::valgrind 0
 set ::durable 0
 set ::tls 0
 set ::stack_logging 0
-set ::verbose 1
+set ::verbose 0
 set ::quiet 0
 set ::denytags {}
 set ::skiptests {}
@@ -115,10 +115,10 @@ set ::force_failure 0
 set ::timeout 1200; # 20 minutes without progresses will quit the test.
 set ::last_progress [clock seconds]
 set ::active_servers {} ; # Pids of active Redis instances.
-set ::dont_clean 1
+set ::dont_clean 0
 set ::wait_server 0
-set ::stop_on_failure 1
-set ::dump_logs 1
+set ::stop_on_failure 0
+set ::dump_logs 0
 set ::loop 0
 set ::tlsdir "tests/tls"
 set ::singledb 0

@@ -2008,6 +2008,8 @@ int main(int argc, char **argv) {
     } while(config.loop);
 
     zfree(data);
+    sdsfree(config.input_dbnumstr);
+    sdsfree(config.tests);
     freeCliConnInfo(config.conn_info);
     if (config.redis_config != NULL) freeRedisConfig(config.redis_config);
 

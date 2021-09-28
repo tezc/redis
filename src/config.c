@@ -456,6 +456,7 @@ void loadServerConfigFromString(char *config) {
     int slaveof_linenum = 0;
     sds *lines;
     int save_loaded = 0;
+    char buf[1024];
 
     lines = sdssplitlen(config,strlen(config),"\n",1,&totlines);
 
@@ -624,7 +625,6 @@ void loadServerConfigFromString(char *config) {
         } else if (!strcasecmp(argv[0],"user") && argc >= 2) {
             int argc_err;
             if (ACLAppendUserForLoading(argv,argc,&argc_err) == C_ERR) {
-                char buf[1024];
                 const char *errmsg = ACLSetUserStringError();
                 snprintf(buf,sizeof(buf),"Error in user declaration '%s': %s",
                     argv[argc_err],errmsg);
