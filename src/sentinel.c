@@ -386,8 +386,6 @@ void sentinelLinkEstablishedCallback(const redisAsyncContext *c, int status);
 void sentinelDisconnectCallback(const redisAsyncContext *c, int status);
 void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privdata);
 sentinelRedisInstance *sentinelGetMasterByName(char *name);
-char *sentinelGetSubjectiveLeader(sentinelRedisInstance *master);
-char *sentinelGetObjectiveLeader(sentinelRedisInstance *master);
 int yesnotoi(char *s);
 void instanceLinkConnectionError(const redisAsyncContext *c);
 const char *sentinelRedisInstanceTypeStr(sentinelRedisInstance *ri);
@@ -403,7 +401,7 @@ void sentinelFlushConfig(void);
 void sentinelGenerateInitialMonitorEvents(void);
 int sentinelSendPing(sentinelRedisInstance *ri);
 int sentinelForceHelloUpdateForMaster(sentinelRedisInstance *master);
-sentinelRedisInstance *getSentinelRedisInstanceByAddrAndRunID(dict *instances, char *ip, int port, char *runid);
+sentinelRedisInstance *getSentinelRedisInstanceByAddrAndRunID(dict *instances, char *addr, int port, char *runid);
 void sentinelSimFailureCrash(void);
 
 /* ========================= Dictionary types =============================== */
@@ -547,6 +545,34 @@ void initSentinel(void) {
     sentinel.announce_hostnames = SENTINEL_DEFAULT_ANNOUNCE_HOSTNAMES;
     memset(sentinel.myid,0,sizeof(sentinel.myid));
     server.sentinel_config = NULL;
+}
+
+/* Release a script job structure and all the associated data. */
+void sentinelReleaseScriptJob(sentinelScriptJob *sj) {
+    int j = 0;
+
+    while(sj->argv[j]) sdsfree(sj->argv[j++]);
+    zfree(sj->argv);
+    zfree(sj);
+}
+
+void termSentinel(void)
+{
+    listNode *ln;
+    listIter li;
+
+    dictRelease(sentinel.masters);
+
+    listRewind(sentinel.scripts_queue,&li);
+    while ((ln = listNext(&li)) != NULL) {
+        sentinelScriptJob *sj = ln->value;
+
+        if (sj->flags & SENTINEL_SCRIPT_RUNNING) {
+            kill(sj->pid,SIGKILL);
+        }
+        sentinelReleaseScriptJob(sj);
+    }
+    listRelease(sentinel.scripts_queue);
 }
 
 /* This function is for checking whether sentinel config file has been set,
@@ -765,15 +791,6 @@ void sentinelGenerateInitialMonitorEvents(void) {
 }
 
 /* ============================ script execution ============================ */
-
-/* Release a script job structure and all the associated data. */
-void sentinelReleaseScriptJob(sentinelScriptJob *sj) {
-    int j = 0;
-
-    while(sj->argv[j]) sdsfree(sj->argv[j++]);
-    zfree(sj->argv);
-    zfree(sj);
-}
 
 #define SENTINEL_SCRIPT_MAX_ARGS 16
 void sentinelScheduleScriptExecution(char *path, ...) {
@@ -1523,33 +1540,6 @@ sentinelRedisInstance *sentinelGetMasterByName(char *name) {
     ri = dictFetchValue(sentinel.masters,sdsname);
     sdsfree(sdsname);
     return ri;
-}
-
-/* Add the specified flags to all the instances in the specified dictionary. */
-void sentinelAddFlagsToDictOfRedisInstances(dict *instances, int flags) {
-    dictIterator *di;
-    dictEntry *de;
-
-    di = dictGetIterator(instances);
-    while((de = dictNext(di)) != NULL) {
-        sentinelRedisInstance *ri = dictGetVal(de);
-        ri->flags |= flags;
-    }
-    dictReleaseIterator(di);
-}
-
-/* Remove the specified flags to all the instances in the specified
- * dictionary. */
-void sentinelDelFlagsToDictOfRedisInstances(dict *instances, int flags) {
-    dictIterator *di;
-    dictEntry *de;
-
-    di = dictGetIterator(instances);
-    while((de = dictNext(di)) != NULL) {
-        sentinelRedisInstance *ri = dictGetVal(de);
-        ri->flags &= ~flags;
-    }
-    dictReleaseIterator(di);
 }
 
 /* Reset the state of a monitored master:
@@ -4955,7 +4945,7 @@ void sentinelFailoverWaitStart(sentinelRedisInstance *ri) {
     /* If I'm not the leader, and it is not a forced failover via
      * SENTINEL FAILOVER, then I can't continue with the failover. */
     if (!isleader && !(ri->flags & SRI_FORCE_FAILOVER)) {
-        int election_timeout = sentinel_election_timeout;
+        mstime_t election_timeout = sentinel_election_timeout;
 
         /* The election timeout is the MIN between SENTINEL_ELECTION_TIMEOUT
          * and the configured failover timeout. */
@@ -5072,9 +5062,6 @@ void sentinelFailoverDetectEnd(sentinelRedisInstance *master) {
      * command to all the slaves still not reconfigured to replicate with
      * the new master. */
     if (timeout) {
-        dictIterator *di;
-        dictEntry *de;
-
         di = dictGetIterator(master->slaves);
         while((de = dictNext(di)) != NULL) {
             sentinelRedisInstance *slave = dictGetVal(de);

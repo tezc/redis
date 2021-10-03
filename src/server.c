@@ -4919,6 +4919,11 @@ int prepareForShutdown(int flags) {
     if (server.loading || server.sentinel_mode)
         flags = (flags & ~SHUTDOWN_SAVE) | SHUTDOWN_NOSAVE;
 
+    extern void termSentinel();
+
+    if (server.sentinel_mode)
+        termSentinel();
+
     int save = flags & SHUTDOWN_SAVE;
     int nosave = flags & SHUTDOWN_NOSAVE;
 
@@ -5006,6 +5011,8 @@ int prepareForShutdown(int flags) {
     /* Best effort flush of slave output buffers, so that we hopefully
      * send them pending writes. */
     flushSlavesOutputBuffers();
+
+    set_jemalloc_bg_thread(0);
 
     /* Close the listening sockets. Apparently this allows faster restarts. */
     closeListeningSockets(1);

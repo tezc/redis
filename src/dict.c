@@ -541,15 +541,15 @@ void *dictFetchValue(dict *d, const void *key) {
  * the fingerprint again when the iterator is released.
  * If the two fingerprints are different it means that the user of the iterator
  * performed forbidden operations against the dictionary while iterating. */
-long long dictFingerprint(dict *d) {
-    long long integers[6], hash = 0;
+unsigned long long dictFingerprint(dict *d) {
+    unsigned long long integers[6], hash = 0;
     int j;
 
     integers[0] = (long) d->ht_table[0];
-    integers[1] = d->ht_size_exp[0];
+    integers[1] = (unsigned char) d->ht_size_exp[0];
     integers[2] = d->ht_used[0];
     integers[3] = (long) d->ht_table[1];
-    integers[4] = d->ht_size_exp[1];
+    integers[4] = (unsigned char) d->ht_size_exp[1];
     integers[5] = d->ht_used[1];
 
     /* We hash N integers by summing every successive integer with the integer
