@@ -5012,8 +5012,6 @@ int prepareForShutdown(int flags) {
      * send them pending writes. */
     flushSlavesOutputBuffers();
 
-    set_jemalloc_bg_thread(0);
-
     /* Close the listening sockets. Apparently this allows faster restarts. */
     closeListeningSockets(1);
     serverLog(LL_WARNING,"%s is now ready to exit, bye bye...",
