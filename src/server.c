@@ -5527,6 +5527,8 @@ int prepareForShutdown(int flags) {
     if (server.supervised_mode == SUPERVISED_SYSTEMD)
         redisCommunicateSystemd("STOPPING=1\n");
 
+    if (server.sentinel_mode) freeSentinel();
+
     /* Kill all the Lua debugger forked sessions. */
     ldbKillForkedSessions();
 
