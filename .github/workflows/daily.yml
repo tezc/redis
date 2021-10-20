@@ -292,7 +292,7 @@ jobs:
 
   test-sanitizer-address:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis' && !contains(github.event.inputs.skipjobs, 'sanitizer')
+    if: github.repository == 'tezc/redis' && !contains(github.event.inputs.skipjobs, 'sanitizer')
     timeout-minutes: 14400
     strategy:
       matrix:
@@ -332,7 +332,7 @@ jobs:
 
   test-sanitizer-undefined:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis' && !contains(github.event.inputs.skipjobs, 'sanitizer')
+    if: github.repository == 'tezc/redis' && !contains(github.event.inputs.skipjobs, 'sanitizer')
     timeout-minutes: 14400
     strategy:
       matrix:
