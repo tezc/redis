@@ -299,6 +299,7 @@ jobs:
         compiler: [ gcc, clang ]
     env:
       CC: ${{ matrix.compiler }}
+      ASAN_OPTIONS: allocator_may_return_null=1
     steps:
       - name: prep
         if: github.event_name == 'workflow_dispatch'
