@@ -2744,7 +2744,12 @@ void clusterBroadcastPong(int target) {
 
 /* Send a PUBLISH message.
  *
- * If link is NULL, then the message is broadcasted to the whole cluster. */
+ * If link is NULL, then the message is broadcasted to the whole cluster.
+ *
+ * Sanitizer suppression: In clusterMsgDataPublish, sizeof(bulk_data) is 8.
+ * As all the struct is used as a buffer in this function, when more than
+ * 8 bytes is copied into the 'bulk_data', sanitizer generates an out-of-bounds
+ * error which is a false positive in this context. */
 REDIS_NO_SANITIZE("bounds")
 void clusterSendPublish(clusterLink *link, robj *channel, robj *message) {
     unsigned char *payload;
