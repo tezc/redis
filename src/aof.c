@@ -146,7 +146,6 @@ void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
 }
 
 /* Append data to the AOF rewrite buffer, allocating new blocks if needed. */
-REDIS_NO_SANITIZE("bounds")
 void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
     listNode *ln = listLast(server.aof_rewrite_buf_blocks);
     aofrwblock *block = ln ? ln->value : NULL;
