@@ -40,6 +40,13 @@ proc crashlog_from_file {filename} {
         if {[string match {*REDIS BUG REPORT START*} $line]} {
             set logall 1
         }
+        # Catch undefined behavior sanitizer error line
+        if {[string match {*runtime error*} $line]} {
+            set logall 1
+        }
+        if {[string match {*AddressSanitizer*} $line]} {
+            set logall 1
+        }
         if {[regexp {^\[\d+\]\s+\d+\s+\w+\s+\d{2}:\d{2}:\d{2} \#} $line]} {
             set matched 1
         }
