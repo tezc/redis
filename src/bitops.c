@@ -326,7 +326,14 @@ int checkSignedBitfieldOverflow(int64_t value, int64_t incr, uint64_t bits, int 
     int64_t max = (bits == 64) ? INT64_MAX : (((int64_t)1<<(bits-1))-1);
     int64_t min = (-max)-1;
 
-    if ((value > 0 && incr > max-value) || (bits != 64 && incr > 0 && incr > max-value)) {
+    /* Note that maxincr and minincr could overflow, but we use the values
+     * only after checking 'value' range, so when we use it no overflow
+     * happens. */
+    int64_t maxincr = (uint64_t)max-value;
+    int64_t minincr = min-value;
+
+    if (value > max || (bits != 64 && incr > maxincr) || (value >= 0 && incr > 0 && incr > maxincr))
+    {
         if (limit) {
             if (owtype == BFOVERFLOW_WRAP) {
                 goto handle_wrap;
@@ -335,7 +342,7 @@ int checkSignedBitfieldOverflow(int64_t value, int64_t incr, uint64_t bits, int 
             }
         }
         return 1;
-    } else if ((value < 0 && incr < min-value) || (bits != 64 && incr < min-value)) {
+    } else if (value < min || (bits != 64 && incr < minincr) || (value < 0 && incr < 0 && incr < minincr)) {
         if (limit) {
             if (owtype == BFOVERFLOW_WRAP) {
                 goto handle_wrap;
