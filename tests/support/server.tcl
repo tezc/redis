@@ -598,7 +598,7 @@ proc start_server {options {code undefined}} {
 
                 set stderrlog [crashlog_from_file [dict get $srv "stderr"]]
                 if {[string length $stderrlog] > 0} {
-                    puts [format "\nLogged stderr crash report (pid %d):" [dict get $srv "pid"]]
+                    puts [format "\nLogged crash report (stderr) (pid %d):" [dict get $srv "pid"]]
                     puts "$stderrlog"
                     puts ""
                 }
