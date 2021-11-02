@@ -287,11 +287,6 @@ proc test_server_main {} {
     cleanup
     set tclsh [info nameofexecutable]
 
-    if {$::sanitizer} {
-        # Required for the tests that rely on NULL return for huge allocations
-        set ::env(ASAN_OPTIONS) allocator_may_return_null=1
-    }
-
     # Open a listening socket, trying different ports in order to find a
     # non busy one.
     set clientport [find_available_port [expr {$::baseport - 32}] 32]
