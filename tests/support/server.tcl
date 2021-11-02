@@ -19,6 +19,13 @@ proc check_valgrind_errors stderr {
     }
 }
 
+proc check_sanitizer_errors stderr {
+    set res [sanitizer_errors_from_file $stderr]
+    if {$res != ""} {
+        send_data_packet $::test_server_fd err "Sanitizer error: $res\n"
+    }
+}
+
 proc clean_persistence config {
     # we may wanna keep the logs for later, but let's clean the persistence
     # files right away, since they can accumulate and take up a lot of space
@@ -43,6 +50,10 @@ proc kill_server config {
         # Check valgrind errors if needed
         if {$::valgrind} {
             check_valgrind_errors [dict get $config stderr]
+        }
+        # Check sanitizer errors if needed
+        if {$::sanitizer} {
+            check_sanitizer_errors [dict get $config stderr]
         }
         return
     }
@@ -99,6 +110,11 @@ proc kill_server config {
     # Check valgrind errors if needed
     if {$::valgrind} {
         check_valgrind_errors [dict get $config stderr]
+    }
+
+    # Check sanitizer errors if needed
+    if {$::sanitizer} {
+        check_sanitizer_errors [dict get $config stderr]
     }
 
     # Remove this pid from the set of active pids in the test server.
@@ -596,11 +612,13 @@ proc start_server {options {code undefined}} {
                     puts ""
                 }
 
-                set sanitizerlog [sanitizer_warnings_from_file [dict get $srv "stderr"]]
-                if {[string length $sanitizerlog] > 0} {
-                    puts [format "\nLogged sanitizer error lines (pid %d):" [dict get $srv "pid"]]
-                    puts "$sanitizerlog"
-                    puts ""
+                if {$::sanitizer} {
+                    set sanitizerlog [sanitizer_errors_from_file [dict get $srv "stderr"]]
+                    if {[string length $sanitizerlog] > 0} {
+                        puts [format "\nLogged sanitizer errors (pid %d):" [dict get $srv "pid"]]
+                        puts "$sanitizerlog"
+                        puts ""
+                    }
                 }
             }
 

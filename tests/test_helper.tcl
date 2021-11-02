@@ -93,6 +93,7 @@ set ::baseport 21111; # initial port for spawned redis servers
 set ::portcount 8000; # we don't wanna use more than 10000 to avoid collision with cluster bus ports
 set ::traceleaks 0
 set ::valgrind 0
+set ::sanitizer 0
 set ::durable 0
 set ::tls 0
 set ::stack_logging 0
@@ -285,6 +286,12 @@ proc cleanup {} {
 proc test_server_main {} {
     cleanup
     set tclsh [info nameofexecutable]
+
+    if {$::sanitizer} {
+        # Required for the tests that rely on NULL return for huge allocations
+        set ::env(ASAN_OPTIONS) allocator_may_return_null=1
+    }
+
     # Open a listening socket, trying different ports in order to find a
     # non busy one.
     set clientport [find_available_port [expr {$::baseport - 32}] 32]
@@ -558,6 +565,7 @@ proc send_data_packet {fd status data} {
 proc print_help_screen {} {
     puts [join {
         "--valgrind         Run the test over valgrind."
+        "--sanitizer        Catch sanitizer errors."
         "--durable          suppress test crashes and keep running"
         "--stack-logging    Enable OSX leaks/malloc stack logging."
         "--accurate         Run slow randomized tests for more iterations."
@@ -623,6 +631,8 @@ for {set j 0} {$j < [llength $argv]} {incr j} {
         incr j
     } elseif {$opt eq {--valgrind}} {
         set ::valgrind 1
+    } elseif {$opt eq {--sanitizer}} {
+        set ::sanitizer 1
     } elseif {$opt eq {--stack-logging}} {
         if {[string match {*Darwin*} [exec uname -a]]} {
             set ::stack_logging 1
