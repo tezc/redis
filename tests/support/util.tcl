@@ -54,10 +54,11 @@ proc crashlog_from_file {filename} {
 proc sanitizer_errors_from_file {filename} {
     set log [exec cat $filename]
 
-    # GCC UBSAN output does not contain 'Sanitizer' but 'runtime error'.
-    if {[string match {*runtime error*} $log] ||
-        [string match {*Sanitizer*} $log]} {
-        return $log
+    # 1- Ignore huge allocation warnings
+    # 2- GCC UBSAN output does not contain 'Sanitizer' but 'runtime error'.
+    if {![string match {*WARNING: AddressSanitizer failed to allocate*} $log] &&
+        ([string match {*runtime error*} $log] ||
+        [string match {*Sanitizer*} $log])} {
     }
 
     return ""
