@@ -59,6 +59,7 @@ proc sanitizer_errors_from_file {filename} {
     if {![string match {*WARNING: AddressSanitizer failed to allocate*} $log] &&
         ([string match {*runtime error*} $log] ||
         [string match {*Sanitizer*} $log])} {
+        return $log
     }
 
     return ""
