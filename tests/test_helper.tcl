@@ -286,7 +286,6 @@ proc cleanup {} {
 proc test_server_main {} {
     cleanup
     set tclsh [info nameofexecutable]
-
     # Open a listening socket, trying different ports in order to find a
     # non busy one.
     set clientport [find_available_port [expr {$::baseport - 32}] 32]
