@@ -337,6 +337,8 @@ jobs:
     strategy:
       matrix:
         compiler: [ gcc, clang ]
+    env:
+      CC: ${{ matrix.compiler }}
     steps:
       - name: prep
         if: github.event_name == 'workflow_dispatch'
