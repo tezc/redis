@@ -1897,7 +1897,7 @@ static int _ql_verify(quicklist *ql, uint32_t len, uint32_t count,
 
 /* Generate new string concatenating integer i against string 'prefix' */
 static char *genstr(char *prefix, int i) {
-    static char result[256] = {0};
+    static char result[64] = {0};
     snprintf(result, sizeof(result), "%s%d", prefix, i);
     return result;
 }
@@ -2006,13 +2006,18 @@ int quicklistTest(int argc, char *argv[], int accurate) {
             quicklistRelease(ql);
         }
 
-        TEST("Comprassion Plain node") {
+        TEST("Compression Plain node") {
+
+
             quicklistisSetPackedThreshold(1);
             quicklist *ql = quicklistNew(-2, 1);
-            for (int i = 0; i < 500; i++)
+            for (int i = 0; i < 500; i++) {
                 /* Set to 256 to allow the node to be triggered to compress,
                  * if it is less than 48(nocompress), the test will be successful. */
-                quicklistPushHead(ql, genstr("hello", i), 256);
+                char buf[256];
+                snprintf(buf, sizeof(buf), "hello%d", i);
+                quicklistPushHead(ql, buf, 256);
+            }
 
             quicklistIter *iter = quicklistGetIterator(ql, AL_START_TAIL);
             quicklistEntry entry;
