@@ -1715,6 +1715,7 @@ void quicklistBookmarksClear(quicklist *ql) {
     /* NOTE: We do not shrink (realloc) the quick list. main use case for this
      * function is just before releasing the allocation. */
 }
+#define REDIS_TEST
 
 /* The rest of this file is test cases and test helpers. */
 #ifdef REDIS_TEST
@@ -1896,7 +1897,7 @@ static int _ql_verify(quicklist *ql, uint32_t len, uint32_t count,
 
 /* Generate new string concatenating integer i against string 'prefix' */
 static char *genstr(char *prefix, int i) {
-    static char result[64] = {0};
+    static char result[256] = {0};
     snprintf(result, sizeof(result), "%s%d", prefix, i);
     return result;
 }
