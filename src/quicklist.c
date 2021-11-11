@@ -1715,7 +1715,6 @@ void quicklistBookmarksClear(quicklist *ql) {
     /* NOTE: We do not shrink (realloc) the quick list. main use case for this
      * function is just before releasing the allocation. */
 }
-#define REDIS_TEST
 
 /* The rest of this file is test cases and test helpers. */
 #ifdef REDIS_TEST
