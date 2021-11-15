@@ -6340,8 +6340,12 @@ static int clusterManagerCommandRebalance(int argc, char **argv) {
                                                     item->slot,
                                                     opts, &err);
                     if (!result || err != NULL) {
-                        printf("clusterManagerMoveSlot : %s \n", err);
-                        zfree(err);
+                        if (err) {
+                            printf("result :%d , clusterManagerMoveSlot : %s \n", result, err);
+                            zfree(err);
+                        } else {
+                            printf("Failed with result code : %d \n", result);
+                        }
                         goto end_move;
                     }
                     printf("#");
