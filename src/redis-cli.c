@@ -6302,6 +6302,7 @@ static int clusterManagerCommandRebalance(int argc, char **argv) {
     int src_idx = nodes_involved - 1;
     int simulate = config.cluster_manager_command.flags &
                    CLUSTER_MANAGER_CMD_FLAG_SIMULATE;
+    char *err = NULL;
     while (dst_idx < src_idx) {
         clusterManagerNode *dst = weightedNodes[dst_idx];
         clusterManagerNode *src = weightedNodes[src_idx];
@@ -6337,8 +6338,11 @@ static int clusterManagerCommandRebalance(int argc, char **argv) {
                     result = clusterManagerMoveSlot(item->source,
                                                     dst,
                                                     item->slot,
-                                                    opts, NULL);
-                    if (!result) goto end_move;
+                                                    opts, &err);
+                    if (!result) {
+                        printf("clusterManagerMoveSlot : %s \n", err);
+                        goto end_move;
+                    }
                     printf("#");
                     fflush(stdout);
                 }
