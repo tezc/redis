@@ -3880,6 +3880,9 @@ static int clusterManagerMoveSlot(clusterManagerNode *source,
                 if (err != NULL) {
                     *err = zmalloc((r->len + 1) * sizeof(char));
                     strcpy(*err, r->str);
+                    printf("Command was : CLUSTER SETSLOT %d %s %s",
+                           slot, "node",
+                           target->name);
                     CLUSTER_MANAGER_PRINT_REPLY_ERROR(n, *err);
                 }
             }
