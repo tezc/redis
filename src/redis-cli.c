@@ -6330,8 +6330,7 @@ static int clusterManagerCommandRebalance(int argc, char **argv) {
             if (simulate) {
                 for (i = 0; i < table_len; i++) printf("#");
             } else {
-                int opts = CLUSTER_MANAGER_OPT_QUIET |
-                           CLUSTER_MANAGER_OPT_UPDATE;
+                int opts = CLUSTER_MANAGER_OPT_UPDATE;
                 listRewind(table, &li);
                 while ((ln = listNext(&li)) != NULL) {
                     clusterManagerReshardTableItem *item = ln->value;
