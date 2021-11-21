@@ -2048,7 +2048,7 @@ int listpackTest(int argc, char *argv[], int flags) {
         list *ref;
         listNode *refnode;
 
-        int iteration = accurate ? 20000 : 20;
+        int iteration = accurate ? 10000 : 20;
         for (i = 0; i < iteration; i++) {
             lp = lpNew(0);
             ref = listCreate();
@@ -2111,7 +2111,7 @@ int listpackTest(int argc, char *argv[], int flags) {
 
     TEST("Stress with variable listpack size") {
         unsigned long long start = usec();
-        int maxsize = accurate ? 16384 : 16;
+        int maxsize = accurate ? 8192 : 16;
         stress(0,100000,maxsize,256);
         stress(1,100000,maxsize,256);
         printf("Done. usec=%lld\n\n", usec()-start);
@@ -2119,7 +2119,7 @@ int listpackTest(int argc, char *argv[], int flags) {
 
     /* Benchmarks */
     {
-        int iteration = accurate ? 100000 : 100;
+        int iteration = accurate ? 10000 : 100;
         lp = lpNew(0);
         TEST("Benchmark lpAppend") {
             unsigned long long start = usec();

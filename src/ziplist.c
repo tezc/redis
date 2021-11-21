@@ -2362,7 +2362,7 @@ int ziplistTest(int argc, char **argv, int flags) {
         unsigned int slen;
         long long sval;
 
-        iteration = accurate ? 20000 : 20;
+        iteration = accurate ? 10000 : 20;
         for (i = 0; i < iteration; i++) {
             zl = ziplistNew();
             ref = listCreate();
@@ -2429,7 +2429,7 @@ int ziplistTest(int argc, char **argv, int flags) {
     printf("Stress with variable ziplist size:\n");
     {
         unsigned long long start = usec();
-        int maxsize = accurate ? 16384 : 16;
+        int maxsize = accurate ? 8192 : 16;
         stress(ZIPLIST_HEAD,100000,maxsize,256);
         stress(ZIPLIST_TAIL,100000,maxsize,256);
         printf("Done. usec=%lld\n\n", usec()-start);
@@ -2438,7 +2438,7 @@ int ziplistTest(int argc, char **argv, int flags) {
     /* Benchmarks */
     {
         zl = ziplistNew();
-        iteration = accurate ? 100000 : 100;
+        iteration = accurate ? 10000 : 100;
         for (int i=0; i<iteration; i++) {
             char buf[4096] = "asdf";
             zl = ziplistPush(zl, (unsigned char*)buf, 4, ZIPLIST_TAIL);
@@ -2451,6 +2451,10 @@ int ziplistTest(int argc, char **argv, int flags) {
             zl = ziplistPush(zl, (unsigned char*)"1000", 4, ZIPLIST_TAIL);
             zl = ziplistPush(zl, (unsigned char*)"10000", 5, ZIPLIST_TAIL);
             zl = ziplistPush(zl, (unsigned char*)"100000", 6, ZIPLIST_TAIL);
+
+            if (i % 100 == 0) {
+                printf("iteration :%d\n", i);
+            }
         }
 
         printf("Benchmark ziplistFind:\n");
@@ -2514,9 +2518,12 @@ int ziplistTest(int argc, char **argv, int flags) {
     {
         char data[ZIP_BIG_PREVLEN];
         zl = ziplistNew();
-        iteration = accurate ? 100000 : 100;
+        iteration = accurate ? 10000 : 100;
         for (int i = 0; i < iteration; i++) {
             zl = ziplistPush(zl, (unsigned char*)data, ZIP_BIG_PREVLEN-4, ZIPLIST_TAIL);
+            if (i % 100 == 0) {
+                printf("iteration :%d\n", i);
+            }
         }
         unsigned long long start = usec();
         zl = ziplistPush(zl, (unsigned char*)data, ZIP_BIG_PREVLEN-3, ZIPLIST_HEAD);
