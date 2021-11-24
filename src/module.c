@@ -6407,10 +6407,17 @@ int moduleUnblockClientByHandle(RedisModuleBlockedClient *bc, void *privdata) {
     pthread_mutex_lock(&moduleUnblockedClientsMutex);
     if (!bc->blocked_on_keys) bc->privdata = privdata;
     bc->unblocked = 1;
-    listAddNodeTail(moduleUnblockedClients,bc);
-    if (write(server.module_blocked_pipe[1],"A",1) != 1) {
-        /* Ignore the error, this is best-effort. */
+    int awake;
+
+    if (listLength(moduleUnblockedClients) == 0) {
+        atomicGetWithSync(server.awake, awake);
+        if (!awake) {
+            if (write(server.module_blocked_pipe[1], "A", 1) != 1) {
+                /* Ignore the error, this is best-effort. */
+            }
+        }
     }
+    listAddNodeTail(moduleUnblockedClients,bc);
     pthread_mutex_unlock(&moduleUnblockedClientsMutex);
     return REDISMODULE_OK;
 }
@@ -6504,7 +6511,10 @@ void moduleHandleBlockedClients(void) {
     /* Here we unblock all the pending clients blocked in modules operations
      * so we can read every pending "awake byte" in the pipe. */
     char buf[1];
-    while (read(server.module_blocked_pipe[0],buf,1) == 1);
+    if (listLength(moduleUnblockedClients) > 0) {
+        while (read(server.module_blocked_pipe[0], buf, 1) == 1);
+    }
+
     while (listLength(moduleUnblockedClients)) {
         ln = listFirst(moduleUnblockedClients);
         bc = ln->value;

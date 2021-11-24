@@ -3389,6 +3389,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     if (listLength(server.clients_waiting_acks))
         processClientsWaitingReplicas();
 
+    atomicSetWithSync(server.awake, 0);
     /* Check if there are clients unblocked by modules that implement
      * blocking commands. */
     if (moduleCount()) moduleHandleBlockedClients();
@@ -3466,6 +3467,8 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
  * the different events callbacks. */
 void afterSleep(struct aeEventLoop *eventLoop) {
     UNUSED(eventLoop);
+
+    atomicSetWithSync(server.awake, 1);
 
     /* Do NOT add anything above moduleAcquireGIL !!! */
 

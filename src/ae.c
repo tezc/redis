@@ -483,11 +483,24 @@ int aeWait(int fd, int mask, long long milliseconds) {
 }
 
 void aeMain(aeEventLoop *eventLoop) {
+    int retry = 100;
+
     eventLoop->stop = 0;
     while (!eventLoop->stop) {
-        aeProcessEvents(eventLoop, AE_ALL_EVENTS|
-                                   AE_CALL_BEFORE_SLEEP|
-                                   AE_CALL_AFTER_SLEEP);
+        int flags = AE_ALL_EVENTS|
+                    AE_CALL_BEFORE_SLEEP|
+                    AE_CALL_AFTER_SLEEP;
+
+        retry = retry > 0 ? retry - 1 : 0;
+        if (retry > 0) {
+            flags |= AE_DONT_WAIT;
+        }
+
+        int ev = aeProcessEvents(eventLoop, flags);
+        if (ev > 0) {
+            retry = 100;
+        }
+
     }
 }
 
