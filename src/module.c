@@ -10383,12 +10383,25 @@ void *RM_GetAe()
     return server.el;
 }
 
+int RM_AeCreateFileEvent(void *eventLoop, int fd, int mask,
+                      void *proc, void *clientData)
+{
+    return aeCreateFileEvent(eventLoop, fd, mask, proc, clientData);
+}
+
+void RM_AeDeleteFileEvent(void *eventLoop, int fd, int mask)
+{
+    aeDeleteFileEvent(eventLoop, fd, mask);
+}
+
 /* Register all the APIs we export. Keep this function at the end of the
  * file so that's easy to seek it to add new entries. */
 void moduleRegisterCoreAPI(void) {
     server.moduleapi = dictCreate(&moduleAPIDictType);
     server.sharedapi = dictCreate(&moduleAPIDictType);
     REGISTER_API(GetAe);
+    REGISTER_API(AeCreateFileEvent);
+    REGISTER_API(AeDeleteFileEvent);
     REGISTER_API(Alloc);
     REGISTER_API(Calloc);
     REGISTER_API(Realloc);

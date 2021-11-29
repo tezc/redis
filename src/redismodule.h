@@ -862,6 +862,8 @@ REDISMODULE_API int (*RedisModule_SetCommandKeySpecBeginSearchKeyword)(RedisModu
 REDISMODULE_API int (*RedisModule_SetCommandKeySpecFindKeysRange)(RedisModuleCtx *ctx, const char *name, int spec_id, int lastkey, int keystep, int limit) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_SetCommandKeySpecFindKeysKeynum)(RedisModuleCtx *ctx, const char *name, int spec_id, int keynumidx, int firstkey, int keystep) REDISMODULE_ATTR;
 REDISMODULE_API void * (*RedisModule_GetAe)() REDISMODULE_ATTR;
+REDISMODULE_API int (*RedisModule_AeCreateFileEvent)(void *eventLoop, int fd, int mask, void *proc, void *clientData) REDISMODULE_ATTR;
+REDISMODULE_API void (*RedisModule_AeDeleteFileEvent)(void *eventLoop, int fd, int mask) REDISMODULE_ATTR;
 
 /* Experimental APIs */
 #ifdef REDISMODULE_EXPERIMENTAL_API
@@ -947,6 +949,8 @@ static int RedisModule_Init(RedisModuleCtx *ctx, const char *name, int ver, int 
     void *getapifuncptr = ((void**)ctx)[0];
     RedisModule_GetApi = (int (*)(const char *, void *)) (unsigned long)getapifuncptr;
     REDISMODULE_GET_API(GetAe);
+    REDISMODULE_GET_API(AeCreateFileEvent);
+    REDISMODULE_GET_API(AeDeleteFileEvent);
     REDISMODULE_GET_API(Alloc);
     REDISMODULE_GET_API(Calloc);
     REDISMODULE_GET_API(Free);
