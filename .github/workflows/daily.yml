@@ -521,10 +521,10 @@ jobs:
         repository: ${{ env.GITHUB_REPOSITORY }}
         ref: ${{ env.GITHUB_HEAD_REF }}
     - name: test
-      uses: vmactions/freebsd-vm@v0.1.4
+      uses: vmactions/freebsd-vm@v0.1.5
       with:
         usesh: true
-        sync: sshfs
+        sync: rsync
         prepare: pkg install -y bash gmake lang/tcl86 lang/tclx
         run: >
           gmake || exit 1 ;
