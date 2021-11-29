@@ -6404,14 +6404,13 @@ void RM_SignalKeyAsReady(RedisModuleCtx *ctx, RedisModuleString *key) {
 
 /* Implements RM_UnblockClient() and moduleUnblockClient(). */
 int moduleUnblockClientByHandle(RedisModuleBlockedClient *bc, void *privdata) {
-    pthread_mutex_lock(&moduleUnblockedClientsMutex);
+    // pthread_mutex_lock(&moduleUnblockedClientsMutex);
     if (!bc->blocked_on_keys) bc->privdata = privdata;
     bc->unblocked = 1;
     listAddNodeTail(moduleUnblockedClients,bc);
-    if (write(server.module_blocked_pipe[1],"A",1) != 1) {
-        /* Ignore the error, this is best-effort. */
-    }
-    pthread_mutex_unlock(&moduleUnblockedClientsMutex);
+    /*if (write(server.module_blocked_pipe[1],"A",1) != 1) {
+    }*/
+    // pthread_mutex_unlock(&moduleUnblockedClientsMutex);
     return REDISMODULE_OK;
 }
 
@@ -6500,17 +6499,17 @@ void moduleHandleBlockedClients(void) {
     listNode *ln;
     RedisModuleBlockedClient *bc;
 
-    pthread_mutex_lock(&moduleUnblockedClientsMutex);
+    //pthread_mutex_lock(&moduleUnblockedClientsMutex);
     /* Here we unblock all the pending clients blocked in modules operations
      * so we can read every pending "awake byte" in the pipe. */
     char buf[1];
-    while (read(server.module_blocked_pipe[0],buf,1) == 1);
+    //while (read(server.module_blocked_pipe[0],buf,1) == 1);
     while (listLength(moduleUnblockedClients)) {
         ln = listFirst(moduleUnblockedClients);
         bc = ln->value;
         client *c = bc->client;
         listDelNode(moduleUnblockedClients,ln);
-        pthread_mutex_unlock(&moduleUnblockedClientsMutex);
+        //pthread_mutex_unlock(&moduleUnblockedClientsMutex);
 
         /* Release the lock during the loop, as long as we don't
          * touch the shared list. */
@@ -6586,9 +6585,9 @@ void moduleHandleBlockedClients(void) {
         zfree(bc);
 
         /* Lock again before to iterate the loop. */
-        pthread_mutex_lock(&moduleUnblockedClientsMutex);
+        //pthread_mutex_lock(&moduleUnblockedClientsMutex);
     }
-    pthread_mutex_unlock(&moduleUnblockedClientsMutex);
+    //pthread_mutex_unlock(&moduleUnblockedClientsMutex);
 }
 
 /* Check if the specified client can be safely timed out using
@@ -10379,11 +10378,17 @@ int RM_GetDbIdFromDefragCtx(RedisModuleDefragCtx *ctx) {
     return ctx->dbid;
 }
 
+void *RM_GetAe()
+{
+    return server.el;
+}
+
 /* Register all the APIs we export. Keep this function at the end of the
  * file so that's easy to seek it to add new entries. */
 void moduleRegisterCoreAPI(void) {
     server.moduleapi = dictCreate(&moduleAPIDictType);
     server.sharedapi = dictCreate(&moduleAPIDictType);
+    REGISTER_API(GetAe);
     REGISTER_API(Alloc);
     REGISTER_API(Calloc);
     REGISTER_API(Realloc);

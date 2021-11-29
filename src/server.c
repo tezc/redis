@@ -3389,6 +3389,8 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     if (listLength(server.clients_waiting_acks))
         processClientsWaitingReplicas();
 
+    moduleFireServerEvent(REDISMODULE_EVENT_BEFORE_SLEEP, 0, NULL);
+
     /* Check if there are clients unblocked by modules that implement
      * blocking commands. */
     if (moduleCount()) moduleHandleBlockedClients();

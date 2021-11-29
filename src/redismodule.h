@@ -258,7 +258,8 @@ typedef uint64_t RedisModuleTimerID;
 #define REDISMODULE_EVENT_REPL_BACKUP 12 /* Deprecated since Redis 7.0, not used anymore. */
 #define REDISMODULE_EVENT_FORK_CHILD 13
 #define REDISMODULE_EVENT_REPL_ASYNC_LOAD 14
-#define _REDISMODULE_EVENT_NEXT 15 /* Next event flag, should be updated if a new event added. */
+#define REDISMODULE_EVENT_BEFORE_SLEEP 15
+#define _REDISMODULE_EVENT_NEXT 16 /* Next event flag, should be updated if a new event added. */
 
 typedef struct RedisModuleEvent {
     uint64_t id;        /* REDISMODULE_EVENT_... defines. */
@@ -331,7 +332,12 @@ static const RedisModuleEvent
     RedisModuleEvent_ForkChild = {
         REDISMODULE_EVENT_FORK_CHILD,
         1
+    },
+    RedisModuleEvent_BeforeSleep = {
+        REDISMODULE_EVENT_BEFORE_SLEEP,
+        1
     };
+
 
 /* Those are values that are used for the 'subevent' callback argument. */
 #define REDISMODULE_SUBEVENT_PERSISTENCE_RDB_START 0
@@ -855,6 +861,7 @@ REDISMODULE_API int (*RedisModule_SetCommandKeySpecBeginSearchIndex)(RedisModule
 REDISMODULE_API int (*RedisModule_SetCommandKeySpecBeginSearchKeyword)(RedisModuleCtx *ctx, const char *name, int spec_id, const char *keyword, int startfrom) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_SetCommandKeySpecFindKeysRange)(RedisModuleCtx *ctx, const char *name, int spec_id, int lastkey, int keystep, int limit) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_SetCommandKeySpecFindKeysKeynum)(RedisModuleCtx *ctx, const char *name, int spec_id, int keynumidx, int firstkey, int keystep) REDISMODULE_ATTR;
+REDISMODULE_API void * (*RedisModule_GetAe)() REDISMODULE_ATTR;
 
 /* Experimental APIs */
 #ifdef REDISMODULE_EXPERIMENTAL_API
@@ -939,6 +946,7 @@ static int RedisModule_Init(RedisModuleCtx *ctx, const char *name, int ver, int 
 static int RedisModule_Init(RedisModuleCtx *ctx, const char *name, int ver, int apiver) {
     void *getapifuncptr = ((void**)ctx)[0];
     RedisModule_GetApi = (int (*)(const char *, void *)) (unsigned long)getapifuncptr;
+    REDISMODULE_GET_API(GetAe);
     REDISMODULE_GET_API(Alloc);
     REDISMODULE_GET_API(Calloc);
     REDISMODULE_GET_API(Free);
