@@ -524,7 +524,7 @@ jobs:
       uses: vmactions/freebsd-vm@v0.1.4
       with:
         usesh: true
-        sync: rsync
+        sync: sshfs
         prepare: pkg install -y bash gmake lang/tcl86 lang/tclx
         run: >
           gmake || exit 1 ;
