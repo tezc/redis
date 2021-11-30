@@ -984,6 +984,7 @@ typedef struct {
 } clientMemUsageBucket;
 
 typedef struct client {
+    void *reply_client;
     uint64_t id;            /* Client incremental unique ID. */
     connection *conn;
     int resp;               /* RESP protocol version. Can be 2 or 3. */

@@ -672,7 +672,7 @@ void moduleFreeContext(RedisModuleCtx *ctx) {
             "calls.",
             ctx->module->name);
     }
-    if (ctx->flags & REDISMODULE_CTX_THREAD_SAFE) freeClient(ctx->client);
+    //if (ctx->flags & REDISMODULE_CTX_THREAD_SAFE) freeClient(ctx->client);
 }
 
 /* This Redis command binds the normal Redis command invocation with commands
@@ -6233,7 +6233,14 @@ RedisModuleBlockedClient *moduleBlockClient(RedisModuleCtx *ctx, RedisModuleCmdF
     bc->disconnect_callback = NULL; /* Set by RM_SetDisconnectCallback() */
     bc->free_privdata = free_privdata;
     bc->privdata = privdata;
-    bc->reply_client = createClient(NULL);
+
+    if (!c->reply_client) {
+        c->reply_client = createClient(NULL);
+    }
+
+    resetClient(c->reply_client);
+
+    bc->reply_client = c->reply_client;
     if (bc->client)
         bc->reply_client->resp = bc->client->resp;
     bc->reply_client->flags |= CLIENT_MODULE;
@@ -6560,7 +6567,7 @@ void moduleHandleBlockedClients(void) {
          * We need to glue such replies to the client output buffer and
          * free the temporary client we just used for the replies. */
         if (c) AddReplyFromClient(c, bc->reply_client);
-        freeClient(bc->reply_client);
+        //freeClient(bc->reply_client);
 
         if (c != NULL) {
             /* Before unblocking the client, set the disconnect callback
@@ -6706,7 +6713,7 @@ RedisModuleCtx *RM_GetThreadSafeContext(RedisModuleBlockedClient *bc) {
      * access it safely from another thread, so we create a fake client here
      * in order to keep things like the currently selected database and similar
      * things. */
-    ctx->client = createClient(NULL);
+    ctx->client = bc->reply_client; //createClient(NULL);
     if (bc) {
         selectDb(ctx->client,bc->dbid);
         if (bc->client) {

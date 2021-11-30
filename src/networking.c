@@ -139,6 +139,7 @@ client *createClient(connection *conn) {
     c->conn = conn;
     c->name = NULL;
     c->bufpos = 0;
+    c->reply_client = NULL;
     c->buf_usable_size = zmalloc_usable_size(c)-offsetof(client,buf);
     c->ref_repl_buf_node = NULL;
     c->ref_block_pos = 0;
@@ -1475,6 +1476,9 @@ void freeClient(client *c) {
      * and finally release the client structure itself. */
     if (c->name) decrRefCount(c->name);
     freeClientMultiState(c);
+    if (c->reply_client) {
+        freeClient(c->reply_client);
+    }
     sdsfree(c->peerid);
     sdsfree(c->sockname);
     sdsfree(c->slave_addr);
