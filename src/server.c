@@ -3342,6 +3342,8 @@ extern int ProcessingEventsWhileBlocked;
 void beforeSleep(struct aeEventLoop *eventLoop) {
     UNUSED(eventLoop);
 
+    atomicSetWithSync(server.awake, 0);
+
     size_t zmalloc_used = zmalloc_used_memory();
     if (zmalloc_used > server.stat_peak_memory)
         server.stat_peak_memory = zmalloc_used;
@@ -3469,6 +3471,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
 void afterSleep(struct aeEventLoop *eventLoop) {
     UNUSED(eventLoop);
 
+    atomicSetWithSync(server.awake, 1);
     /* Do NOT add anything above moduleAcquireGIL !!! */
 
     /* Acquire the modules GIL so that their threads won't touch anything. */

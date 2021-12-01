@@ -6404,13 +6404,21 @@ void RM_SignalKeyAsReady(RedisModuleCtx *ctx, RedisModuleString *key) {
 
 /* Implements RM_UnblockClient() and moduleUnblockClient(). */
 int moduleUnblockClientByHandle(RedisModuleBlockedClient *bc, void *privdata) {
-    // pthread_mutex_lock(&moduleUnblockedClientsMutex);
+    pthread_mutex_lock(&moduleUnblockedClientsMutex);
     if (!bc->blocked_on_keys) bc->privdata = privdata;
     bc->unblocked = 1;
+    int awake;
+
+    if (listLength(moduleUnblockedClients) == 0) {
+        atomicGetWithSync(server.awake, awake);
+        if (!awake) {
+            if (write(server.module_blocked_pipe[1], "A", 1) != 1) {
+                /* Ignore the error, this is best-effort. */
+            }
+        }
+    }
     listAddNodeTail(moduleUnblockedClients,bc);
-    /*if (write(server.module_blocked_pipe[1],"A",1) != 1) {
-    }*/
-    // pthread_mutex_unlock(&moduleUnblockedClientsMutex);
+    pthread_mutex_unlock(&moduleUnblockedClientsMutex);
     return REDISMODULE_OK;
 }
 
@@ -6499,17 +6507,20 @@ void moduleHandleBlockedClients(void) {
     listNode *ln;
     RedisModuleBlockedClient *bc;
 
-    //pthread_mutex_lock(&moduleUnblockedClientsMutex);
+    pthread_mutex_lock(&moduleUnblockedClientsMutex);
     /* Here we unblock all the pending clients blocked in modules operations
      * so we can read every pending "awake byte" in the pipe. */
     char buf[1];
-    //while (read(server.module_blocked_pipe[0],buf,1) == 1);
+    if (listLength(moduleUnblockedClients) > 0) {
+        while (read(server.module_blocked_pipe[0], buf, 1) == 1);
+    }
+
     while (listLength(moduleUnblockedClients)) {
         ln = listFirst(moduleUnblockedClients);
         bc = ln->value;
         client *c = bc->client;
         listDelNode(moduleUnblockedClients,ln);
-        //pthread_mutex_unlock(&moduleUnblockedClientsMutex);
+        pthread_mutex_unlock(&moduleUnblockedClientsMutex);
 
         /* Release the lock during the loop, as long as we don't
          * touch the shared list. */
@@ -6585,9 +6596,9 @@ void moduleHandleBlockedClients(void) {
         zfree(bc);
 
         /* Lock again before to iterate the loop. */
-        //pthread_mutex_lock(&moduleUnblockedClientsMutex);
+        pthread_mutex_lock(&moduleUnblockedClientsMutex);
     }
-    //pthread_mutex_unlock(&moduleUnblockedClientsMutex);
+    pthread_mutex_unlock(&moduleUnblockedClientsMutex);
 }
 
 /* Check if the specified client can be safely timed out using
