@@ -4151,6 +4151,7 @@ void initServer(void) {
     server.fixed_time_expire = 0;
     server.in_nested_call = 0;
     server.clients = listCreate();
+    server.cached_clients = listCreate();
     server.clients_index = raxNew();
     server.clients_to_close = listCreate();
     server.slaves = listCreate();

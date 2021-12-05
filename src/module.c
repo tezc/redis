@@ -672,7 +672,20 @@ void moduleFreeContext(RedisModuleCtx *ctx) {
             "calls.",
             ctx->module->name);
     }
-    if (ctx->flags & REDISMODULE_CTX_THREAD_SAFE) freeClient(ctx->client);
+    if (ctx->flags & REDISMODULE_CTX_THREAD_SAFE) {
+        if (listLength(server.cached_clients) > 1000) {
+            freeClient(ctx->client);
+        } else {
+            discardTransaction(ctx->client);
+            pubsubUnsubscribeAllChannels(ctx->client,0);
+            pubsubUnsubscribeAllPatterns(ctx->client,0);
+            resetClient(ctx->client); /* frees the contents of argv */
+            zfree(ctx->client->argv);
+            ctx->client->argv = NULL;
+            ctx->client->resp = 2;
+            listAddNodeHead(server.cached_clients, ctx->client);
+        }
+    }
 }
 
 /* This Redis command binds the normal Redis command invocation with commands
@@ -6233,7 +6246,17 @@ RedisModuleBlockedClient *moduleBlockClient(RedisModuleCtx *ctx, RedisModuleCmdF
     bc->disconnect_callback = NULL; /* Set by RM_SetDisconnectCallback() */
     bc->free_privdata = free_privdata;
     bc->privdata = privdata;
-    bc->reply_client = createClient(NULL);
+
+    client *reply_client;
+    if (listLength(server.cached_clients) > 0) {
+        listNode *n = listFirst(server.cached_clients);
+        reply_client = n->value;
+        listDelNode(server.cached_clients, n);
+    } else {
+        reply_client = createClient(NULL);
+    }
+
+    bc->reply_client = reply_client;
     if (bc->client)
         bc->reply_client->resp = bc->client->resp;
     bc->reply_client->flags |= CLIENT_MODULE;
@@ -6570,7 +6593,18 @@ void moduleHandleBlockedClients(void) {
          * We need to glue such replies to the client output buffer and
          * free the temporary client we just used for the replies. */
         if (c) AddReplyFromClient(c, bc->reply_client);
-        freeClient(bc->reply_client);
+        if (listLength(server.cached_clients) > 1000) {
+            freeClient(bc->reply_client);
+        } else {
+            discardTransaction(bc->reply_client);
+            pubsubUnsubscribeAllChannels(bc->reply_client,0);
+            pubsubUnsubscribeAllPatterns(bc->reply_client,0);
+            resetClient(bc->reply_client); /* frees the contents of argv */
+            zfree(bc->reply_client->argv);
+            bc->reply_client->argv = NULL;
+            bc->reply_client->resp = 2;
+            listAddNodeHead(server.cached_clients, bc->reply_client);
+        }
 
         if (c != NULL) {
             /* Before unblocking the client, set the disconnect callback
@@ -6716,7 +6750,17 @@ RedisModuleCtx *RM_GetThreadSafeContext(RedisModuleBlockedClient *bc) {
      * access it safely from another thread, so we create a fake client here
      * in order to keep things like the currently selected database and similar
      * things. */
-    ctx->client = createClient(NULL);
+
+    client *reply_client;
+    if (listLength(server.cached_clients) > 0) {
+        listNode *n = listFirst(server.cached_clients);
+        reply_client = n->value;
+        listDelNode(server.cached_clients, n);
+    } else {
+        reply_client = createClient(NULL);
+    }
+
+    ctx->client = reply_client;
     if (bc) {
         selectDb(ctx->client,bc->dbid);
         if (bc->client) {
