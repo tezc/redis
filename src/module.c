@@ -683,6 +683,7 @@ void moduleFreeContext(RedisModuleCtx *ctx) {
             zfree(ctx->client->argv);
             ctx->client->argv = NULL;
             ctx->client->resp = 2;
+            ctx->client->bufpos = 0;
             listAddNodeHead(server.cached_clients, ctx->client);
         }
     }
@@ -6603,6 +6604,7 @@ void moduleHandleBlockedClients(void) {
             zfree(bc->reply_client->argv);
             bc->reply_client->argv = NULL;
             bc->reply_client->resp = 2;
+            bc->reply_client->bufpos = 0;
             listAddNodeHead(server.cached_clients, bc->reply_client);
         }
 
