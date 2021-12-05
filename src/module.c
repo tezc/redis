@@ -265,6 +265,7 @@ typedef struct RedisModuleBlockedClient {
 } RedisModuleBlockedClient;
 
 static pthread_mutex_t moduleUnblockedClientsMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t cacheMutex = PTHREAD_MUTEX_INITIALIZER;
 static list *moduleUnblockedClients;
 
 /* We need a mutex that is unlocked / relocked in beforeSleep() in order to
@@ -673,6 +674,7 @@ void moduleFreeContext(RedisModuleCtx *ctx) {
             ctx->module->name);
     }
     if (ctx->flags & REDISMODULE_CTX_THREAD_SAFE) {
+        pthread_mutex_lock(&cacheMutex);
         if (listLength(server.cached_clients) > 1000) {
             freeClient(ctx->client);
         } else {
@@ -686,6 +688,7 @@ void moduleFreeContext(RedisModuleCtx *ctx) {
             ctx->client->bufpos = 0;
             listAddNodeHead(server.cached_clients, ctx->client);
         }
+        pthread_mutex_unlock(&cacheMutex);
     }
 }
 
@@ -6249,6 +6252,7 @@ RedisModuleBlockedClient *moduleBlockClient(RedisModuleCtx *ctx, RedisModuleCmdF
     bc->privdata = privdata;
 
     client *reply_client;
+    pthread_mutex_lock(&cacheMutex);
     if (listLength(server.cached_clients) > 0) {
         listNode *n = listFirst(server.cached_clients);
         reply_client = n->value;
@@ -6256,6 +6260,7 @@ RedisModuleBlockedClient *moduleBlockClient(RedisModuleCtx *ctx, RedisModuleCmdF
     } else {
         reply_client = createClient(NULL);
     }
+    pthread_mutex_unlock(&cacheMutex);
 
     bc->reply_client = reply_client;
     if (bc->client)
@@ -6594,6 +6599,7 @@ void moduleHandleBlockedClients(void) {
          * We need to glue such replies to the client output buffer and
          * free the temporary client we just used for the replies. */
         if (c) AddReplyFromClient(c, bc->reply_client);
+        pthread_mutex_lock(&cacheMutex);
         if (listLength(server.cached_clients) > 1000) {
             freeClient(bc->reply_client);
         } else {
@@ -6607,6 +6613,7 @@ void moduleHandleBlockedClients(void) {
             bc->reply_client->bufpos = 0;
             listAddNodeHead(server.cached_clients, bc->reply_client);
         }
+        pthread_mutex_unlock(&cacheMutex);
 
         if (c != NULL) {
             /* Before unblocking the client, set the disconnect callback
@@ -6753,6 +6760,7 @@ RedisModuleCtx *RM_GetThreadSafeContext(RedisModuleBlockedClient *bc) {
      * in order to keep things like the currently selected database and similar
      * things. */
 
+    pthread_mutex_lock(&cacheMutex);
     client *reply_client;
     if (listLength(server.cached_clients) > 0) {
         listNode *n = listFirst(server.cached_clients);
@@ -6761,6 +6769,7 @@ RedisModuleCtx *RM_GetThreadSafeContext(RedisModuleBlockedClient *bc) {
     } else {
         reply_client = createClient(NULL);
     }
+    pthread_mutex_unlock(&cacheMutex);
 
     ctx->client = reply_client;
     if (bc) {
