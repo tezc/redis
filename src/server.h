@@ -1366,6 +1366,7 @@ struct redisServer {
     int sofd;                   /* Unix socket file descriptor */
     redisAtomic int awake;
     socketFds cfd;              /* Cluster bus listening socket */
+    list *cached_clients;
     list *clients;              /* List of active clients */
     list *clients_to_close;     /* Clients to close asynchronously */
     list *clients_pending_write; /* There is to write or install handler. */
@@ -2070,6 +2071,8 @@ void redisSetCpuAffinity(const char *cpulist);
 
 /* networking.c -- Networking and Client related operations */
 client *createClient(connection *conn);
+void initClient(client *c, connection *conn);
+void termClient(client *c);
 void freeClient(client *c);
 void freeClientAsync(client *c);
 int beforeNextClient(client *c);
