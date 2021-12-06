@@ -267,6 +267,9 @@ typedef struct RedisModuleBlockedClient {
 static pthread_mutex_t moduleUnblockedClientsMutex = PTHREAD_MUTEX_INITIALIZER;
 static list *moduleUnblockedClients;
 
+static pthread_mutex_t moduleTempClientsMutex = PTHREAD_MUTEX_INITIALIZER;
+static list *moduleTempClients;
+
 /* We need a mutex that is unlocked / relocked in beforeSleep() in order to
  * allow thread safe contexts to execute commands at a safe moment. */
 static pthread_mutex_t moduleGIL = PTHREAD_MUTEX_INITIALIZER;
@@ -504,6 +507,44 @@ void *RM_PoolAlloc(RedisModuleCtx *ctx, size_t bytes) {
  * Helpers for modules API implementation
  * -------------------------------------------------------------------------- */
 
+client *moduleAllocTempClient()
+{
+    client *c;
+
+    pthread_mutex_lock(&moduleTempClientsMutex);
+    if (listLength(moduleTempClients) > 0) {
+        listNode *n = listFirst(moduleTempClients);
+        c = n->value;
+        listDelNode(moduleTempClients, n);
+    } else {
+        c = createClient(NULL);
+    }
+    pthread_mutex_unlock(&moduleTempClientsMutex);
+
+    return c;
+}
+
+void moduleReleaseTempClient(client *c)
+{
+    pthread_mutex_lock(&moduleTempClientsMutex);
+    if (listLength(moduleTempClients) > 2048) {
+        freeClient(c);
+    } else {
+        discardTransaction(c);
+        pubsubUnsubscribeAllChannels(c,0);
+        pubsubUnsubscribeAllPatterns(c,0);
+        resetClient(c); /* frees the contents of argv */
+        zfree(c->argv);
+        c->argv = NULL;
+        c->resp = 2;
+        c->bufpos = 0;
+        listAddNodeHead(moduleTempClients, c);
+    }
+    pthread_mutex_unlock(&moduleTempClientsMutex);
+}
+
+
+
 /* Create an empty key of the specified type. `key` must point to a key object
  * opened for writing where the `.value` member is set to NULL because the
  * key was found to be non existing.
@@ -672,7 +713,9 @@ void moduleFreeContext(RedisModuleCtx *ctx) {
             "calls.",
             ctx->module->name);
     }
-    if (ctx->flags & REDISMODULE_CTX_THREAD_SAFE) freeClient(ctx->client);
+    if (ctx->flags & REDISMODULE_CTX_THREAD_SAFE) {
+        moduleReleaseTempClient(ctx->client);
+    }
 }
 
 /* This Redis command binds the normal Redis command invocation with commands
@@ -6234,7 +6277,7 @@ RedisModuleBlockedClient *moduleBlockClient(RedisModuleCtx *ctx, RedisModuleCmdF
     bc->disconnect_callback = NULL; /* Set by RM_SetDisconnectCallback() */
     bc->free_privdata = free_privdata;
     bc->privdata = privdata;
-    bc->reply_client = createClient(NULL);
+    bc->reply_client = moduleAllocTempClient();
     if (bc->client)
         bc->reply_client->resp = bc->client->resp;
     bc->reply_client->flags |= CLIENT_MODULE;
@@ -6561,7 +6604,7 @@ void moduleHandleBlockedClients(void) {
          * We need to glue such replies to the client output buffer and
          * free the temporary client we just used for the replies. */
         if (c) AddReplyFromClient(c, bc->reply_client);
-        freeClient(bc->reply_client);
+        moduleReleaseTempClient(bc->reply_client);
 
         if (c != NULL) {
             /* Before unblocking the client, set the disconnect callback
@@ -6707,7 +6750,7 @@ RedisModuleCtx *RM_GetThreadSafeContext(RedisModuleBlockedClient *bc) {
      * access it safely from another thread, so we create a fake client here
      * in order to keep things like the currently selected database and similar
      * things. */
-    ctx->client = createClient(NULL);
+    ctx->client = moduleAllocTempClient();
     if (bc) {
         selectDb(ctx->client,bc->dbid);
         if (bc->client) {
