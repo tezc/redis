@@ -9578,6 +9578,7 @@ void moduleInitModulesSystemLast(void) {
 
 void moduleInitModulesSystem(void) {
     moduleUnblockedClients = listCreate();
+    moduleTempClients = listCreate();
     server.loadmodule_queue = listCreate();
     modules = dictCreate(&modulesDictType);
 
