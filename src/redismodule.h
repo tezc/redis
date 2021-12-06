@@ -866,7 +866,7 @@ REDISMODULE_API int (*RedisModule_SetCommandKeySpecBeginSearchIndex)(RedisModule
 REDISMODULE_API int (*RedisModule_SetCommandKeySpecBeginSearchKeyword)(RedisModuleCtx *ctx, const char *name, int spec_id, const char *keyword, int startfrom) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_SetCommandKeySpecFindKeysRange)(RedisModuleCtx *ctx, const char *name, int spec_id, int lastkey, int keystep, int limit) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_SetCommandKeySpecFindKeysKeynum)(RedisModuleCtx *ctx, const char *name, int spec_id, int keynumidx, int firstkey, int keystep) REDISMODULE_ATTR;
-REDISMODULE_API int (*RedisModule_CreateFileEvent)(int fd, int mask, RedisModuleFileCallback proc, void *clientData) REDISMODULE_ATTR;
+REDISMODULE_API int (*RedisModule_CreateFileEvent)(int fd, int mask, RedisModuleFileEventCallback proc, void *clientData) REDISMODULE_ATTR;
 REDISMODULE_API void (*RedisModule_DeleteFileEvent)(int fd, int mask) REDISMODULE_ATTR;
 
 /* Experimental APIs */
