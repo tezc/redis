@@ -533,6 +533,7 @@ void moduleReleaseTempClient(client *c)
         discardTransaction(c);
         pubsubUnsubscribeAllChannels(c,0);
         pubsubUnsubscribeAllPatterns(c,0);
+        listEmpty(c->reply);
         resetClient(c); /* frees the contents of argv */
         zfree(c->argv);
         c->argv = NULL;
