@@ -1363,6 +1363,7 @@ struct redisServer {
     int module_blocked_pipe[2]; /* Pipe used to awake the event loop if a
                                    client blocked on a module command needs
                                    to be processed. */
+    redisAtomic int module_blocked_clients_processed;
     pid_t child_pid;            /* PID of current child */
     int child_type;             /* Type of current child */
     client *module_client;      /* "Fake" client to call Redis from modules */

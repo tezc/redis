@@ -3441,6 +3441,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * blocking commands. */
     if (moduleCount()) {
         moduleFireServerEvent(REDISMODULE_EVENT_BEFORE_SLEEP, 0, NULL);
+        atomicSetWithSync(server.module_blocked_clients_processed, 1);
         moduleHandleBlockedClients();
     }
 
@@ -3523,6 +3524,8 @@ void afterSleep(struct aeEventLoop *eventLoop) {
     /* Acquire the modules GIL so that their threads won't touch anything. */
     if (!ProcessingEventsWhileBlocked) {
         if (moduleCount()) {
+            atomicSetWithSync(server.module_blocked_clients_processed, 0);
+
             mstime_t latency;
             latencyStartMonitor(latency);
 
