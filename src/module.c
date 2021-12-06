@@ -10423,6 +10423,21 @@ int RM_GetDbIdFromDefragCtx(RedisModuleDefragCtx *ctx) {
     return ctx->dbid;
 }
 
+int RM_CreateFileEvent(int fd, int mask, RedisModuleFileEventCallback proc, void *clientData)
+{
+    int ret = aeCreateFileEvent(server.el, fd, mask, (aeFileProc*)proc, clientData);
+    if (ret != AE_OK) {
+        return REDISMODULE_ERR;
+    }
+
+    return REDISMODULE_OK;
+}
+
+void RM_DeleteFileEvent(int fd, int mask)
+{
+    aeDeleteFileEvent(server.el, fd, mask);
+}
+
 /* Register all the APIs we export. Keep this function at the end of the
  * file so that's easy to seek it to add new entries. */
 void moduleRegisterCoreAPI(void) {
@@ -10496,6 +10511,8 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(CallReplyLength);
     REGISTER_API(CallReplyArrayElement);
     REGISTER_API(CallReplyStringPtr);
+    REGISTER_API(CreateFileEvent);
+    REGISTER_API(DeleteFileEvent);
     REGISTER_API(CreateStringFromCallReply);
     REGISTER_API(CreateString);
     REGISTER_API(CreateStringFromLongLong);

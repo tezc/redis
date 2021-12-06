@@ -240,6 +240,12 @@ typedef uint64_t RedisModuleTimerID;
  * are modified from the user's sperspective, to invalidate WATCH. */
 #define REDISMODULE_OPTION_NO_IMPLICIT_SIGNAL_MODIFIED (1<<1)
 
+#define REDISMODULE_FILE_EVENT_NONE 0
+#define REDISMODULE_FILE_EVENT_READABLE 1
+#define REDISMODULE_FILE_EVENT_WRITABLE 2
+
+typedef void (*RedisModuleFileEventCallback)(void* unused, int fd, void *clientData, int mask);
+
 /* Server events definitions.
  * Those flags should not be used directly by the module, instead
  * the module should use RedisModuleEvent_* variables */
@@ -860,6 +866,8 @@ REDISMODULE_API int (*RedisModule_SetCommandKeySpecBeginSearchIndex)(RedisModule
 REDISMODULE_API int (*RedisModule_SetCommandKeySpecBeginSearchKeyword)(RedisModuleCtx *ctx, const char *name, int spec_id, const char *keyword, int startfrom) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_SetCommandKeySpecFindKeysRange)(RedisModuleCtx *ctx, const char *name, int spec_id, int lastkey, int keystep, int limit) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_SetCommandKeySpecFindKeysKeynum)(RedisModuleCtx *ctx, const char *name, int spec_id, int keynumidx, int firstkey, int keystep) REDISMODULE_ATTR;
+REDISMODULE_API int (*RedisModule_CreateFileEvent)(int fd, int mask, RedisModuleFileCallback proc, void *clientData) REDISMODULE_ATTR;
+REDISMODULE_API void (*RedisModule_DeleteFileEvent)(int fd, int mask) REDISMODULE_ATTR;
 
 /* Experimental APIs */
 #ifdef REDISMODULE_EXPERIMENTAL_API
@@ -1013,6 +1021,8 @@ static int RedisModule_Init(RedisModuleCtx *ctx, const char *name, int ver, int 
     REDISMODULE_GET_API(CallReplyLength);
     REDISMODULE_GET_API(CallReplyArrayElement);
     REDISMODULE_GET_API(CallReplyStringPtr);
+    REDISMODULE_GET_API(CreateFileEvent);
+    REDISMODULE_GET_API(DeleteFileEvent);
     REDISMODULE_GET_API(CreateStringFromCallReply);
     REDISMODULE_GET_API(CreateString);
     REDISMODULE_GET_API(CreateStringFromLongLong);
