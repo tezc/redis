@@ -258,7 +258,8 @@ typedef uint64_t RedisModuleTimerID;
 #define REDISMODULE_EVENT_REPL_BACKUP 12 /* Deprecated since Redis 7.0, not used anymore. */
 #define REDISMODULE_EVENT_FORK_CHILD 13
 #define REDISMODULE_EVENT_REPL_ASYNC_LOAD 14
-#define _REDISMODULE_EVENT_NEXT 15 /* Next event flag, should be updated if a new event added. */
+#define REDISMODULE_EVENT_BEFORE_SLEEP 15
+#define _REDISMODULE_EVENT_NEXT 16 /* Next event flag, should be updated if a new event added. */
 
 typedef struct RedisModuleEvent {
     uint64_t id;        /* REDISMODULE_EVENT_... defines. */
@@ -331,7 +332,11 @@ static const RedisModuleEvent
     RedisModuleEvent_ForkChild = {
         REDISMODULE_EVENT_FORK_CHILD,
         1
-    };
+    },
+    RedisModuleEvent_BeforeSleep = {
+        REDISMODULE_EVENT_BEFORE_SLEEP,
+        1
+};
 
 /* Those are values that are used for the 'subevent' callback argument. */
 #define REDISMODULE_SUBEVENT_PERSISTENCE_RDB_START 0
