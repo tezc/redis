@@ -268,7 +268,8 @@ static pthread_mutex_t moduleUnblockedClientsMutex = PTHREAD_MUTEX_INITIALIZER;
 static list *moduleUnblockedClients;
 
 static pthread_mutex_t moduleTempClientsMutex = PTHREAD_MUTEX_INITIALIZER;
-static list *moduleTempClients;
+static client *moduleTempClients[2048];
+static size_t moduleTempClientCount;
 
 /* We need a mutex that is unlocked / relocked in beforeSleep() in order to
  * allow thread safe contexts to execute commands at a safe moment. */
@@ -512,10 +513,8 @@ client *moduleAllocTempClient()
     client *c;
 
     pthread_mutex_lock(&moduleTempClientsMutex);
-    if (listLength(moduleTempClients) > 0) {
-        listNode *n = listFirst(moduleTempClients);
-        c = n->value;
-        listDelNode(moduleTempClients, n);
+    if (moduleTempClientCount > 0) {
+        c = moduleTempClients[--moduleTempClientCount];
     } else {
         c = createClient(NULL);
     }
@@ -526,20 +525,17 @@ client *moduleAllocTempClient()
 
 void moduleReleaseTempClient(client *c)
 {
+    const size_t cap = sizeof(moduleTempClients) / sizeof(moduleTempClients[0]);
+
     pthread_mutex_lock(&moduleTempClientsMutex);
-    if (listLength(moduleTempClients) > 2048) {
+
+    if (moduleTempClientCount >= cap) {
         freeClient(c);
     } else {
-        discardTransaction(c);
-        pubsubUnsubscribeAllChannels(c,0);
-        pubsubUnsubscribeAllPatterns(c,0);
         listEmpty(c->reply);
         resetClient(c); /* frees the contents of argv */
-        zfree(c->argv);
-        c->argv = NULL;
-        c->resp = 2;
         c->bufpos = 0;
-        listAddNodeHead(moduleTempClients, c);
+        moduleTempClients[moduleTempClientCount++] = c;
     }
     pthread_mutex_unlock(&moduleTempClientsMutex);
 }
@@ -9588,7 +9584,6 @@ void moduleInitModulesSystemLast(void) {
 
 void moduleInitModulesSystem(void) {
     moduleUnblockedClients = listCreate();
-    moduleTempClients = listCreate();
     server.loadmodule_queue = listCreate();
     modules = dictCreate(&modulesDictType);
 
