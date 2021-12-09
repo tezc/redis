@@ -533,6 +533,7 @@ void moduleReleaseTempClient(client *c)
         freeClient(c);
     } else {
         listEmpty(c->reply);
+        c->reply_bytes = 0;
         resetClient(c); /* frees the contents of argv */
         c->bufpos = 0;
         moduleTempClients[moduleTempClientCount++] = c;
