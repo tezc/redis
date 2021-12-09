@@ -3439,7 +3439,11 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
 
     /* Check if there are clients unblocked by modules that implement
      * blocking commands. */
-    if (moduleCount()) moduleHandleBlockedClients();
+    if (moduleCount()) {
+        moduleFireServerEvent(REDISMODULE_EVENT_BEFORE_SLEEP, 0, NULL);
+        atomicSetWithSync(server.module_blocked_clients_processed, 1);
+        moduleHandleBlockedClients();
+    }
 
     /* Try to process pending commands for clients that were just unblocked. */
     if (listLength(server.unblocked_clients))
@@ -3520,6 +3524,8 @@ void afterSleep(struct aeEventLoop *eventLoop) {
     /* Acquire the modules GIL so that their threads won't touch anything. */
     if (!ProcessingEventsWhileBlocked) {
         if (moduleCount()) {
+            atomicSetWithSync(server.module_blocked_clients_processed, 0);
+
             mstime_t latency;
             latencyStartMonitor(latency);
 
