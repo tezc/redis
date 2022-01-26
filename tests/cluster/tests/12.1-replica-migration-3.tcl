@@ -27,6 +27,12 @@ test "Each master should have at least two replicas attached" {
     }
 }
 
+test "Set cluster-node-timeout 10000" {
+    foreach_redis_id id {
+        R $id CONFIG SET cluster-node-timeout 10000
+    }
+}
+
 test "Set allow-replica-migration no" {
     foreach_redis_id id {
         R $id CONFIG SET cluster-allow-replica-migration no
@@ -69,3 +75,9 @@ test "Each master should have at least two replicas attached" {
     }
 }
 
+
+test "Set cluster-node-timeout 3000" {
+    foreach_redis_id id {
+        R $id CONFIG SET cluster-node-timeout 3000
+    }
+}
