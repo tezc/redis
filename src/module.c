@@ -11409,8 +11409,13 @@ int getModuleBoolConfig(ModuleConfig *module_config) {
 }
 
 sds getModuleStringConfig(ModuleConfig *module_config) {
+    sds ret = NULL;
     RedisModuleString *val = module_config->get_fn.get_string(module_config->name, module_config->privdata);
-    return val ? sdsdup(val->ptr) : NULL;
+    if (val) {
+        ret = sdsdup(val->ptr);
+        decrRefCount(val);
+    }
+    return ret;
 }
 
 int getModuleEnumConfig(ModuleConfig *module_config) {

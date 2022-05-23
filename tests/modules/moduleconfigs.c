@@ -1,10 +1,12 @@
 #include "redismodule.h"
 #include <strings.h>
+#include <string.h>
 int mutable_bool_val;
 int immutable_bool_val;
 long long longval;
 long long memval;
 RedisModuleString *strval = NULL;
+char *c_strval = NULL;
 int enumval;
 int flagsval;
 
@@ -36,22 +38,33 @@ int setNumericConfigCommand(const char *name, long long new, void *privdata, Red
 }
 
 RedisModuleString *getStringConfigCommand(const char *name, void *privdata) {
-    REDISMODULE_NOT_USED(name);
     REDISMODULE_NOT_USED(privdata);
-    return strval;
+    if (strcasecmp(name, "string") == 0) {
+        if (strval) RedisModule_RetainString(NULL, strval);
+        return strval;
+    } else if (strcasecmp(name, "c_string") == 0) {
+        if (c_strval) return RedisModule_CreateString(NULL, c_strval, strlen(c_strval));
+        return NULL;
+    }
+    return NULL;
 }
 int setStringConfigCommand(const char *name, RedisModuleString *new, void *privdata, RedisModuleString **err) {
-    REDISMODULE_NOT_USED(name);
     REDISMODULE_NOT_USED(err);
     REDISMODULE_NOT_USED(privdata);
-    size_t len;
-    if (!strcasecmp(RedisModule_StringPtrLen(new, &len), "rejectisfreed")) {
-        *err = RedisModule_CreateString(NULL, "Cannot set string to 'rejectisfreed'", 36);
-        return REDISMODULE_ERR;
+
+    if (strcasecmp(name, "string") == 0) {
+        size_t len;
+        if (!strcasecmp(RedisModule_StringPtrLen(new, &len), "rejectisfreed")) {
+            *err = RedisModule_CreateString(NULL, "Cannot set string to 'rejectisfreed'", 36);
+            return REDISMODULE_ERR;
+        }
+        if (strval) RedisModule_FreeString(NULL, strval);
+        RedisModule_RetainString(NULL, new);
+        strval = new;
+    } else if (strcasecmp(name, "c_string") == 0) {
+        RedisModule_Free(c_strval);
+        c_strval = RedisModule_Strdup(RedisModule_StringPtrLen(new, NULL));
     }
-    if (strval) RedisModule_FreeString(NULL, strval);
-    RedisModule_RetainString(NULL, new);
-    strval = new;
     return REDISMODULE_OK;
 }
 
@@ -119,6 +132,9 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     if (RedisModule_RegisterStringConfig(ctx, "string", "secret password", REDISMODULE_CONFIG_DEFAULT, getStringConfigCommand, setStringConfigCommand, NULL, NULL) == REDISMODULE_ERR) {
         return REDISMODULE_ERR;
     }
+    if (RedisModule_RegisterStringConfig(ctx, "c_string", "secret password", REDISMODULE_CONFIG_DEFAULT, getStringConfigCommand, setStringConfigCommand, NULL, NULL) == REDISMODULE_ERR) {
+        return REDISMODULE_ERR;
+    }
 
     /* On the stack to make sure we're copying them. */
     const char *enum_vals[] = {"none", "five", "one", "two", "four"};
@@ -145,6 +161,8 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
             RedisModule_FreeString(ctx, strval);
             strval = NULL;
         }
+        RedisModule_Free(c_strval);
+        c_strval = NULL;
         return REDISMODULE_ERR;
     }
     return REDISMODULE_OK;
@@ -156,5 +174,7 @@ int RedisModule_OnUnload(RedisModuleCtx *ctx) {
         RedisModule_FreeString(ctx, strval);
         strval = NULL;
     }
+    RedisModule_Free(c_strval);
+    c_strval = NULL;
     return REDISMODULE_OK;
 }
