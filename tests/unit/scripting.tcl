@@ -1568,7 +1568,7 @@ start_server {tags {"scripting"}} {
         }
 
         r config set min-replicas-to-write 0
-    }
+    } {} {external:skip}
 
     test "allow-stale shebang flag" {
         r config set replica-serve-stale-data no
