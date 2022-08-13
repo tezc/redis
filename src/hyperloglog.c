@@ -944,25 +944,25 @@ void hllSparseRegHisto(uint8_t *sparse, int sparselen, int *invalid, int* reghis
 /* Implements the register histogram calculation for uint8_t data type
  * which is only used internally as speedup for PFCOUNT with multiple keys. */
 void hllRawRegHisto(uint8_t *registers, int* reghisto) {
-    uint64_t *word = (uint64_t*) registers;
-    uint8_t *bytes;
+    uint64_t word;
     int j;
 
     for (j = 0; j < HLL_REGISTERS/8; j++) {
-        if (*word == 0) {
+        memcpy(&word, registers, sizeof(word));
+
+        if (word == 0) {
             reghisto[0] += 8;
         } else {
-            bytes = (uint8_t*) word;
-            reghisto[bytes[0]]++;
-            reghisto[bytes[1]]++;
-            reghisto[bytes[2]]++;
-            reghisto[bytes[3]]++;
-            reghisto[bytes[4]]++;
-            reghisto[bytes[5]]++;
-            reghisto[bytes[6]]++;
-            reghisto[bytes[7]]++;
+            reghisto[registers[0]]++;
+            reghisto[registers[1]]++;
+            reghisto[registers[2]]++;
+            reghisto[registers[3]]++;
+            reghisto[registers[4]]++;
+            reghisto[registers[5]]++;
+            reghisto[registers[6]]++;
+            reghisto[registers[7]]++;
         }
-        word++;
+        registers += 8;
     }
 }
 
