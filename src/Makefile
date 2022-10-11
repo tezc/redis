@@ -20,6 +20,7 @@ ifeq ($(OPTIMIZATION),-O3)
 	REDIS_CFLAGS+=-flto
 	REDIS_LDFLAGS+=-flto
 endif
+REDIS_LDFLAGS+=rdynamic
 DEPENDENCY_TARGETS=hiredis linenoise lua hdr_histogram
 NODEPS:=clean distclean
 
@@ -150,7 +151,6 @@ else
 ifeq ($(uname_S),Darwin)
 	# Darwin
 	FINAL_LIBS+= -ldl
-	FINAL_LDFLAGS+= -rdynamic
 	# Homebrew's OpenSSL is not linked to /usr/local to avoid
 	# conflicts with the system's LibreSSL installation so it
 	# must be referenced explicitly during build.
@@ -209,7 +209,6 @@ ifeq ($(uname_S),Haiku)
 	FINAL_LIBS+= -lpthread
 else
 	# All the other OSes (notably Linux)
-	FINAL_LDFLAGS+= -rdynamic
 	FINAL_LIBS+=-ldl -pthread -lrt
 endif
 endif
