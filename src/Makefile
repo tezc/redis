@@ -20,7 +20,7 @@ ifeq ($(OPTIMIZATION),-O3)
 	REDIS_CFLAGS+=-flto
 	REDIS_LDFLAGS+=-flto
 endif
-REDIS_LDFLAGS+=rdynamic
+REDIS_LDFLAGS+=-rdynamic
 DEPENDENCY_TARGETS=hiredis linenoise lua hdr_histogram
 NODEPS:=clean distclean
 
