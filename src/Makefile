@@ -129,6 +129,8 @@ ifneq (,$(findstring armv,$(uname_M)))
         FINAL_LIBS+=-latomic
 endif
 
+FINAL_LDFLAGS+= -rdynamic
+
 ifeq ($(uname_S),SunOS)
 	# SunOS
 	ifeq ($(findstring -m32,$(FINAL_CFLAGS)),)

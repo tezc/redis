@@ -394,7 +394,7 @@ void _addReplyToBufferOrList(client *c, const char *s, size_t len) {
         return;
     }
 
-    size_t reply_len = _addReplyToBuffer(c,s,len);
+    size_t reply_len = _addReplyToBuffer(NULL,s,len);
     if (len > reply_len) _addReplyProtoToList(c,s+reply_len,len-reply_len);
 }
 
