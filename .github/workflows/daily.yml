@@ -621,6 +621,8 @@ jobs:
         repository: ${{ env.GITHUB_REPOSITORY }}
         ref: ${{ env.GITHUB_HEAD_REF }}
     - name: make
+      env:
+        CC: gcc
       run: make REDIS_CFLAGS='-Werror'
     - name: test
       if: true && !contains(github.event.inputs.skiptests, 'redis')
@@ -695,9 +697,9 @@ jobs:
         usesh: true
         sync: rsync
         copyback: false
-        prepare: pkg install -y bash gmake lang/tcl86 lang/tclx
+        prepare: pkg install -y bash gmake lang/tcl86 lang/tclx lang/gcc
         run: >
-          gmake || exit 1 ;
+          CC=gcc gmake || exit 1 ;
           if echo "${{github.event.inputs.skiptests}}" | grep -vq redis ; then ./runtest --verbose --timeout 2400 --no-latency --dump-logs ${{github.event.inputs.test_args}} || exit 1 ; fi ;
           if echo "${{github.event.inputs.skiptests}}" | grep -vq modules ; then MAKE=gmake ./runtest-moduleapi --verbose --timeout 2400 --no-latency --dump-logs ${{github.event.inputs.test_args}} || exit 1 ; fi ;
 
