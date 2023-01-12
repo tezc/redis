@@ -12213,30 +12213,27 @@ int RM_LoadConfigs(RedisModuleCtx *ctx) {
 int RM_RdbLoad(const char *filename, int flags) {
     errno = 0;
 
-    if (flags != 0) {
+    if (!filename || flags != 0) {
         errno = EINVAL;
         return REDISMODULE_ERR;
     }
 
-    /* TODO:
-     * - Call fsync for filename
-     * - Stop AOF?
-     * - Kill RDB fork?
-     */
+    if (server.aof_state != AOF_OFF)
+        stopAppendOnly();
+
+    if (server.child_type == CHILD_TYPE_RDB)
+        killRDBChild();
+
     emptyData(-1,EMPTYDB_NO_FLAGS,NULL);
 
-    if (server.current_client)
-        protectClient(server.current_client);
+    // if (server.current_client) protectClient(server.current_client);
 
     int ret = rdbLoad((char*) filename,NULL,RDBFLAGS_NONE);
 
-    if (server.current_client)
-        unprotectClient(server.current_client);
+    // if (server.current_client) unprotectClient(server.current_client);
 
-    /* TODO:
-     * - rename(filename, server.rdb_filename) ?;
-     * - Start AOF?
-     */
+    if (server.aof_state != AOF_OFF)
+        startAppendOnly();
 
     if (ret == RDB_NOT_EXIST) {
         errno = ENOENT;
@@ -12259,18 +12256,16 @@ int RM_RdbSave(const char *filename, int flags) {
         return REDISMODULE_ERR;
     }
 
-    if (server.child_type == CHILD_TYPE_RDB) {
+    if (strcmp(filename, server.rdb_filename) == 0 &&
+        server.child_type == CHILD_TYPE_RDB) {
         errno = EINPROGRESS;
         return REDISMODULE_ERR;
     }
 
-    server.stat_rdb_saves++;
-
     rdbSaveInfo rsi, *rsiptr;
     rsiptr = rdbPopulateSaveInfo(&rsi);
 
-    int ret = rdbSave(SLAVE_REQ_NONE,(char*)filename,rsiptr);
-    if (ret != C_OK) {
+    if (rdbSave(SLAVE_REQ_NONE,(char*)filename,rsiptr) != C_OK) {
         errno = EIO;
         return REDISMODULE_ERR;
     }
