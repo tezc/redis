@@ -101,9 +101,9 @@ start_server {tags {"modules"}} {
         assert_equal OK [r test.rdbload bgsave.rdb]
 
         wait_for_condition 10 1000 {
-            [string match {*SIGUSR1*child*} [exec tail -20 < [srv 0 stdout]]]
+            [string match {*Background*saving*terminated*} [exec tail -20 < [srv 0 stdout]]]
         } else {
-            fail "Can't find 'SIGUSR1 child' in recent log lines"
+            fail "Can't find 'Background saving terminated' in recent log lines"
         }
 
         assert_equal v1 [r get k]
