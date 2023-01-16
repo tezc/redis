@@ -12210,7 +12210,8 @@ int RM_LoadConfigs(RedisModuleCtx *ctx) {
     return REDISMODULE_OK;
 }
 
-/* Load the RDB file pointed by `filename`.
+/* Load the RDB file pointed by `filename`. Dataset will be cleared first and
+ * then the RDB file will be loaded.
  *
  * `flags` must be zero. This parameter is for future use.
  *
