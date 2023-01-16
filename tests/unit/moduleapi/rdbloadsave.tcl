@@ -60,6 +60,7 @@ start_server {tags {"modules"}} {
         # Enable the AOF
         r config set appendonly yes
         r config set auto-aof-rewrite-percentage 0 ; # Disable auto-rewrite.
+        waitForBgrewriteaof r
 
         r set k v1
         assert_equal OK [r test.rdbsave aoftest.rdb]
