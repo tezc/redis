@@ -12210,6 +12210,17 @@ int RM_LoadConfigs(RedisModuleCtx *ctx) {
     return REDISMODULE_OK;
 }
 
+/* Load the RDB file pointed by `filename`.
+ *
+ * `flags` must be zero. This parameter is for future use.
+ *
+ * On success REDISMODULE_OK is returned, otherwise
+ * REDISMODULE_ERR is returned and errno is set to the following values:
+ *
+ * * EINVAL: `filename` is NULL or `flags` value is invalid.
+ * * ENOENT: File does not exist.
+ * * EIO: Failed to load the RDB file. Check server logs for more info.
+ */
 int RM_RdbLoad(const char *filename, int flags) {
     errno = 0;
 
@@ -12218,36 +12229,44 @@ int RM_RdbLoad(const char *filename, int flags) {
         return REDISMODULE_ERR;
     }
 
-    if (server.aof_state != AOF_OFF)
-        stopAppendOnly();
+    if (server.aof_state != AOF_OFF) stopAppendOnly();
 
-    if (server.child_type == CHILD_TYPE_RDB)
-        killRDBChild();
+    /* Kill existing RDB fork as it is saving outdated data. */
+    if (server.child_type == CHILD_TYPE_RDB) killRDBChild();
 
     emptyData(-1,EMPTYDB_NO_FLAGS,NULL);
 
-    // if (server.current_client) protectClient(server.current_client);
+    /* rdbLoad() can go back to the networking and process network events. If
+     * this function is called inside a command callback, we don't want to
+     * process the current client. Otherwise, we may free the client or try to
+     * process next message while we are already in the command callback. */
+    if (server.current_client) protectClient(server.current_client);
 
-    int ret = rdbLoad((char*) filename,NULL,RDBFLAGS_NONE);
+    int ret = rdbLoad((char*)filename,NULL,RDBFLAGS_NONE);
 
-    // if (server.current_client) unprotectClient(server.current_client);
+    if (server.current_client) unprotectClient(server.current_client);
+    if (server.aof_state != AOF_OFF) startAppendOnly();
 
-    if (server.aof_state != AOF_OFF)
-        startAppendOnly();
-
-    if (ret == RDB_NOT_EXIST) {
-        errno = ENOENT;
-        return REDISMODULE_ERR;
-    } else if (ret == RDB_FAILED) {
-        errno = EIO;
+    if (ret != RDB_OK) {
+        errno = (ret == RDB_NOT_EXIST) ? ENOENT : EIO;
         return REDISMODULE_ERR;
     }
 
-    serverAssert(ret == RDB_OK);
     errno = 0;
     return REDISMODULE_OK;
 }
 
+/* Save dataset into the RDB file pointed by `filename`.
+ *
+ * `flags` must be zero. This parameter is for future use.
+ *
+ * On success REDISMODULE_OK is returned, otherwise
+ * REDISMODULE_ERR is returned and errno is set to the following values:
+ *
+ * * EINVAL: `filename` is NULL or `flags` value is invalid.
+ * * EINPROGRESS: There is already an RDB fork saving into the same file.
+ * * EIO: Failed to load the RDB file. Check server logs for more info.
+ */
 int RM_RdbSave(const char *filename, int flags) {
     errno = 0;
 
@@ -12256,7 +12275,7 @@ int RM_RdbSave(const char *filename, int flags) {
         return REDISMODULE_ERR;
     }
 
-    if (strcmp(filename, server.rdb_filename) == 0 &&
+    if (strcmp(filename,server.rdb_filename) == 0 &&
         server.child_type == CHILD_TYPE_RDB) {
         errno = EINPROGRESS;
         return REDISMODULE_ERR;
@@ -12273,7 +12292,6 @@ int RM_RdbSave(const char *filename, int flags) {
     errno = 0;
     return REDISMODULE_OK;
 }
-
 
 /* Redis MODULE command.
  *
