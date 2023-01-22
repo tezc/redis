@@ -14,7 +14,8 @@ start_server {tags {"modules"}} {
     test "Module rdbloadsave sanity" {
         r test.sanity
 
-        assert_error {*No such file*} {r test.rdbload sanity.rdb}
+        # Try to load non-existing file
+        assert_error {*Input/output error*} {r test.rdbload sanity.rdb}
 
         r set x 1
         assert_equal OK [r test.rdbsave sanity.rdb]
@@ -107,15 +108,6 @@ start_server {tags {"modules"}} {
         }
 
         assert_equal v1 [r get k]
-        r flushall
-        waitForBgsave r
-
-        # RM_RdbSave() should fail if there is already a fork saving into the
-        # same rdb file.
-        r set k v3
-        r bgsave
-        assert_error {*in*progress*} {r test.rdbsave dump.rdb}
-
         r flushall
         waitForBgsave r
         r config set rdb-key-save-delay 0

@@ -12210,46 +12210,93 @@ int RM_LoadConfigs(RedisModuleCtx *ctx) {
     return REDISMODULE_OK;
 }
 
-/* Load the RDB file pointed by `filename`. Dataset will be cleared first and
- * then the RDB file will be loaded.
+/* --------------------------------------------------------------------------
+ * ## RDB load/save API
+ * -------------------------------------------------------------------------- */
+
+#define REDISMODULE_RDB_STREAM_FILE 1
+
+typedef struct RedisModuleRdbStream {
+    int type;
+
+    union {
+        char *filename;
+    } data;
+} RedisModuleRdbStream;
+
+/* Create a stream object to save/load RDB to/from a file.
+ *
+ * This function returns a pointer to RedisModuleRdbStream which is owned
+ * by the caller. It requires a call to RM_RdbStreamFree() to free
+ * the object.
+ * */
+RedisModuleRdbStream *RM_RdbStreamCreateFromFile(const char *filename) {
+    RedisModuleRdbStream *stream = zmalloc(sizeof(*stream));
+    stream->type = REDISMODULE_RDB_STREAM_FILE;
+    stream->data.filename = zstrdup(filename);
+    return stream;
+}
+
+/* Release an RDB stream object. */
+void RM_RdbStreamFree(RedisModuleRdbStream *stream) {
+    switch (stream->type) {
+        case REDISMODULE_RDB_STREAM_FILE:
+            zfree(stream->data.filename);
+            break;
+        default:
+            serverAssert(0);
+            break;
+    }
+    zfree(stream);
+}
+
+/* Load the RDB file from the `stream`. Dataset will be cleared first and then
+ * the RDB file will be loaded.
  *
  * `flags` must be zero. This parameter is for future use.
  *
  * On success REDISMODULE_OK is returned, otherwise
  * REDISMODULE_ERR is returned and errno is set to the following values:
  *
- * * EINVAL: `filename` is NULL or `flags` value is invalid.
- * * ENOENT: File does not exist.
+ * * EINVAL: `stream` is NULL or `flags` value is invalid.
  * * EIO: Failed to load the RDB file. Check server logs for more info.
+ *
+ * Example:
+ *
+ *     RedisModuleRdbStream *s = RedisModule_RdbStreamCreateFromFile("exp.rdb");
+ *     RedisModule_RdbLoad(s, 0);
+ *     RedisModule_RdbStreamFree(s);
  */
-int RM_RdbLoad(const char *filename, int flags) {
+int RM_RdbLoad(RedisModuleRdbStream *stream, int flags) {
     errno = 0;
 
-    if (!filename || flags != 0) {
+    if (!stream || flags != 0) {
         errno = EINVAL;
         return REDISMODULE_ERR;
     }
 
     if (server.aof_state != AOF_OFF) stopAppendOnly();
 
-    /* Kill existing RDB fork as it is saving outdated data. */
+    /* Kill existing RDB fork as it is saving outdated data. Also killing it
+     * will prevent COW memory issue. */
     if (server.child_type == CHILD_TYPE_RDB) killRDBChild();
 
     emptyData(-1,EMPTYDB_NO_FLAGS,NULL);
 
     /* rdbLoad() can go back to the networking and process network events. If
-     * this function is called inside a command callback, we don't want to
+     * RM_RdbLoad() is called inside a command callback, we don't want to
      * process the current client. Otherwise, we may free the client or try to
      * process next message while we are already in the command callback. */
     if (server.current_client) protectClient(server.current_client);
 
-    int ret = rdbLoad((char*)filename,NULL,RDBFLAGS_NONE);
+    serverAssert(stream->type == REDISMODULE_RDB_STREAM_FILE);
+    int ret = rdbLoad(stream->data.filename,NULL,RDBFLAGS_NONE);
 
     if (server.current_client) unprotectClient(server.current_client);
     if (server.aof_state != AOF_OFF) startAppendOnly();
 
     if (ret != RDB_OK) {
-        errno = (ret == RDB_NOT_EXIST) ? ENOENT : EIO;
+        errno = EIO;
         return REDISMODULE_ERR;
     }
 
@@ -12257,35 +12304,40 @@ int RM_RdbLoad(const char *filename, int flags) {
     return REDISMODULE_OK;
 }
 
-/* Save dataset into the RDB file pointed by `filename`.
+/* Save dataset to the RDB stream.
  *
  * `flags` must be zero. This parameter is for future use.
+ *
+ * If there is already a fork saving to the RDB file e.g. bgsave is in progress,
+ * then, module should guarantee that `stream` does not point to the same file.
+ * Otherwise, this function and RDB fork will try to write to the same file.
  *
  * On success REDISMODULE_OK is returned, otherwise
  * REDISMODULE_ERR is returned and errno is set to the following values:
  *
- * * EINVAL: `filename` is NULL or `flags` value is invalid.
- * * EINPROGRESS: There is already an RDB fork saving into the same file.
+ * * EINVAL: `stream` is NULL or `flags` value is invalid.
  * * EIO: Failed to load the RDB file. Check server logs for more info.
+ *
+ * Example:
+ *
+ *     RedisModuleRdbStream *s = RedisModule_RdbStreamCreateFromFile("exp.rdb");
+ *     RedisModule_RdbSave(s, 0);
+ *     RedisModule_RdbStreamFree(s);
  */
-int RM_RdbSave(const char *filename, int flags) {
+int RM_RdbSave(RedisModuleRdbStream *stream, int flags) {
     errno = 0;
 
-    if (!filename || flags != 0) {
+    if (!stream || flags != 0) {
         errno = EINVAL;
         return REDISMODULE_ERR;
     }
 
-    if (strcmp(filename,server.rdb_filename) == 0 &&
-        server.child_type == CHILD_TYPE_RDB) {
-        errno = EINPROGRESS;
-        return REDISMODULE_ERR;
-    }
+    serverAssert(stream->type == REDISMODULE_RDB_STREAM_FILE);
 
     rdbSaveInfo rsi, *rsiptr;
     rsiptr = rdbPopulateSaveInfo(&rsi);
 
-    if (rdbSave(SLAVE_REQ_NONE,(char*)filename,rsiptr) != C_OK) {
+    if (rdbSave(SLAVE_REQ_NONE,stream->data.filename,rsiptr) != C_OK) {
         errno = EIO;
         return REDISMODULE_ERR;
     }
@@ -13193,6 +13245,8 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(RegisterStringConfig);
     REGISTER_API(RegisterEnumConfig);
     REGISTER_API(LoadConfigs);
+    REGISTER_API(RdbStreamCreateFromFile);
+    REGISTER_API(RdbStreamFree);
     REGISTER_API(RdbLoad);
     REGISTER_API(RdbSave);
 }

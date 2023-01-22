@@ -11,6 +11,8 @@ int sanity(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     REDISMODULE_NOT_USED(argv);
     REDISMODULE_NOT_USED(argc);
 
+    RedisModuleRdbStream *stream;
+
     /* NULL filename should fail. */
     if (RedisModule_RdbLoad(NULL, 0) == REDISMODULE_OK || errno != EINVAL) {
         RedisModule_ReplyWithError(ctx, strerror(errno));
@@ -18,28 +20,40 @@ int sanity(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     }
 
     /* Invalid flags should fail. */
-    if (RedisModule_RdbLoad("dump.rdb", 1) == REDISMODULE_OK || errno != EINVAL) {
+    stream = RedisModule_RdbStreamCreateFromFile("dump.rdb");
+    if (RedisModule_RdbLoad(stream, 1) == REDISMODULE_OK || errno != EINVAL) {
+        RedisModule_RdbStreamFree(stream);
         RedisModule_ReplyWithError(ctx, strerror(errno));
         return REDISMODULE_OK;
     }
+    RedisModule_RdbStreamFree(stream);
 
     /* Missing file should fail. */
-    if (RedisModule_RdbLoad("dump.rdb", 0) == REDISMODULE_OK || errno != ENOENT) {
+    stream = RedisModule_RdbStreamCreateFromFile("dump.rdb");
+    if (RedisModule_RdbLoad(stream, 0) == REDISMODULE_OK || errno != EIO) {
+        RedisModule_RdbStreamFree(stream);
         RedisModule_ReplyWithError(ctx, strerror(errno));
         return REDISMODULE_OK;
     }
+    RedisModule_RdbStreamFree(stream);
 
     /* Save RDB file. */
-    if (RedisModule_RdbSave("sanitytest.rdb", 0) != REDISMODULE_OK || errno != 0) {
+    stream = RedisModule_RdbStreamCreateFromFile("sanitytest.rdb");
+    if (RedisModule_RdbSave(stream, 0) != REDISMODULE_OK || errno != 0) {
+        RedisModule_RdbStreamFree(stream);
         RedisModule_ReplyWithError(ctx, strerror(errno));
         return REDISMODULE_OK;
     }
+    RedisModule_RdbStreamFree(stream);
 
     /* Load the saved RDB file. */
-    if (RedisModule_RdbLoad("sanitytest.rdb", 0) != REDISMODULE_OK || errno != 0) {
+    stream = RedisModule_RdbStreamCreateFromFile("sanitytest.rdb");
+    if (RedisModule_RdbLoad(stream, 0) != REDISMODULE_OK || errno != 0) {
+        RedisModule_RdbStreamFree(stream);
         RedisModule_ReplyWithError(ctx, strerror(errno));
         return REDISMODULE_OK;
     }
+    RedisModule_RdbStreamFree(stream);
 
     RedisModule_ReplyWithSimpleString(ctx, "OK");
     return REDISMODULE_OK;
@@ -59,12 +73,16 @@ int cmd_rdbsave(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     memcpy(tmp, filename, len);
     tmp[len] = '\0';
 
-    if (RedisModule_RdbSave(tmp, 0) != REDISMODULE_OK || errno != 0) {
+    RedisModuleRdbStream *stream = RedisModule_RdbStreamCreateFromFile(tmp);
+
+    if (RedisModule_RdbSave(stream, 0) != REDISMODULE_OK || errno != 0) {
         RedisModule_ReplyWithError(ctx, strerror(errno));
+        RedisModule_RdbStreamFree(stream);
         return REDISMODULE_OK;
     }
 
     RedisModule_ReplyWithSimpleString(ctx, "OK");
+    RedisModule_RdbStreamFree(stream);
     return REDISMODULE_OK;
 }
 
@@ -92,9 +110,15 @@ int cmd_rdbsave_fork(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
         return REDISMODULE_OK;
     }
 
-    RedisModule_RdbSave(tmp, 0);
-    RedisModule_ExitFromChild(errno); /* RM_RdbSave() will set errno. */
+    RedisModuleRdbStream *stream = RedisModule_RdbStreamCreateFromFile(tmp);
 
+    int ret = 0;
+    if (RedisModule_RdbSave(stream, 0) != REDISMODULE_OK) {
+        ret = errno;
+    }
+    RedisModule_RdbStreamFree(stream);
+
+    RedisModule_ExitFromChild(ret);
     return REDISMODULE_OK;
 }
 
@@ -111,11 +135,15 @@ int cmd_rdbload(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     memcpy(tmp, filename, len);
     tmp[len] = '\0';
 
-    if (RedisModule_RdbLoad(tmp, 0) != REDISMODULE_OK || errno != 0) {
+    RedisModuleRdbStream *stream = RedisModule_RdbStreamCreateFromFile(tmp);
+
+    if (RedisModule_RdbLoad(stream, 0) != REDISMODULE_OK || errno != 0) {
+        RedisModule_RdbStreamFree(stream);
         RedisModule_ReplyWithError(ctx, strerror(errno));
         return REDISMODULE_OK;
     }
 
+    RedisModule_RdbStreamFree(stream);
     RedisModule_ReplyWithSimpleString(ctx, "OK");
     return REDISMODULE_OK;
 }
