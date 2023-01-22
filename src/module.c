@@ -12228,8 +12228,7 @@ typedef struct RedisModuleRdbStream {
  *
  * This function returns a pointer to RedisModuleRdbStream which is owned
  * by the caller. It requires a call to RM_RdbStreamFree() to free
- * the object.
- * */
+ * the object. */
 RedisModuleRdbStream *RM_RdbStreamCreateFromFile(const char *filename) {
     RedisModuleRdbStream *stream = zmalloc(sizeof(*stream));
     stream->type = REDISMODULE_RDB_STREAM_FILE;
@@ -12240,12 +12239,12 @@ RedisModuleRdbStream *RM_RdbStreamCreateFromFile(const char *filename) {
 /* Release an RDB stream object. */
 void RM_RdbStreamFree(RedisModuleRdbStream *stream) {
     switch (stream->type) {
-        case REDISMODULE_RDB_STREAM_FILE:
-            zfree(stream->data.filename);
-            break;
-        default:
-            serverAssert(0);
-            break;
+    case REDISMODULE_RDB_STREAM_FILE:
+        zfree(stream->data.filename);
+        break;
+    default:
+        serverAssert(0);
+        break;
     }
     zfree(stream);
 }
