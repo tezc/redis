@@ -1436,6 +1436,48 @@ werr: /* Write error. */
     return C_ERR;
 }
 
+/* Save DB to the file. Similar to rdbSave() but this function won't use a
+ * temporary file and won't update the metrics. */
+int rdbSaveToFile(const char *filename) {
+    rio rdb;
+    int error = 0;
+    char *err_op;
+
+    FILE *fp = fopen(filename,"w");
+    if (!fp) {
+        serverLog(LL_WARNING, "Failed to open the RDB file %s to save: %s",
+            filename, strerror(errno));
+        return C_ERR;
+    }
+
+    rioInitWithFile(&rdb,fp);
+    startSaving(RDBFLAGS_NONE);
+
+    if (server.rdb_save_incremental_fsync)
+        rioSetAutoSync(&rdb,REDIS_AUTOSYNC_BYTES);
+
+    if (rdbSaveRio(SLAVE_REQ_NONE,&rdb,&error,RDBFLAGS_NONE,NULL) != C_OK) {
+        errno = error;
+        err_op = "rdbSaveRio";
+        goto werr;
+    }
+
+    /* Make sure data will not remain on the OS's output buffers */
+    if (fflush(fp)) { err_op = "fflush"; goto werr; }
+    if (fsync(fileno(fp))) { err_op = "fsync"; goto werr; }
+    if (fclose(fp)) { fp = NULL; err_op = "fclose"; goto werr; }
+
+    stopSaving(1);
+    return C_OK;
+
+werr:
+    serverLog(LL_WARNING,"Write error while saving DB to the disk(%s): %s", err_op, strerror(errno));
+    if (fp) fclose(fp);
+    unlink(filename);
+    stopSaving(0);
+    return C_ERR;
+}
+
 /* Save the DB on disk. Return C_ERR on error, C_OK on success. */
 int rdbSave(int req, char *filename, rdbSaveInfo *rsi) {
     char tmpfile[256];

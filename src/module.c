@@ -12333,10 +12333,7 @@ int RM_RdbSave(RedisModuleRdbStream *stream, int flags) {
 
     serverAssert(stream->type == REDISMODULE_RDB_STREAM_FILE);
 
-    rdbSaveInfo rsi, *rsiptr;
-    rsiptr = rdbPopulateSaveInfo(&rsi);
-
-    if (rdbSave(SLAVE_REQ_NONE,stream->data.filename,rsiptr) != C_OK) {
+    if (rdbSaveToFile(stream->data.filename) != C_OK) {
         errno = EIO;
         return REDISMODULE_ERR;
     }
