@@ -1498,8 +1498,6 @@ int rdbSaveToFile(const char *filename) {
 int rdbSave(int req, char *filename, rdbSaveInfo *rsi) {
     char tmpfile[256];
     char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
-    rio rdb;
-    int error = 0;
 
     startSaving(RDBFLAGS_NONE);
     snprintf(tmpfile,256,"temp-%d.rdb", (int) getpid());
