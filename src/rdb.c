@@ -1440,7 +1440,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi) {
     char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
     rio rdb;
     int error = 0;
-    char *err_op;
+    char *err_op;    /* For a detailed log */
 
     FILE *fp = fopen(filename,"w");
     if (!fp) {
@@ -1460,7 +1460,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi) {
     if (server.rdb_save_incremental_fsync)
         rioSetAutoSync(&rdb,REDIS_AUTOSYNC_BYTES);
 
-    if (rdbSaveRio(req,&rdb,&error,RDBFLAGS_NONE,rsi) != C_OK) {
+    if (rdbSaveRio(req,&rdb,&error,RDBFLAGS_NONE,rsi) == C_ERR) {
         errno = error;
         err_op = "rdbSaveRio";
         goto werr;
