@@ -1502,7 +1502,10 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi) {
     startSaving(RDBFLAGS_NONE);
     snprintf(tmpfile,256,"temp-%d.rdb", (int) getpid());
 
-    if (rdbSaveInternal(req,tmpfile,rsi) != C_OK) goto werr;
+    if (rdbSaveInternal(req,tmpfile,rsi) != C_OK) {
+        stopSaving(0);
+        return C_ERR;
+    }
     
     /* Use RENAME to make sure the DB file is changed atomically only
      * if the generate DB file is ok. */
@@ -1516,12 +1519,15 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi) {
             filename,
             cwdp ? cwdp : "unknown",
             str_err);
-        goto werr;
+        unlink(tmpfile);
+        stopSaving(0);
+        return C_ERR;
     }
     if (fsyncFileDir(filename) != 0) {
         serverLog(LL_WARNING,
             "Failed to fsync directory while saving DB: %s", strerror(errno));
-        goto werr;
+        stopSaving(0);
+        return C_ERR;
     }
 
     serverLog(LL_NOTICE,"DB saved on disk");
@@ -1530,11 +1536,6 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi) {
     server.lastbgsave_status = C_OK;
     stopSaving(1);
     return C_OK;
-
-werr:
-    unlink(tmpfile);
-    stopSaving(0);
-    return C_ERR;
 }
 
 int rdbSaveBackground(int req, char *filename, rdbSaveInfo *rsi) {
