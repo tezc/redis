@@ -1436,78 +1436,31 @@ werr: /* Write error. */
     return C_ERR;
 }
 
-/* Save DB to the file. Similar to rdbSave() but this function won't use a
- * temporary file and won't update the metrics. */
-int rdbSaveToFile(const char *filename) {
+static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi) {
+    char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
     rio rdb;
     int error = 0;
     char *err_op;
 
     FILE *fp = fopen(filename,"w");
     if (!fp) {
-        serverLog(LL_WARNING, "Failed to open the RDB file %s to save: %s",
-            filename, strerror(errno));
-        return C_ERR;
-    }
-
-    rioInitWithFile(&rdb,fp);
-    startSaving(RDBFLAGS_NONE);
-
-    if (server.rdb_save_incremental_fsync)
-        rioSetAutoSync(&rdb,REDIS_AUTOSYNC_BYTES);
-
-    if (rdbSaveRio(SLAVE_REQ_NONE,&rdb,&error,RDBFLAGS_NONE,NULL) != C_OK) {
-        errno = error;
-        err_op = "rdbSaveRio";
-        goto werr;
-    }
-
-    /* Make sure data will not remain on the OS's output buffers */
-    if (fflush(fp)) { err_op = "fflush"; goto werr; }
-    if (fsync(fileno(fp))) { err_op = "fsync"; goto werr; }
-    if (fclose(fp)) { fp = NULL; err_op = "fclose"; goto werr; }
-
-    stopSaving(1);
-    return C_OK;
-
-werr:
-    serverLog(LL_WARNING,"Write error while saving DB to the disk(%s): %s", err_op, strerror(errno));
-    if (fp) fclose(fp);
-    unlink(filename);
-    stopSaving(0);
-    return C_ERR;
-}
-
-/* Save the DB on disk. Return C_ERR on error, C_OK on success. */
-int rdbSave(int req, char *filename, rdbSaveInfo *rsi) {
-    char tmpfile[256];
-    char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
-    FILE *fp = NULL;
-    rio rdb;
-    int error = 0;
-    char *err_op;    /* For a detailed log */
-
-    snprintf(tmpfile,256,"temp-%d.rdb", (int) getpid());
-    fp = fopen(tmpfile,"w");
-    if (!fp) {
         char *str_err = strerror(errno);
         char *cwdp = getcwd(cwd,MAXPATHLEN);
         serverLog(LL_WARNING,
             "Failed opening the temp RDB file %s (in server root dir %s) "
             "for saving: %s",
-            tmpfile,
+            filename,
             cwdp ? cwdp : "unknown",
             str_err);
         return C_ERR;
     }
 
     rioInitWithFile(&rdb,fp);
-    startSaving(RDBFLAGS_NONE);
 
     if (server.rdb_save_incremental_fsync)
         rioSetAutoSync(&rdb,REDIS_AUTOSYNC_BYTES);
 
-    if (rdbSaveRio(req,&rdb,&error,RDBFLAGS_NONE,rsi) == C_ERR) {
+    if (rdbSaveRio(req,&rdb,&error,RDBFLAGS_NONE,rsi) != C_OK) {
         errno = error;
         err_op = "rdbSaveRio";
         goto werr;
@@ -1517,7 +1470,41 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi) {
     if (fflush(fp)) { err_op = "fflush"; goto werr; }
     if (fsync(fileno(fp))) { err_op = "fsync"; goto werr; }
     if (fclose(fp)) { fp = NULL; err_op = "fclose"; goto werr; }
-    fp = NULL;
+
+    return C_OK;
+
+werr:
+    serverLog(LL_WARNING,"Write error while saving DB to the disk(%s): %s", err_op, strerror(errno));
+    if (fp) fclose(fp);
+    unlink(filename);
+    return C_ERR;
+}
+
+/* Save DB to the file. Similar to rdbSave() but this function won't use a
+ * temporary file and won't update the metrics. */
+int rdbSaveToFile(const char *filename) {
+    startSaving(RDBFLAGS_NONE);
+
+    if (rdbSaveInternal(SLAVE_REQ_NONE,filename,NULL) != C_OK) {
+        stopSaving(0);
+        return C_ERR;
+    }
+
+    stopSaving(1);
+    return C_OK;
+}
+
+/* Save the DB on disk. Return C_ERR on error, C_OK on success. */
+int rdbSave(int req, char *filename, rdbSaveInfo *rsi) {
+    char tmpfile[256];
+    char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
+    rio rdb;
+    int error = 0;
+
+    startSaving(RDBFLAGS_NONE);
+    snprintf(tmpfile,256,"temp-%d.rdb", (int) getpid());
+
+    if (rdbSaveInternal(req,tmpfile,rsi) != C_OK) goto werr;
     
     /* Use RENAME to make sure the DB file is changed atomically only
      * if the generate DB file is ok. */
@@ -1531,11 +1518,13 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi) {
             filename,
             cwdp ? cwdp : "unknown",
             str_err);
-        unlink(tmpfile);
-        stopSaving(0);
-        return C_ERR;
+        goto werr;
     }
-    if (fsyncFileDir(filename) == -1) { err_op = "fsyncFileDir"; goto werr; }
+    if (fsyncFileDir(filename) != 0) {
+        serverLog(LL_WARNING,
+            "Failed to fsync directory while saving DB: %s", strerror(errno));
+        goto werr;
+    }
 
     serverLog(LL_NOTICE,"DB saved on disk");
     server.dirty = 0;
@@ -1545,8 +1534,6 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi) {
     return C_OK;
 
 werr:
-    serverLog(LL_WARNING,"Write error saving DB on disk(%s): %s", err_op, strerror(errno));
-    if (fp) fclose(fp);
     unlink(tmpfile);
     stopSaving(0);
     return C_ERR;
