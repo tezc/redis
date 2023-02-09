@@ -58,6 +58,22 @@
                 "type": "integer",
                 "optional": true
             }
-        ]
+        ],
+        "reply_schema": {
+            "type": "array",
+            "items": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": [
+                    {
+                        "type": "string"
+                    },
+                    {
+                        "type": "array"
+                    }
+                ]
+            }
+        }
     }
 }

@@ -38,6 +38,10 @@
                 "type": "key",
                 "key_spec_index": 0
             }
-        ]
+        ],
+        "reply_schema": {
+            "description": "The number of entries of the stream at key",
+            "type": "integer"
+        }
     }
 }

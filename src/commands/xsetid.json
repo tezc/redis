@@ -62,6 +62,9 @@
                 "type": "string",
                 "optional": true
             }
-        ]
+        ],
+        "reply_schema": {
+            "const": "OK"
+        }
     }
 }

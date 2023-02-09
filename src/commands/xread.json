@@ -67,6 +67,33 @@
                     }
                 ]
             }
-        ]
+        ],
+        "reply_schema": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "items": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "array"
+                                }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "description": "when a timeout occurs",
+                    "type": "null"
+                }
+            ]
+        }
     }
 }
