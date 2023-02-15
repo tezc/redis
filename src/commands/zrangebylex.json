@@ -37,6 +37,13 @@
                 }
             }
         ],
+        "reply_schema": {
+            "type": "array",
+            "description": "List of elements in the specified score range.",
+            "items": {
+                "type": "string"
+            }
+        },
         "arguments": [
             {
                 "name": "key",

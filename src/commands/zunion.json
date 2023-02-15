@@ -33,6 +33,31 @@
                 }
             }
         ],
+        "reply_schema": {
+            "type": "array",
+            "items": {
+                "oneOf": [
+                    {
+                        "type": "string",
+                        "description": "The result of union when 'WITHSCORES' is not used."
+                    },
+                    {
+                        "type": "array",
+                        "description": "The result of union when 'WITHSCORES' is used.",
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "items": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "number"
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
         "arguments": [
             {
                 "name": "numkeys",

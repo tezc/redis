@@ -33,6 +33,10 @@
                 }
             }
         ],
+        "reply_schema": {
+            "description": "Length of the string after it was modified by the command.",
+            "type": "integer"
+        },
         "arguments": [
             {
                 "name": "key",
