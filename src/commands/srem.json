@@ -41,7 +41,8 @@
         ],
         "reply_schema": {
             "description": "Number of members that were removed from the set, not including non existing members.",
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0
         },
         "arguments": [
             {

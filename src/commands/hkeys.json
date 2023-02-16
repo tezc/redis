@@ -38,6 +38,7 @@
         "reply_schema": {
             "type": "array",
             "description": "List of fields in the hash, or an empty list when the key does not exist.",
+            "uniqueItems": true,
             "items": {
                 "type": "string"
             }

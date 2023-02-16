@@ -57,6 +57,7 @@
                                 {
                                     "type": "array",
                                     "additionalItems": false,
+                                    "uniqueItems": true,
                                     "items": [
                                         {
                                             "type": "string",

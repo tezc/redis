@@ -38,6 +38,10 @@
         "reply_schema": {
             "anyOf": [
                 {
+                    "type": "null",
+                    "description": "Key does not exist."
+                },
+                {
                     "type": "string",
                     "description": "Randomly selected element when 'COUNT' is not used."
                 },

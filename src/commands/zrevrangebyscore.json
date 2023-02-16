@@ -46,6 +46,7 @@
         "reply_schema": {
             "type": "array",
             "description": "List of the elements in the specified score range.",
+            "uniqueItems": true,
             "items": {
                 "oneOf": [
                     {

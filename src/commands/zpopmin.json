@@ -55,6 +55,7 @@
                     "description": "List of popped elements and scores when 'COUNT' is specified.",
                     "items": {
                         "type": "array",
+                        "uniqueItems": true,
                         "items": [
                             {
                                 "type": "string",
