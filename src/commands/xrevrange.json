@@ -60,6 +60,7 @@
             }
         ],
         "reply_schema": {
+            "description": "An array of the entries with IDs matching the specified range",
             "type": "array",
             "items": {
                 "type": "array",
@@ -67,10 +68,16 @@
                 "maxItems": 2,
                 "items": [
                     {
-                        "type": "string"
+                        "description": "Stream id",
+                        "type": "string",
+                        "pattern": "[0-9]+-[0-9]+"
                     },
                     {
-                        "type": "array"
+                        "description": "Array of field-value pairs",
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
                     }
                 ]
             }
