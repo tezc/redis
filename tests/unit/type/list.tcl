@@ -560,9 +560,8 @@ foreach {type large} [array get largevalue] {
             if {$resp == 3} {continue}
         } elseif {$::force_resp3} {
             if {$resp == 2} {continue}
-        } else {
-            r hello $resp
         }
+        r hello $resp
 
         # Make sure we can distinguish between an empty array and a null response
         r readraw 1
@@ -591,6 +590,7 @@ foreach {type large} [array get largevalue] {
         }
 
         r readraw 0
+        r hello 2
     }
 
     test {Variadic RPUSH/LPUSH} {
@@ -1270,6 +1270,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
             r del blist1{t} blist2{t}
             r set blist2{t} nolist{t}
             bpop_command_two_key $rd $pop blist1{t} blist2{t} 1
+            $rd $pop blist1{t} blist2{t} 1
             assert_error "WRONGTYPE*" {$rd read}
             $rd close
         }
@@ -2176,29 +2177,7 @@ foreach {pop} {BLPOP BLMPOP_RIGHT} {
         assert_equal [lpop k] [string repeat x 31]
         set _ $k
     } {12 0 9223372036854775808 2147483647 32767 127}
-
-    test "guy" {
-        set rd1 [redis_deferring_client]
-        set rd2 [redis_deferring_client]
-
-        $rd1 BLPOP mylist 0
-        after 100
-
-        set buf ""
-        append buf "LPUSH mylist 1\r\n"
-        append buf "INCR kk\r\n"
-        append buf "BLPOP mylist 0\r\n"
-        $rd2 write $buf
-        $rd2 flush
-
-        after 100
-        r LPUSH mylist 2
-        r LPUSH mylist 3
-        r LPUSH mylist 4
-
-        $rd2 close
-    }
-
+    
     test "Unblock fairness is kept while pipelining" {
         set rd1 [redis_deferring_client]
         set rd2 [redis_deferring_client]
@@ -2208,8 +2187,7 @@ foreach {pop} {BLPOP BLMPOP_RIGHT} {
         
         # block a client on the list
         $rd1 BLPOP mylist 0
-        after 100
-        #wait_for_blocked_clients_count 1
+        wait_for_blocked_clients_count 1
         
         # pipline on other client a list push and a blocking pop
         # we should expect the fainess to be kept and have $rd1
@@ -2224,13 +2202,11 @@ foreach {pop} {BLPOP BLMPOP_RIGHT} {
         # and that the first blocked client has been served
         assert_equal [$rd1 read] {mylist 1}
         assert_equal [$rd2 read] {1}
-        #wait_for_blocked_clients_count 1
-        after 100
+        wait_for_blocked_clients_count 1
         
         # We no unblock the last client and verify it was served last 
         r LPUSH mylist 2
-        #wait_for_blocked_clients_count 0
-        after 100
+        wait_for_blocked_clients_count 0
         assert_equal [$rd2 read] {mylist 2}
         
         $rd1 close

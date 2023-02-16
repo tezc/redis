@@ -98,7 +98,6 @@ static size_t reqresAppendBuffer(client *c, void *buf, size_t len) {
         c->reqres.buf = zrealloc(c->reqres.buf, c->reqres.capacity);
     }
 
-    //serverLog(LL_WARNING, "GUYBE append %.*s", (int)len, (char *)buf);
     memcpy(c->reqres.buf + c->reqres.used, buf, len);
     c->reqres.used += len;
     return len;
@@ -118,22 +117,23 @@ static size_t reqresAppendArg(client *c, char *arg, size_t arg_len) {
 
 /* ----- API ----- */
 
-size_t reqresAppendRequest(client *c) {
-    robj **argv = c->argv;
-    int argc = c->argc;
+void reqresReset(client *c, int free_buf) {
+    if (free_buf && c->reqres.buf) {
+        zfree(c->reqres.buf);
+        c->reqres.buf = NULL;
+        c->reqres.used = c->reqres.capacity = 0;
+    }
+    memset(&c->reqres, 0, sizeof(c->reqres));
+}
 
+void reqresSaveClientReplyOffset(client *c) {
     if (!reqresShouldLog(c))
-        return 0;
+        return;
 
-    if (argc == 0)
-        return 0;
+    if (c->reqres.offset.saved)
+        return;
 
-    if (c->reqres.argv_logged)
-        return 0;
-
-    c->reqres.argv_logged = 1;
-
-    serverLog(LL_WARNING, "GUYBE in request (id=%d, argv[0]=%s, bufpos=%d)", c->id, argv[0]->ptr, c->bufpos);
+    c->reqres.offset.saved = 1;
 
     c->reqres.offset.bufpos = c->bufpos;
     if (listLength(c->reply) && listNodeValue(listLast(c->reply))) {
@@ -143,6 +143,16 @@ size_t reqresAppendRequest(client *c) {
         c->reqres.offset.last_node.index = 0;
         c->reqres.offset.last_node.used = 0;
     }
+}
+
+size_t reqresAppendRequest(client *c) {
+    robj **argv = c->argv;
+    int argc = c->argc;
+
+    serverAssert(argc);
+
+    if (!reqresShouldLog(c))
+        return 0;
 
     /* Ignore commands that have streaming non-standard response */
     sds cmd = argv[0]->ptr;
@@ -150,11 +160,16 @@ size_t reqresAppendRequest(client *c) {
         !strcasecmp(cmd,"psync") ||
         !strcasecmp(cmd,"monitor") ||
         !strcasecmp(cmd,"subscribe") ||
+        !strcasecmp(cmd,"unsubscribe") ||
         !strcasecmp(cmd,"ssubscribe") ||
-        !strcasecmp(cmd,"psubscribe"))
+        !strcasecmp(cmd,"sunsubscribe") ||
+        !strcasecmp(cmd,"psubscribe") ||
+        !strcasecmp(cmd,"punsubscribe"))
     {
         return 0;
     }
+
+    c->reqres.argv_logged = 1;
 
     size_t ret = 0;
     for (int i = 0; i < argc; i++) {
@@ -177,16 +192,16 @@ size_t reqresAppendResponse(client *c) {
     if (!reqresShouldLog(c))
         return 0;
 
-    c->reqres.argv_logged = 0;
+    if (!c->reqres.argv_logged) /* Example: UNSUBSCRIBE */
+        return 0;
 
-    serverLog(LL_WARNING, "GUYBE in response (id=%d, cmd=%s, bufpos=%d,  prev bufpos=%d)", c->id, c->lastcmd ? c->lastcmd->fullname : "NULL", c->bufpos, c->reqres.offset.bufpos);
+    serverAssert(c->reqres.offset.saved);
 
     /* First append the static reply buffer */
     if (c->bufpos > c->reqres.offset.bufpos) {
         size_t written = reqresAppendBuffer(c, c->buf + c->reqres.offset.bufpos, c->bufpos - c->reqres.offset.bufpos);
         ret += written;
     }
-    c->reqres.offset.bufpos = -1;
 
     int curr_index = 0;
     size_t curr_used = 0;
@@ -200,7 +215,6 @@ size_t reqresAppendResponse(client *c) {
         curr_used > c->reqres.offset.last_node.used)
     {
         int i = 0;
-        serverLog(LL_WARNING, "GUYBE in reply list");
         listIter iter;
         listNode *curr;
         clientReplyBlock *o;
@@ -231,9 +245,7 @@ size_t reqresAppendResponse(client *c) {
             i++;
         }
     }
-
-    if (!ret)
-        return 0;
+    serverAssert(ret);
 
     /* Flush both request and response to file */
     FILE *fp = fopen(server.req_res_logfile, "a");
@@ -243,16 +255,21 @@ size_t reqresAppendResponse(client *c) {
     fflush(fp);
     fclose(fp);
 
-    zfree(c->reqres.buf);
-    c->reqres.buf = NULL;
-    c->reqres.used = c->reqres.capacity = 0;
-
     return ret;
 }
 
 #else /* #ifdef LOG_REQ_RES */
 
 /* Just mimic the API without doing anything */
+
+void reqresReset(client *c, int free_buf) {
+    UNUSED(c);
+    UNUSED(free_buf);
+}
+
+inline void reqresSaveClientReplyOffset(client *c) {
+    UNUSED(c);
+}
 
 inline size_t reqresAppendRequest(client *c) {
     UNUSED(c);

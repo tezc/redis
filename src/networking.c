@@ -139,7 +139,7 @@ client *createClient(connection *conn) {
     atomicGetIncr(server.next_client_id, client_id, 1);
     c->id = client_id;
 #ifdef LOG_REQ_RES
-    memset(&c->reqres, 0, sizeof(c->reqres));
+    reqresReset(c, 0);
     c->resp = server.client_default_resp;
 #else
     c->resp = 2;
@@ -150,7 +150,6 @@ client *createClient(connection *conn) {
     c->buf_usable_size = zmalloc_usable_size(c->buf);
     c->buf_peak = c->buf_usable_size;
     c->buf_peak_last_reset_time = server.unixtime;
-    memset(&c->reqres, 0, sizeof(c->reqres));
     c->ref_repl_buf_node = NULL;
     c->ref_block_pos = 0;
     c->qb_pos = 0;
@@ -395,7 +394,7 @@ void _addReplyToBufferOrList(client *c, const char *s, size_t len) {
         return;
     }
 
-    reqresAppendRequest(c);
+    reqresSaveClientReplyOffset(c);
 
     size_t reply_len = _addReplyToBuffer(c,s,len);
     if (len > reply_len) _addReplyProtoToList(c,s+reply_len,len-reply_len);
@@ -721,7 +720,7 @@ void *addReplyDeferredLen(client *c) {
         return NULL;
     }
 
-    reqresAppendRequest(c);
+    reqresSaveClientReplyOffset(c);
 
     trimReplyUnusedTailSpace(c);
     listAddNodeTail(c->reply,NULL); /* NULL is our placeholder. */
@@ -1613,6 +1612,9 @@ void freeClient(client *c) {
     freeClientOriginalArgv(c);
     if (c->deferred_reply_errors)
         listRelease(c->deferred_reply_errors);
+#ifdef LOG_REQ_RES
+    reqresReset(c, 1);
+#endif
 
     /* Unlink the client: this will close the socket, remove the I/O
      * handlers, and remove references of the client from different
@@ -1824,7 +1826,6 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         /* If the buffer was sent, set bufpos to zero to continue with
          * the remainder of the reply. */
         if (remaining >= buf_len) {
-            serverLog(LL_WARNING, "GUYBE zero bufpos 1");
             c->bufpos = 0;
             c->sentlen = 0;
         }
@@ -1897,8 +1898,6 @@ int _writeToClient(client *c, ssize_t *nwritten) {
         /* If the buffer was sent, set bufpos to zero to continue with
          * the remainder of the reply. */
         if ((int)c->sentlen == c->bufpos) {
-            serverLog(LL_WARNING, "GUYBE zero bufpos id=%llu", (unsigned long long)c->id);
-            //serverAssert(c->reqres.offset.bufpos == -1);
             c->bufpos = 0;
             c->sentlen = 0;
         }
@@ -2041,6 +2040,9 @@ void resetClient(client *c) {
     c->slot = -1;
     c->duration = 0;
     c->flags &= ~CLIENT_EXECUTING_COMMAND;
+#ifdef LOG_REQ_RES
+    reqresReset(c, 1);
+#endif
 
     if (c->deferred_reply_errors)
         listRelease(c->deferred_reply_errors);
