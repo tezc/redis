@@ -854,7 +854,10 @@ struct redisCommandArg CLIENT_KILL_Args[] = {
 commandHistory CLIENT_LIST_History[] = {
 {"2.8.12","Added unique client `id` field."},
 {"5.0.0","Added optional `TYPE` filter."},
-{"6.2.0","Added `laddr` field and the optional `ID` filter."},
+{"6.0.0","Added `user` field."},
+{"6.2.0","Added `argv-mem`, `tot-mem`, `laddr` and `redir` fields and the optional `ID` filter."},
+{"7.0.0","Added `resp`, `multi-mem`, `rbs` and `rbp` fields."},
+{"7.0.3","Added `ssub` field."},
 {0}
 };
 
@@ -1362,22 +1365,6 @@ struct redisCommandArg KEYS_Args[] = {
 {0}
 };
 
-/* KEYS_ReplySchema_items reply schema */
-struct jsonObjectElement KEYS_ReplySchema_items_elements[] = {
-{JSON_TYPE_STRING,"type",.value.string="string"},
-};
-
-struct jsonObject KEYS_ReplySchema_items = {KEYS_ReplySchema_items_elements,.length=1};
-
-/* KEYS_ReplySchema reply schema */
-struct jsonObjectElement KEYS_ReplySchema_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="list of keys mattaching pattern"},
-{JSON_TYPE_STRING,"type",.value.string="array"},
-{JSON_TYPE_OBJECT,"items",.value.object=&KEYS_ReplySchema_items},
-};
-
-struct jsonObject KEYS_ReplySchema = {KEYS_ReplySchema_elements,.length=3};
-
 /********** MIGRATE ********************/
 
 /* MIGRATE history */
@@ -1445,35 +1432,6 @@ struct redisCommandArg MOVE_Args[] = {
 {0}
 };
 
-/* MOVE_ReplySchema_anyOf_0 reply schema */
-struct jsonObjectElement MOVE_ReplySchema_anyOf_0_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="key was moved"},
-{JSON_TYPE_INTEGER,"const",.value.integer=1},
-};
-
-struct jsonObject MOVE_ReplySchema_anyOf_0 = {MOVE_ReplySchema_anyOf_0_elements,.length=2};
-
-/* MOVE_ReplySchema_anyOf_1 reply schema */
-struct jsonObjectElement MOVE_ReplySchema_anyOf_1_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="key wasn't moved"},
-{JSON_TYPE_INTEGER,"const",.value.integer=0},
-};
-
-struct jsonObject MOVE_ReplySchema_anyOf_1 = {MOVE_ReplySchema_anyOf_1_elements,.length=2};
-
-/* MOVE_ReplySchema_anyOf array reply schema */
-struct jsonObject *MOVE_ReplySchema_anyOf[] = {
-&MOVE_ReplySchema_anyOf_0,
-&MOVE_ReplySchema_anyOf_1,
-};
-
-/* MOVE_ReplySchema reply schema */
-struct jsonObjectElement MOVE_ReplySchema_elements[] = {
-{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=MOVE_ReplySchema_anyOf,.length=2}},
-};
-
-struct jsonObject MOVE_ReplySchema = {MOVE_ReplySchema_elements,.length=1};
-
 /********** OBJECT ENCODING ********************/
 
 /* OBJECT ENCODING history */
@@ -1491,31 +1449,9 @@ struct redisCommandArg OBJECT_ENCODING_Args[] = {
 {0}
 };
 
-/* OBJECT_ENCODING_ReplySchema_anyOf_0 reply schema */
-struct jsonObjectElement OBJECT_ENCODING_ReplySchema_anyOf_0_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="key doesn't exist"},
-{JSON_TYPE_STRING,"type",.value.string="null"},
-};
-
-struct jsonObject OBJECT_ENCODING_ReplySchema_anyOf_0 = {OBJECT_ENCODING_ReplySchema_anyOf_0_elements,.length=2};
-
-/* OBJECT_ENCODING_ReplySchema_anyOf_1 reply schema */
-struct jsonObjectElement OBJECT_ENCODING_ReplySchema_anyOf_1_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="encoding of the object"},
-{JSON_TYPE_STRING,"type",.value.string="string"},
-};
-
-struct jsonObject OBJECT_ENCODING_ReplySchema_anyOf_1 = {OBJECT_ENCODING_ReplySchema_anyOf_1_elements,.length=2};
-
-/* OBJECT_ENCODING_ReplySchema_anyOf array reply schema */
-struct jsonObject *OBJECT_ENCODING_ReplySchema_anyOf[] = {
-&OBJECT_ENCODING_ReplySchema_anyOf_0,
-&OBJECT_ENCODING_ReplySchema_anyOf_1,
-};
-
 /* OBJECT_ENCODING_ReplySchema reply schema */
 struct jsonObjectElement OBJECT_ENCODING_ReplySchema_elements[] = {
-{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=OBJECT_ENCODING_ReplySchema_anyOf,.length=2}},
+{JSON_TYPE_STRING,"type",.value.string="string"},
 };
 
 struct jsonObject OBJECT_ENCODING_ReplySchema = {OBJECT_ENCODING_ReplySchema_elements,.length=1};
@@ -1536,14 +1472,6 @@ struct redisCommandArg OBJECT_FREQ_Args[] = {
 {"key",ARG_TYPE_KEY,0,NULL,NULL,NULL,CMD_ARG_NONE},
 {0}
 };
-
-/* OBJECT_FREQ_ReplySchema reply schema */
-struct jsonObjectElement OBJECT_FREQ_ReplySchema_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="the counter's value"},
-{JSON_TYPE_STRING,"type",.value.string="integer"},
-};
-
-struct jsonObject OBJECT_FREQ_ReplySchema = {OBJECT_FREQ_ReplySchema_elements,.length=2};
 
 /********** OBJECT HELP ********************/
 
@@ -1570,14 +1498,6 @@ struct redisCommandArg OBJECT_IDLETIME_Args[] = {
 {0}
 };
 
-/* OBJECT_IDLETIME_ReplySchema reply schema */
-struct jsonObjectElement OBJECT_IDLETIME_ReplySchema_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="the idle time in seconds"},
-{JSON_TYPE_STRING,"type",.value.string="integer"},
-};
-
-struct jsonObject OBJECT_IDLETIME_ReplySchema = {OBJECT_IDLETIME_ReplySchema_elements,.length=2};
-
 /********** OBJECT REFCOUNT ********************/
 
 /* OBJECT REFCOUNT history */
@@ -1595,21 +1515,13 @@ struct redisCommandArg OBJECT_REFCOUNT_Args[] = {
 {0}
 };
 
-/* OBJECT_REFCOUNT_ReplySchema reply schema */
-struct jsonObjectElement OBJECT_REFCOUNT_ReplySchema_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="the number of references"},
-{JSON_TYPE_STRING,"type",.value.string="integer"},
-};
-
-struct jsonObject OBJECT_REFCOUNT_ReplySchema = {OBJECT_REFCOUNT_ReplySchema_elements,.length=2};
-
 /* OBJECT command table */
 struct redisCommand OBJECT_Subcommands[] = {
 {"encoding","Inspect the internal encoding of a Redis object","O(1)","2.2.3",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,OBJECT_ENCODING_History,OBJECT_ENCODING_tips,objectCommand,3,CMD_READONLY,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RO,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=OBJECT_ENCODING_Args,.reply_schema=&OBJECT_ENCODING_ReplySchema},
-{"freq","Get the logarithmic access frequency counter of a Redis object","O(1)","4.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,OBJECT_FREQ_History,OBJECT_FREQ_tips,objectCommand,3,CMD_READONLY,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RO,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=OBJECT_FREQ_Args,.reply_schema=&OBJECT_FREQ_ReplySchema},
+{"freq","Get the logarithmic access frequency counter of a Redis object","O(1)","4.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,OBJECT_FREQ_History,OBJECT_FREQ_tips,objectCommand,3,CMD_READONLY,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RO,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=OBJECT_FREQ_Args},
 {"help","Show helpful text about the different subcommands","O(1)","6.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,OBJECT_HELP_History,OBJECT_HELP_tips,objectCommand,2,CMD_LOADING|CMD_STALE,ACL_CATEGORY_KEYSPACE},
-{"idletime","Get the time since a Redis object was last accessed","O(1)","2.2.3",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,OBJECT_IDLETIME_History,OBJECT_IDLETIME_tips,objectCommand,3,CMD_READONLY,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RO,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=OBJECT_IDLETIME_Args,.reply_schema=&OBJECT_IDLETIME_ReplySchema},
-{"refcount","Get the number of references to the value of the key","O(1)","2.2.3",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,OBJECT_REFCOUNT_History,OBJECT_REFCOUNT_tips,objectCommand,3,CMD_READONLY,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RO,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=OBJECT_REFCOUNT_Args,.reply_schema=&OBJECT_REFCOUNT_ReplySchema},
+{"idletime","Get the time since a Redis object was last accessed","O(1)","2.2.3",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,OBJECT_IDLETIME_History,OBJECT_IDLETIME_tips,objectCommand,3,CMD_READONLY,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RO,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=OBJECT_IDLETIME_Args},
+{"refcount","Get the number of references to the value of the key","O(1)","2.2.3",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,OBJECT_REFCOUNT_History,OBJECT_REFCOUNT_tips,objectCommand,3,CMD_READONLY,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RO,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=OBJECT_REFCOUNT_Args},
 {0}
 };
 
@@ -1737,35 +1649,6 @@ const char *RANDOMKEY_tips[] = {
 NULL
 };
 
-/* RANDOMKEY_ReplySchema_anyOf_0 reply schema */
-struct jsonObjectElement RANDOMKEY_ReplySchema_anyOf_0_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="when the database is empty"},
-{JSON_TYPE_STRING,"type",.value.string="null"},
-};
-
-struct jsonObject RANDOMKEY_ReplySchema_anyOf_0 = {RANDOMKEY_ReplySchema_anyOf_0_elements,.length=2};
-
-/* RANDOMKEY_ReplySchema_anyOf_1 reply schema */
-struct jsonObjectElement RANDOMKEY_ReplySchema_anyOf_1_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="random key in db"},
-{JSON_TYPE_STRING,"type",.value.string="string"},
-};
-
-struct jsonObject RANDOMKEY_ReplySchema_anyOf_1 = {RANDOMKEY_ReplySchema_anyOf_1_elements,.length=2};
-
-/* RANDOMKEY_ReplySchema_anyOf array reply schema */
-struct jsonObject *RANDOMKEY_ReplySchema_anyOf[] = {
-&RANDOMKEY_ReplySchema_anyOf_0,
-&RANDOMKEY_ReplySchema_anyOf_1,
-};
-
-/* RANDOMKEY_ReplySchema reply schema */
-struct jsonObjectElement RANDOMKEY_ReplySchema_elements[] = {
-{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=RANDOMKEY_ReplySchema_anyOf,.length=2}},
-};
-
-struct jsonObject RANDOMKEY_ReplySchema = {RANDOMKEY_ReplySchema_elements,.length=1};
-
 /********** RENAME ********************/
 
 /* RENAME history */
@@ -1798,35 +1681,6 @@ struct redisCommandArg RENAMENX_Args[] = {
 {"newkey",ARG_TYPE_KEY,1,NULL,NULL,NULL,CMD_ARG_NONE},
 {0}
 };
-
-/* RENAMENX_ReplySchema_anyOf_0 reply schema */
-struct jsonObjectElement RENAMENX_ReplySchema_anyOf_0_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="key was renamed to newkey"},
-{JSON_TYPE_INTEGER,"const",.value.integer=1},
-};
-
-struct jsonObject RENAMENX_ReplySchema_anyOf_0 = {RENAMENX_ReplySchema_anyOf_0_elements,.length=2};
-
-/* RENAMENX_ReplySchema_anyOf_1 reply schema */
-struct jsonObjectElement RENAMENX_ReplySchema_anyOf_1_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="new key already exists"},
-{JSON_TYPE_INTEGER,"const",.value.integer=0},
-};
-
-struct jsonObject RENAMENX_ReplySchema_anyOf_1 = {RENAMENX_ReplySchema_anyOf_1_elements,.length=2};
-
-/* RENAMENX_ReplySchema_anyOf array reply schema */
-struct jsonObject *RENAMENX_ReplySchema_anyOf[] = {
-&RENAMENX_ReplySchema_anyOf_0,
-&RENAMENX_ReplySchema_anyOf_1,
-};
-
-/* RENAMENX_ReplySchema reply schema */
-struct jsonObjectElement RENAMENX_ReplySchema_elements[] = {
-{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=RENAMENX_ReplySchema_anyOf,.length=2}},
-};
-
-struct jsonObject RENAMENX_ReplySchema = {RENAMENX_ReplySchema_elements,.length=1};
 
 /********** RESTORE ********************/
 
@@ -2097,6 +1951,14 @@ struct redisCommandArg GEOADD_Args[] = {
 {0}
 };
 
+/* GEOADD_ReplySchema reply schema */
+struct jsonObjectElement GEOADD_ReplySchema_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="When used without optional arguments, the number of elements added to the sorted set (excluding score updates).  If the CH option is specified, the number of elements that were changed (added or updated)."},
+{JSON_TYPE_STRING,"type",.value.string="integer"},
+};
+
+struct jsonObject GEOADD_ReplySchema = {GEOADD_ReplySchema_elements,.length=2};
+
 /********** GEODIST ********************/
 
 /* GEODIST history */
@@ -2123,6 +1985,36 @@ struct redisCommandArg GEODIST_Args[] = {
 {0}
 };
 
+/* GEODIST_ReplySchema_oneOf_0 reply schema */
+struct jsonObjectElement GEODIST_ReplySchema_oneOf_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="one or both of elements are missing"},
+{JSON_TYPE_STRING,"type",.value.string="null"},
+};
+
+struct jsonObject GEODIST_ReplySchema_oneOf_0 = {GEODIST_ReplySchema_oneOf_0_elements,.length=2};
+
+/* GEODIST_ReplySchema_oneOf_1 reply schema */
+struct jsonObjectElement GEODIST_ReplySchema_oneOf_1_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="distance as a double (represented as a string) in the specified units"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+{JSON_TYPE_STRING,"pattern",.value.string="^[0-9]*(.[0-9]*)?$"},
+};
+
+struct jsonObject GEODIST_ReplySchema_oneOf_1 = {GEODIST_ReplySchema_oneOf_1_elements,.length=3};
+
+/* GEODIST_ReplySchema_oneOf array reply schema */
+struct jsonObject *GEODIST_ReplySchema_oneOf[] = {
+&GEODIST_ReplySchema_oneOf_0,
+&GEODIST_ReplySchema_oneOf_1,
+};
+
+/* GEODIST_ReplySchema reply schema */
+struct jsonObjectElement GEODIST_ReplySchema_elements[] = {
+{JSON_TYPE_ARRAY,"oneOf",.value.array={.objects=GEODIST_ReplySchema_oneOf,.length=2}},
+};
+
+struct jsonObject GEODIST_ReplySchema = {GEODIST_ReplySchema_elements,.length=1};
+
 /********** GEOHASH ********************/
 
 /* GEOHASH history */
@@ -2138,6 +2030,22 @@ struct redisCommandArg GEOHASH_Args[] = {
 {0}
 };
 
+/* GEOHASH_ReplySchema_items reply schema */
+struct jsonObjectElement GEOHASH_ReplySchema_items_elements[] = {
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEOHASH_ReplySchema_items = {GEOHASH_ReplySchema_items_elements,.length=1};
+
+/* GEOHASH_ReplySchema reply schema */
+struct jsonObjectElement GEOHASH_ReplySchema_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="An array where each element is the Geohash corresponding to each member name passed as argument to the command."},
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEOHASH_ReplySchema_items},
+};
+
+struct jsonObject GEOHASH_ReplySchema = {GEOHASH_ReplySchema_elements,.length=3};
+
 /********** GEOPOS ********************/
 
 /* GEOPOS history */
@@ -2152,6 +2060,68 @@ struct redisCommandArg GEOPOS_Args[] = {
 {"member",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL|CMD_ARG_MULTIPLE},
 {0}
 };
+
+/* GEOPOS_ReplySchema_items_oneOf_0 reply schema */
+struct jsonObjectElement GEOPOS_ReplySchema_items_oneOf_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="No element is exist"},
+{JSON_TYPE_STRING,"type",.value.string="null"},
+};
+
+struct jsonObject GEOPOS_ReplySchema_items_oneOf_0 = {GEOPOS_ReplySchema_items_oneOf_0_elements,.length=2};
+
+/* GEOPOS_ReplySchema_items_oneOf_1_items_0 reply schema */
+struct jsonObjectElement GEOPOS_ReplySchema_items_oneOf_1_items_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="Latitude (x)"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEOPOS_ReplySchema_items_oneOf_1_items_0 = {GEOPOS_ReplySchema_items_oneOf_1_items_0_elements,.length=2};
+
+/* GEOPOS_ReplySchema_items_oneOf_1_items_1 reply schema */
+struct jsonObjectElement GEOPOS_ReplySchema_items_oneOf_1_items_1_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="Longitude (y)"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEOPOS_ReplySchema_items_oneOf_1_items_1 = {GEOPOS_ReplySchema_items_oneOf_1_items_1_elements,.length=2};
+
+/* GEOPOS_ReplySchema_items_oneOf_1_items array reply schema */
+struct jsonObject *GEOPOS_ReplySchema_items_oneOf_1_items[] = {
+&GEOPOS_ReplySchema_items_oneOf_1_items_0,
+&GEOPOS_ReplySchema_items_oneOf_1_items_1,
+};
+
+/* GEOPOS_ReplySchema_items_oneOf_1 reply schema */
+struct jsonObjectElement GEOPOS_ReplySchema_items_oneOf_1_elements[] = {
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_INTEGER,"minItems",.value.integer=2},
+{JSON_TYPE_INTEGER,"maxItems",.value.integer=2},
+{JSON_TYPE_ARRAY,"items",.value.array={.objects=GEOPOS_ReplySchema_items_oneOf_1_items,.length=2}},
+};
+
+struct jsonObject GEOPOS_ReplySchema_items_oneOf_1 = {GEOPOS_ReplySchema_items_oneOf_1_elements,.length=4};
+
+/* GEOPOS_ReplySchema_items_oneOf array reply schema */
+struct jsonObject *GEOPOS_ReplySchema_items_oneOf[] = {
+&GEOPOS_ReplySchema_items_oneOf_0,
+&GEOPOS_ReplySchema_items_oneOf_1,
+};
+
+/* GEOPOS_ReplySchema_items reply schema */
+struct jsonObjectElement GEOPOS_ReplySchema_items_elements[] = {
+{JSON_TYPE_ARRAY,"oneOf",.value.array={.objects=GEOPOS_ReplySchema_items_oneOf,.length=2}},
+};
+
+struct jsonObject GEOPOS_ReplySchema_items = {GEOPOS_ReplySchema_items_elements,.length=1};
+
+/* GEOPOS_ReplySchema reply schema */
+struct jsonObjectElement GEOPOS_ReplySchema_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="An array where each element is a two elements array representing longitude and latitude (x,y) of each member name passed as argument to the command"},
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEOPOS_ReplySchema_items},
+};
+
+struct jsonObject GEOPOS_ReplySchema = {GEOPOS_ReplySchema_elements,.length=3};
 
 /********** GEORADIUS ********************/
 
@@ -2205,6 +2175,132 @@ struct redisCommandArg GEORADIUS_Args[] = {
 {0}
 };
 
+/* GEORADIUS_ReplySchema_anyOf_0_items reply schema */
+struct jsonObjectElement GEORADIUS_ReplySchema_anyOf_0_items_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="name"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEORADIUS_ReplySchema_anyOf_0_items = {GEORADIUS_ReplySchema_anyOf_0_items_elements,.length=2};
+
+/* GEORADIUS_ReplySchema_anyOf_0 reply schema */
+struct jsonObjectElement GEORADIUS_ReplySchema_anyOf_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If no WITH option is specified, array of matched members names"},
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEORADIUS_ReplySchema_anyOf_0_items},
+};
+
+struct jsonObject GEORADIUS_ReplySchema_anyOf_0 = {GEORADIUS_ReplySchema_anyOf_0_elements,.length=3};
+
+/* GEORADIUS_ReplySchema_anyOf_1_items_prefixItems reply schema */
+struct jsonObjectElement GEORADIUS_ReplySchema_anyOf_1_items_prefixItems_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="name"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEORADIUS_ReplySchema_anyOf_1_items_prefixItems = {GEORADIUS_ReplySchema_anyOf_1_items_prefixItems_elements,.length=2};
+
+/* GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_0 reply schema */
+struct jsonObjectElement GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHDIST option is specified, the distance from the center as a floating point number, in the same unit specified in the radius"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_0 = {GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_0_elements,.length=2};
+
+/* GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_1 reply schema */
+struct jsonObjectElement GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_1_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHHASH option is specified, the geohash integer"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_1 = {GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_1_elements,.length=2};
+
+/* GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_items_0 reply schema */
+struct jsonObjectElement GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_items_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="latitude (x)"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_items_0 = {GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_items_0_elements,.length=2};
+
+/* GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_items_1 reply schema */
+struct jsonObjectElement GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_items_1_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="longitude (y)"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_items_1 = {GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_items_1_elements,.length=2};
+
+/* GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_items array reply schema */
+struct jsonObject *GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_items[] = {
+&GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_items_0,
+&GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_items_1,
+};
+
+/* GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2 reply schema */
+struct jsonObjectElement GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHCOORD option is specified, the coordinates as a two items x,y array (longitude,latitude)"},
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_ARRAY,"items",.value.array={.objects=GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_items,.length=2}},
+};
+
+struct jsonObject GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2 = {GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2_elements,.length=3};
+
+/* GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf array reply schema */
+struct jsonObject *GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf[] = {
+&GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_0,
+&GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_1,
+&GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf_2,
+};
+
+/* GEORADIUS_ReplySchema_anyOf_1_items_items reply schema */
+struct jsonObjectElement GEORADIUS_ReplySchema_anyOf_1_items_items_elements[] = {
+{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=GEORADIUS_ReplySchema_anyOf_1_items_items_anyOf,.length=3}},
+};
+
+struct jsonObject GEORADIUS_ReplySchema_anyOf_1_items_items = {GEORADIUS_ReplySchema_anyOf_1_items_items_elements,.length=1};
+
+/* GEORADIUS_ReplySchema_anyOf_1_items reply schema */
+struct jsonObjectElement GEORADIUS_ReplySchema_anyOf_1_items_elements[] = {
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"prefixItems",.value.object=&GEORADIUS_ReplySchema_anyOf_1_items_prefixItems},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEORADIUS_ReplySchema_anyOf_1_items_items},
+};
+
+struct jsonObject GEORADIUS_ReplySchema_anyOf_1_items = {GEORADIUS_ReplySchema_anyOf_1_items_elements,.length=3};
+
+/* GEORADIUS_ReplySchema_anyOf_1 reply schema */
+struct jsonObjectElement GEORADIUS_ReplySchema_anyOf_1_elements[] = {
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEORADIUS_ReplySchema_anyOf_1_items},
+};
+
+struct jsonObject GEORADIUS_ReplySchema_anyOf_1 = {GEORADIUS_ReplySchema_anyOf_1_elements,.length=2};
+
+/* GEORADIUS_ReplySchema_anyOf_2 reply schema */
+struct jsonObjectElement GEORADIUS_ReplySchema_anyOf_2_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="number of items stored in key"},
+{JSON_TYPE_STRING,"type",.value.string="integer"},
+};
+
+struct jsonObject GEORADIUS_ReplySchema_anyOf_2 = {GEORADIUS_ReplySchema_anyOf_2_elements,.length=2};
+
+/* GEORADIUS_ReplySchema_anyOf array reply schema */
+struct jsonObject *GEORADIUS_ReplySchema_anyOf[] = {
+&GEORADIUS_ReplySchema_anyOf_0,
+&GEORADIUS_ReplySchema_anyOf_1,
+&GEORADIUS_ReplySchema_anyOf_2,
+};
+
+/* GEORADIUS_ReplySchema reply schema */
+struct jsonObjectElement GEORADIUS_ReplySchema_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="Array of matched members information"},
+{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=GEORADIUS_ReplySchema_anyOf,.length=3}},
+};
+
+struct jsonObject GEORADIUS_ReplySchema = {GEORADIUS_ReplySchema_elements,.length=2};
+
 /********** GEORADIUSBYMEMBER ********************/
 
 /* GEORADIUSBYMEMBER history */
@@ -2255,6 +2351,132 @@ struct redisCommandArg GEORADIUSBYMEMBER_Args[] = {
 {0}
 };
 
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_0_items reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_ReplySchema_anyOf_0_items_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="name"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_ReplySchema_anyOf_0_items = {GEORADIUSBYMEMBER_ReplySchema_anyOf_0_items_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_0 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_ReplySchema_anyOf_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If no WITH option is specified, array of matched members names"},
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEORADIUSBYMEMBER_ReplySchema_anyOf_0_items},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_ReplySchema_anyOf_0 = {GEORADIUSBYMEMBER_ReplySchema_anyOf_0_elements,.length=3};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_prefixItems reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_prefixItems_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="name"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_prefixItems = {GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_prefixItems_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_0 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHDIST option is specified, the distance from the center as a floating point number, in the same unit specified in the radius"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_0 = {GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_0_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_1 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_1_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHHASH option is specified, the geohash integer"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_1 = {GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_1_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_items_0 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_items_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="latitude (x)"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_items_0 = {GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_items_0_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_items_1 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_items_1_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="longitude (y)"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_items_1 = {GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_items_1_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_items array reply schema */
+struct jsonObject *GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_items[] = {
+&GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_items_0,
+&GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_items_1,
+};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHCOORD option is specified, the coordinates as a two items x,y array (longitude,latitude)"},
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_ARRAY,"items",.value.array={.objects=GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_items,.length=2}},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2 = {GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2_elements,.length=3};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf array reply schema */
+struct jsonObject *GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf[] = {
+&GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_0,
+&GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_1,
+&GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf_2,
+};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_elements[] = {
+{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_anyOf,.length=3}},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items = {GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items_elements,.length=1};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_elements[] = {
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"prefixItems",.value.object=&GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_prefixItems},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_items},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items = {GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items_elements,.length=3};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_1 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_ReplySchema_anyOf_1_elements[] = {
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEORADIUSBYMEMBER_ReplySchema_anyOf_1_items},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_ReplySchema_anyOf_1 = {GEORADIUSBYMEMBER_ReplySchema_anyOf_1_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf_2 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_ReplySchema_anyOf_2_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="number of items stored in key"},
+{JSON_TYPE_STRING,"type",.value.string="integer"},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_ReplySchema_anyOf_2 = {GEORADIUSBYMEMBER_ReplySchema_anyOf_2_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_ReplySchema_anyOf array reply schema */
+struct jsonObject *GEORADIUSBYMEMBER_ReplySchema_anyOf[] = {
+&GEORADIUSBYMEMBER_ReplySchema_anyOf_0,
+&GEORADIUSBYMEMBER_ReplySchema_anyOf_1,
+&GEORADIUSBYMEMBER_ReplySchema_anyOf_2,
+};
+
+/* GEORADIUSBYMEMBER_ReplySchema reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_ReplySchema_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="Array of matched members information"},
+{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=GEORADIUSBYMEMBER_ReplySchema_anyOf,.length=3}},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_ReplySchema = {GEORADIUSBYMEMBER_ReplySchema_elements,.length=2};
+
 /********** GEORADIUSBYMEMBER_RO ********************/
 
 /* GEORADIUSBYMEMBER_RO history */
@@ -2299,6 +2521,123 @@ struct redisCommandArg GEORADIUSBYMEMBER_RO_Args[] = {
 {"order",ARG_TYPE_ONEOF,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL,.subargs=GEORADIUSBYMEMBER_RO_order_Subargs},
 {0}
 };
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_0_items reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_0_items_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="name"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_0_items = {GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_0_items_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_0 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If no WITH option is specified, array of matched members names"},
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_0_items},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_0 = {GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_0_elements,.length=3};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_prefixItems reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_prefixItems_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="name"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_prefixItems = {GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_prefixItems_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_0 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHDIST option is specified, the distance from the center as a floating point number, in the same unit specified in the radius"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_0 = {GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_0_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_1 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_1_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHHASH option is specified, the geohash integer"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_1 = {GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_1_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_0 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="latitude (x)"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_0 = {GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_0_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_1 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_1_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="longitude (y)"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_1 = {GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_1_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items array reply schema */
+struct jsonObject *GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items[] = {
+&GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_0,
+&GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_1,
+};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHCOORD option is specified, the coordinates as a two items x,y array (longitude,latitude)"},
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_ARRAY,"items",.value.array={.objects=GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items,.length=2}},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2 = {GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2_elements,.length=3};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf array reply schema */
+struct jsonObject *GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf[] = {
+&GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_0,
+&GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_1,
+&GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf_2,
+};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_elements[] = {
+{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_anyOf,.length=3}},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items = {GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items_elements,.length=1};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_elements[] = {
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"prefixItems",.value.object=&GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_prefixItems},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_items},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items = {GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items_elements,.length=3};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1 reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_elements[] = {
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_items},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1 = {GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1_elements,.length=2};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema_anyOf array reply schema */
+struct jsonObject *GEORADIUSBYMEMBER_RO_ReplySchema_anyOf[] = {
+&GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_0,
+&GEORADIUSBYMEMBER_RO_ReplySchema_anyOf_1,
+};
+
+/* GEORADIUSBYMEMBER_RO_ReplySchema reply schema */
+struct jsonObjectElement GEORADIUSBYMEMBER_RO_ReplySchema_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="Array of matched members information"},
+{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=GEORADIUSBYMEMBER_RO_ReplySchema_anyOf,.length=2}},
+};
+
+struct jsonObject GEORADIUSBYMEMBER_RO_ReplySchema = {GEORADIUSBYMEMBER_RO_ReplySchema_elements,.length=2};
 
 /********** GEORADIUS_RO ********************/
 
@@ -2348,6 +2687,123 @@ struct redisCommandArg GEORADIUS_RO_Args[] = {
 {"order",ARG_TYPE_ONEOF,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL,.subargs=GEORADIUS_RO_order_Subargs},
 {0}
 };
+
+/* GEORADIUS_RO_ReplySchema_anyOf_0_items reply schema */
+struct jsonObjectElement GEORADIUS_RO_ReplySchema_anyOf_0_items_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="name"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEORADIUS_RO_ReplySchema_anyOf_0_items = {GEORADIUS_RO_ReplySchema_anyOf_0_items_elements,.length=2};
+
+/* GEORADIUS_RO_ReplySchema_anyOf_0 reply schema */
+struct jsonObjectElement GEORADIUS_RO_ReplySchema_anyOf_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If no WITH option is specified, array of matched members names"},
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEORADIUS_RO_ReplySchema_anyOf_0_items},
+};
+
+struct jsonObject GEORADIUS_RO_ReplySchema_anyOf_0 = {GEORADIUS_RO_ReplySchema_anyOf_0_elements,.length=3};
+
+/* GEORADIUS_RO_ReplySchema_anyOf_1_items_prefixItems reply schema */
+struct jsonObjectElement GEORADIUS_RO_ReplySchema_anyOf_1_items_prefixItems_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="name"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEORADIUS_RO_ReplySchema_anyOf_1_items_prefixItems = {GEORADIUS_RO_ReplySchema_anyOf_1_items_prefixItems_elements,.length=2};
+
+/* GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_0 reply schema */
+struct jsonObjectElement GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHDIST option is specified, the distance from the center as a floating point number, in the same unit specified in the radius"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_0 = {GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_0_elements,.length=2};
+
+/* GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_1 reply schema */
+struct jsonObjectElement GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_1_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHHASH option is specified, the geohash integer"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_1 = {GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_1_elements,.length=2};
+
+/* GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_0 reply schema */
+struct jsonObjectElement GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="latitude (x)"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_0 = {GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_0_elements,.length=2};
+
+/* GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_1 reply schema */
+struct jsonObjectElement GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_1_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="longitude (y)"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_1 = {GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_1_elements,.length=2};
+
+/* GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items array reply schema */
+struct jsonObject *GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items[] = {
+&GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_0,
+&GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items_1,
+};
+
+/* GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2 reply schema */
+struct jsonObjectElement GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHCOORD option is specified, the coordinates as a two items x,y array (longitude,latitude)"},
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_ARRAY,"items",.value.array={.objects=GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_items,.length=2}},
+};
+
+struct jsonObject GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2 = {GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2_elements,.length=3};
+
+/* GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf array reply schema */
+struct jsonObject *GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf[] = {
+&GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_0,
+&GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_1,
+&GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf_2,
+};
+
+/* GEORADIUS_RO_ReplySchema_anyOf_1_items_items reply schema */
+struct jsonObjectElement GEORADIUS_RO_ReplySchema_anyOf_1_items_items_elements[] = {
+{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=GEORADIUS_RO_ReplySchema_anyOf_1_items_items_anyOf,.length=3}},
+};
+
+struct jsonObject GEORADIUS_RO_ReplySchema_anyOf_1_items_items = {GEORADIUS_RO_ReplySchema_anyOf_1_items_items_elements,.length=1};
+
+/* GEORADIUS_RO_ReplySchema_anyOf_1_items reply schema */
+struct jsonObjectElement GEORADIUS_RO_ReplySchema_anyOf_1_items_elements[] = {
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"prefixItems",.value.object=&GEORADIUS_RO_ReplySchema_anyOf_1_items_prefixItems},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEORADIUS_RO_ReplySchema_anyOf_1_items_items},
+};
+
+struct jsonObject GEORADIUS_RO_ReplySchema_anyOf_1_items = {GEORADIUS_RO_ReplySchema_anyOf_1_items_elements,.length=3};
+
+/* GEORADIUS_RO_ReplySchema_anyOf_1 reply schema */
+struct jsonObjectElement GEORADIUS_RO_ReplySchema_anyOf_1_elements[] = {
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEORADIUS_RO_ReplySchema_anyOf_1_items},
+};
+
+struct jsonObject GEORADIUS_RO_ReplySchema_anyOf_1 = {GEORADIUS_RO_ReplySchema_anyOf_1_elements,.length=2};
+
+/* GEORADIUS_RO_ReplySchema_anyOf array reply schema */
+struct jsonObject *GEORADIUS_RO_ReplySchema_anyOf[] = {
+&GEORADIUS_RO_ReplySchema_anyOf_0,
+&GEORADIUS_RO_ReplySchema_anyOf_1,
+};
+
+/* GEORADIUS_RO_ReplySchema reply schema */
+struct jsonObjectElement GEORADIUS_RO_ReplySchema_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="Array of matched members information"},
+{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=GEORADIUS_RO_ReplySchema_anyOf,.length=2}},
+};
+
+struct jsonObject GEORADIUS_RO_ReplySchema = {GEORADIUS_RO_ReplySchema_elements,.length=2};
 
 /********** GEOSEARCH ********************/
 
@@ -2441,6 +2897,123 @@ struct redisCommandArg GEOSEARCH_Args[] = {
 {0}
 };
 
+/* GEOSEARCH_ReplySchema_anyOf_0_items reply schema */
+struct jsonObjectElement GEOSEARCH_ReplySchema_anyOf_0_items_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="name"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEOSEARCH_ReplySchema_anyOf_0_items = {GEOSEARCH_ReplySchema_anyOf_0_items_elements,.length=2};
+
+/* GEOSEARCH_ReplySchema_anyOf_0 reply schema */
+struct jsonObjectElement GEOSEARCH_ReplySchema_anyOf_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If no WITH option is specified, array of matched members names"},
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEOSEARCH_ReplySchema_anyOf_0_items},
+};
+
+struct jsonObject GEOSEARCH_ReplySchema_anyOf_0 = {GEOSEARCH_ReplySchema_anyOf_0_elements,.length=3};
+
+/* GEOSEARCH_ReplySchema_anyOf_1_items_prefixItems reply schema */
+struct jsonObjectElement GEOSEARCH_ReplySchema_anyOf_1_items_prefixItems_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="name"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEOSEARCH_ReplySchema_anyOf_1_items_prefixItems = {GEOSEARCH_ReplySchema_anyOf_1_items_prefixItems_elements,.length=2};
+
+/* GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_0 reply schema */
+struct jsonObjectElement GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHDIST option is specified, the distance from the center as a floating point number, in the same unit specified in the radius"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_0 = {GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_0_elements,.length=2};
+
+/* GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_1 reply schema */
+struct jsonObjectElement GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_1_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHHASH option is specified, the geohash integer"},
+{JSON_TYPE_STRING,"type",.value.string="string"},
+};
+
+struct jsonObject GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_1 = {GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_1_elements,.length=2};
+
+/* GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_items_0 reply schema */
+struct jsonObjectElement GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_items_0_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="latitude (x)"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_items_0 = {GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_items_0_elements,.length=2};
+
+/* GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_items_1 reply schema */
+struct jsonObjectElement GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_items_1_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="longitude (y)"},
+{JSON_TYPE_STRING,"type",.value.string="number"},
+};
+
+struct jsonObject GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_items_1 = {GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_items_1_elements,.length=2};
+
+/* GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_items array reply schema */
+struct jsonObject *GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_items[] = {
+&GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_items_0,
+&GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_items_1,
+};
+
+/* GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2 reply schema */
+struct jsonObjectElement GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="If WITHCOORD option is specified, the coordinates as a two items x,y array (longitude,latitude)"},
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_ARRAY,"items",.value.array={.objects=GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_items,.length=2}},
+};
+
+struct jsonObject GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2 = {GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2_elements,.length=3};
+
+/* GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf array reply schema */
+struct jsonObject *GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf[] = {
+&GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_0,
+&GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_1,
+&GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf_2,
+};
+
+/* GEOSEARCH_ReplySchema_anyOf_1_items_items reply schema */
+struct jsonObjectElement GEOSEARCH_ReplySchema_anyOf_1_items_items_elements[] = {
+{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=GEOSEARCH_ReplySchema_anyOf_1_items_items_anyOf,.length=3}},
+};
+
+struct jsonObject GEOSEARCH_ReplySchema_anyOf_1_items_items = {GEOSEARCH_ReplySchema_anyOf_1_items_items_elements,.length=1};
+
+/* GEOSEARCH_ReplySchema_anyOf_1_items reply schema */
+struct jsonObjectElement GEOSEARCH_ReplySchema_anyOf_1_items_elements[] = {
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"prefixItems",.value.object=&GEOSEARCH_ReplySchema_anyOf_1_items_prefixItems},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEOSEARCH_ReplySchema_anyOf_1_items_items},
+};
+
+struct jsonObject GEOSEARCH_ReplySchema_anyOf_1_items = {GEOSEARCH_ReplySchema_anyOf_1_items_elements,.length=3};
+
+/* GEOSEARCH_ReplySchema_anyOf_1 reply schema */
+struct jsonObjectElement GEOSEARCH_ReplySchema_anyOf_1_elements[] = {
+{JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_OBJECT,"items",.value.object=&GEOSEARCH_ReplySchema_anyOf_1_items},
+};
+
+struct jsonObject GEOSEARCH_ReplySchema_anyOf_1 = {GEOSEARCH_ReplySchema_anyOf_1_elements,.length=2};
+
+/* GEOSEARCH_ReplySchema_anyOf array reply schema */
+struct jsonObject *GEOSEARCH_ReplySchema_anyOf[] = {
+&GEOSEARCH_ReplySchema_anyOf_0,
+&GEOSEARCH_ReplySchema_anyOf_1,
+};
+
+/* GEOSEARCH_ReplySchema reply schema */
+struct jsonObjectElement GEOSEARCH_ReplySchema_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="Array of matched members information"},
+{JSON_TYPE_ARRAY,"anyOf",.value.array={.objects=GEOSEARCH_ReplySchema_anyOf,.length=2}},
+};
+
+struct jsonObject GEOSEARCH_ReplySchema = {GEOSEARCH_ReplySchema_elements,.length=2};
+
 /********** GEOSEARCHSTORE ********************/
 
 /* GEOSEARCHSTORE history */
@@ -2531,6 +3104,14 @@ struct redisCommandArg GEOSEARCHSTORE_Args[] = {
 {"storedist",ARG_TYPE_PURE_TOKEN,-1,"STOREDIST",NULL,NULL,CMD_ARG_OPTIONAL},
 {0}
 };
+
+/* GEOSEARCHSTORE_ReplySchema reply schema */
+struct jsonObjectElement GEOSEARCHSTORE_ReplySchema_elements[] = {
+{JSON_TYPE_STRING,"description",.value.string="the number of elements in the resulting set"},
+{JSON_TYPE_STRING,"type",.value.string="integer"},
+};
+
+struct jsonObject GEOSEARCHSTORE_ReplySchema = {GEOSEARCHSTORE_ReplySchema_elements,.length=2};
 
 /********** HDEL ********************/
 
@@ -4424,7 +5005,7 @@ struct redisCommandArg SENTINEL_SLAVES_Args[] = {
 /* SENTINEL command table */
 struct redisCommand SENTINEL_Subcommands[] = {
 {"ckquorum","Check for a Sentinel quorum",NULL,"2.8.4",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SENTINEL,SENTINEL_CKQUORUM_History,SENTINEL_CKQUORUM_tips,sentinelCommand,3,CMD_ADMIN|CMD_SENTINEL|CMD_ONLY_SENTINEL,0,.args=SENTINEL_CKQUORUM_Args},
-{"config","Configure Sentinel","O(1)","6.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SENTINEL,SENTINEL_CONFIG_History,SENTINEL_CONFIG_tips,sentinelCommand,-3,CMD_ADMIN|CMD_SENTINEL|CMD_ONLY_SENTINEL,0,.args=SENTINEL_CONFIG_Args},
+{"config","Configure Sentinel","O(1)","6.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SENTINEL,SENTINEL_CONFIG_History,SENTINEL_CONFIG_tips,sentinelCommand,-4,CMD_ADMIN|CMD_SENTINEL|CMD_ONLY_SENTINEL,0,.args=SENTINEL_CONFIG_Args},
 {"debug","List or update the current configurable parameters","O(N) where N is the number of configurable parameters","7.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SENTINEL,SENTINEL_DEBUG_History,SENTINEL_DEBUG_tips,sentinelCommand,-2,CMD_ADMIN|CMD_SENTINEL|CMD_ONLY_SENTINEL,0,.args=SENTINEL_DEBUG_Args},
 {"failover","Force a failover",NULL,"2.8.4",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SENTINEL,SENTINEL_FAILOVER_History,SENTINEL_FAILOVER_tips,sentinelCommand,3,CMD_ADMIN|CMD_SENTINEL|CMD_ONLY_SENTINEL,0,.args=SENTINEL_FAILOVER_Args},
 {"flushconfig","Rewrite configuration file","O(1)","2.8.4",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SENTINEL,SENTINEL_FLUSHCONFIG_History,SENTINEL_FLUSHCONFIG_tips,sentinelCommand,2,CMD_ADMIN|CMD_SENTINEL|CMD_ONLY_SENTINEL,0},
@@ -4687,7 +5268,10 @@ struct jsonObject ACL_LOAD_ReplySchema = {ACL_LOAD_ReplySchema_elements,.length=
 /********** ACL LOG ********************/
 
 /* ACL LOG history */
-#define ACL_LOG_History NULL
+commandHistory ACL_LOG_History[] = {
+{"7.2.0","Added entry ID, timestamp created, and timestamp last updated."},
+{0}
+};
 
 /* ACL LOG tips */
 #define ACL_LOG_tips NULL
@@ -4920,14 +5504,6 @@ struct redisCommand ACL_Subcommands[] = {
 
 /* BGREWRITEAOF tips */
 #define BGREWRITEAOF_tips NULL
-
-/* BGREWRITEAOF_ReplySchema reply schema */
-struct jsonObjectElement BGREWRITEAOF_ReplySchema_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="A simple string reply indicating that the rewriting started or is about to start ASAP"},
-{JSON_TYPE_STRING,"type",.value.string="string"},
-};
-
-struct jsonObject BGREWRITEAOF_ReplySchema = {BGREWRITEAOF_ReplySchema_elements,.length=2};
 
 /********** BGSAVE ********************/
 
@@ -7528,36 +8104,6 @@ struct redisCommandArg XADD_Args[] = {
 {0}
 };
 
-/* XADD_ReplySchema_oneOf_0 reply schema */
-struct jsonObjectElement XADD_ReplySchema_oneOf_0_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="The ID of the added entry. The ID is the one auto-generated if * is passed as ID argument, otherwise the command just returns the same ID specified by the user during insertion."},
-{JSON_TYPE_STRING,"type",.value.string="string"},
-{JSON_TYPE_STRING,"pattern",.value.string="[0-9]+-[0-9]+"},
-};
-
-struct jsonObject XADD_ReplySchema_oneOf_0 = {XADD_ReplySchema_oneOf_0_elements,.length=3};
-
-/* XADD_ReplySchema_oneOf_1 reply schema */
-struct jsonObjectElement XADD_ReplySchema_oneOf_1_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="The NOMKSTREAM option is given and the key doesn't exist."},
-{JSON_TYPE_STRING,"type",.value.string="null"},
-};
-
-struct jsonObject XADD_ReplySchema_oneOf_1 = {XADD_ReplySchema_oneOf_1_elements,.length=2};
-
-/* XADD_ReplySchema_oneOf array reply schema */
-struct jsonObject *XADD_ReplySchema_oneOf[] = {
-&XADD_ReplySchema_oneOf_0,
-&XADD_ReplySchema_oneOf_1,
-};
-
-/* XADD_ReplySchema reply schema */
-struct jsonObjectElement XADD_ReplySchema_elements[] = {
-{JSON_TYPE_ARRAY,"oneOf",.value.array={.objects=XADD_ReplySchema_oneOf,.length=2}},
-};
-
-struct jsonObject XADD_ReplySchema = {XADD_ReplySchema_elements,.length=1};
-
 /********** XAUTOCLAIM ********************/
 
 /* XAUTOCLAIM history */
@@ -7750,15 +8296,6 @@ struct redisCommandArg XDEL_Args[] = {
 {"id",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_MULTIPLE},
 {0}
 };
-
-/* XDEL_ReplySchema reply schema */
-struct jsonObjectElement XDEL_ReplySchema_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="The number of entries actually deleted"},
-{JSON_TYPE_STRING,"type",.value.string="integer"},
-{JSON_TYPE_INTEGER,"minimum",.value.integer=0},
-};
-
-struct jsonObject XDEL_ReplySchema = {XDEL_ReplySchema_elements,.length=3};
 
 /********** XGROUP CREATE ********************/
 
@@ -8709,15 +9246,6 @@ struct redisCommandArg XLEN_Args[] = {
 {0}
 };
 
-/* XLEN_ReplySchema reply schema */
-struct jsonObjectElement XLEN_ReplySchema_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="The number of entries of the stream at key"},
-{JSON_TYPE_STRING,"type",.value.string="integer"},
-{JSON_TYPE_INTEGER,"minimum",.value.integer=0},
-};
-
-struct jsonObject XLEN_ReplySchema = {XLEN_ReplySchema_elements,.length=3};
-
 /********** XPENDING ********************/
 
 /* XPENDING history */
@@ -9003,86 +9531,6 @@ struct redisCommandArg XREAD_Args[] = {
 {0}
 };
 
-/* XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_0 reply schema */
-struct jsonObjectElement XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_0_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="Steam id"},
-{JSON_TYPE_STRING,"type",.value.string="string"},
-{JSON_TYPE_STRING,"pattern",.value.string="[0-9]+-[0-9]+"},
-};
-
-struct jsonObject XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_0 = {XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_0_elements,.length=3};
-
-/* XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_1_items reply schema */
-struct jsonObjectElement XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_1_items_elements[] = {
-{JSON_TYPE_STRING,"type",.value.string="string"},
-};
-
-struct jsonObject XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_1_items = {XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_1_items_elements,.length=1};
-
-/* XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_1 reply schema */
-struct jsonObjectElement XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_1_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="Array of field-value pairs"},
-{JSON_TYPE_STRING,"type",.value.string="array"},
-{JSON_TYPE_OBJECT,"items",.value.object=&XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_1_items},
-};
-
-struct jsonObject XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_1 = {XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_1_elements,.length=3};
-
-/* XREAD_ReplySchema_oneOf_0_additionalProperties_items_items array reply schema */
-struct jsonObject *XREAD_ReplySchema_oneOf_0_additionalProperties_items_items[] = {
-&XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_0,
-&XREAD_ReplySchema_oneOf_0_additionalProperties_items_items_1,
-};
-
-/* XREAD_ReplySchema_oneOf_0_additionalProperties_items reply schema */
-struct jsonObjectElement XREAD_ReplySchema_oneOf_0_additionalProperties_items_elements[] = {
-{JSON_TYPE_STRING,"type",.value.string="array"},
-{JSON_TYPE_INTEGER,"minItems",.value.integer=2},
-{JSON_TYPE_INTEGER,"maxItems",.value.integer=2},
-{JSON_TYPE_ARRAY,"items",.value.array={.objects=XREAD_ReplySchema_oneOf_0_additionalProperties_items_items,.length=2}},
-};
-
-struct jsonObject XREAD_ReplySchema_oneOf_0_additionalProperties_items = {XREAD_ReplySchema_oneOf_0_additionalProperties_items_elements,.length=4};
-
-/* XREAD_ReplySchema_oneOf_0_additionalProperties reply schema */
-struct jsonObjectElement XREAD_ReplySchema_oneOf_0_additionalProperties_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="The entries reported for that key"},
-{JSON_TYPE_STRING,"type",.value.string="array"},
-{JSON_TYPE_OBJECT,"items",.value.object=&XREAD_ReplySchema_oneOf_0_additionalProperties_items},
-};
-
-struct jsonObject XREAD_ReplySchema_oneOf_0_additionalProperties = {XREAD_ReplySchema_oneOf_0_additionalProperties_elements,.length=3};
-
-/* XREAD_ReplySchema_oneOf_0 reply schema */
-struct jsonObjectElement XREAD_ReplySchema_oneOf_0_elements[] = {
-{JSON_TYPE_STRING,"destiprion",.value.string="A map of elements when each element is an array composed of a two element containing the key name and the entries reported for that key"},
-{JSON_TYPE_STRING,"type",.value.string="object"},
-{JSON_TYPE_OBJECT,"additionalProperties",.value.object=&XREAD_ReplySchema_oneOf_0_additionalProperties},
-};
-
-struct jsonObject XREAD_ReplySchema_oneOf_0 = {XREAD_ReplySchema_oneOf_0_elements,.length=3};
-
-/* XREAD_ReplySchema_oneOf_1 reply schema */
-struct jsonObjectElement XREAD_ReplySchema_oneOf_1_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="If BLOCK option is given, and a timeout occurs, or there is no stream we can serve"},
-{JSON_TYPE_STRING,"type",.value.string="null"},
-};
-
-struct jsonObject XREAD_ReplySchema_oneOf_1 = {XREAD_ReplySchema_oneOf_1_elements,.length=2};
-
-/* XREAD_ReplySchema_oneOf array reply schema */
-struct jsonObject *XREAD_ReplySchema_oneOf[] = {
-&XREAD_ReplySchema_oneOf_0,
-&XREAD_ReplySchema_oneOf_1,
-};
-
-/* XREAD_ReplySchema reply schema */
-struct jsonObjectElement XREAD_ReplySchema_elements[] = {
-{JSON_TYPE_ARRAY,"oneOf",.value.array={.objects=XREAD_ReplySchema_oneOf,.length=2}},
-};
-
-struct jsonObject XREAD_ReplySchema = {XREAD_ReplySchema_elements,.length=1};
-
 /********** XREADGROUP ********************/
 
 /* XREADGROUP history */
@@ -9135,56 +9583,6 @@ struct redisCommandArg XREVRANGE_Args[] = {
 {0}
 };
 
-/* XREVRANGE_ReplySchema_items_items_0 reply schema */
-struct jsonObjectElement XREVRANGE_ReplySchema_items_items_0_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="Stream id"},
-{JSON_TYPE_STRING,"type",.value.string="string"},
-{JSON_TYPE_STRING,"pattern",.value.string="[0-9]+-[0-9]+"},
-};
-
-struct jsonObject XREVRANGE_ReplySchema_items_items_0 = {XREVRANGE_ReplySchema_items_items_0_elements,.length=3};
-
-/* XREVRANGE_ReplySchema_items_items_1_items reply schema */
-struct jsonObjectElement XREVRANGE_ReplySchema_items_items_1_items_elements[] = {
-{JSON_TYPE_STRING,"type",.value.string="string"},
-};
-
-struct jsonObject XREVRANGE_ReplySchema_items_items_1_items = {XREVRANGE_ReplySchema_items_items_1_items_elements,.length=1};
-
-/* XREVRANGE_ReplySchema_items_items_1 reply schema */
-struct jsonObjectElement XREVRANGE_ReplySchema_items_items_1_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="Array of field-value pairs"},
-{JSON_TYPE_STRING,"type",.value.string="array"},
-{JSON_TYPE_OBJECT,"items",.value.object=&XREVRANGE_ReplySchema_items_items_1_items},
-};
-
-struct jsonObject XREVRANGE_ReplySchema_items_items_1 = {XREVRANGE_ReplySchema_items_items_1_elements,.length=3};
-
-/* XREVRANGE_ReplySchema_items_items array reply schema */
-struct jsonObject *XREVRANGE_ReplySchema_items_items[] = {
-&XREVRANGE_ReplySchema_items_items_0,
-&XREVRANGE_ReplySchema_items_items_1,
-};
-
-/* XREVRANGE_ReplySchema_items reply schema */
-struct jsonObjectElement XREVRANGE_ReplySchema_items_elements[] = {
-{JSON_TYPE_STRING,"type",.value.string="array"},
-{JSON_TYPE_INTEGER,"minItems",.value.integer=2},
-{JSON_TYPE_INTEGER,"maxItems",.value.integer=2},
-{JSON_TYPE_ARRAY,"items",.value.array={.objects=XREVRANGE_ReplySchema_items_items,.length=2}},
-};
-
-struct jsonObject XREVRANGE_ReplySchema_items = {XREVRANGE_ReplySchema_items_elements,.length=4};
-
-/* XREVRANGE_ReplySchema reply schema */
-struct jsonObjectElement XREVRANGE_ReplySchema_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="An array of the entries with IDs matching the specified range"},
-{JSON_TYPE_STRING,"type",.value.string="array"},
-{JSON_TYPE_OBJECT,"items",.value.object=&XREVRANGE_ReplySchema_items},
-};
-
-struct jsonObject XREVRANGE_ReplySchema = {XREVRANGE_ReplySchema_elements,.length=3};
-
 /********** XSETID ********************/
 
 /* XSETID history */
@@ -9200,17 +9598,10 @@ commandHistory XSETID_History[] = {
 struct redisCommandArg XSETID_Args[] = {
 {"key",ARG_TYPE_KEY,0,NULL,NULL,NULL,CMD_ARG_NONE},
 {"last-id",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_NONE},
-{"entries-added",ARG_TYPE_INTEGER,-1,"ENTRIESADDED",NULL,NULL,CMD_ARG_OPTIONAL},
-{"max-deleted-id",ARG_TYPE_STRING,-1,"MAXDELETEDID",NULL,NULL,CMD_ARG_OPTIONAL},
+{"entries-added",ARG_TYPE_INTEGER,-1,"ENTRIESADDED",NULL,"7.0.0",CMD_ARG_OPTIONAL},
+{"max-deleted-id",ARG_TYPE_STRING,-1,"MAXDELETEDID",NULL,"7.0.0",CMD_ARG_OPTIONAL},
 {0}
 };
-
-/* XSETID_ReplySchema reply schema */
-struct jsonObjectElement XSETID_ReplySchema_elements[] = {
-{JSON_TYPE_STRING,"const",.value.string="OK"},
-};
-
-struct jsonObject XSETID_ReplySchema = {XSETID_ReplySchema_elements,.length=1};
 
 /********** XTRIM ********************/
 
@@ -9255,15 +9646,6 @@ struct redisCommandArg XTRIM_Args[] = {
 {"trim",ARG_TYPE_BLOCK,-1,NULL,NULL,NULL,CMD_ARG_NONE,.subargs=XTRIM_trim_Subargs},
 {0}
 };
-
-/* XTRIM_ReplySchema reply schema */
-struct jsonObjectElement XTRIM_ReplySchema_elements[] = {
-{JSON_TYPE_STRING,"description",.value.string="The number of entries deleted from the stream."},
-{JSON_TYPE_STRING,"type",.value.string="integer"},
-{JSON_TYPE_INTEGER,"minimum",.value.integer=0},
-};
-
-struct jsonObject XTRIM_ReplySchema = {XTRIM_ReplySchema_elements,.length=3};
 
 /********** APPEND ********************/
 
@@ -9819,20 +10201,20 @@ struct redisCommand redisCommandTable[] = {
 {"expire","Set a key's time to live in seconds","O(1)","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,EXPIRE_History,EXPIRE_tips,expireCommand,-3,CMD_WRITE|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=EXPIRE_Args},
 {"expireat","Set the expiration for a key as a UNIX timestamp","O(1)","1.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,EXPIREAT_History,EXPIREAT_tips,expireatCommand,-3,CMD_WRITE|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=EXPIREAT_Args},
 {"expiretime","Get the expiration Unix timestamp for a key","O(1)","7.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,EXPIRETIME_History,EXPIRETIME_tips,expiretimeCommand,2,CMD_READONLY|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=EXPIRETIME_Args},
-{"keys","Find all keys matching the given pattern","O(N) with N being the number of keys in the database, under the assumption that the key names in the database and the given pattern have limited length.","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,KEYS_History,KEYS_tips,keysCommand,2,CMD_READONLY,ACL_CATEGORY_KEYSPACE|ACL_CATEGORY_DANGEROUS,.args=KEYS_Args,.reply_schema=&KEYS_ReplySchema},
+{"keys","Find all keys matching the given pattern","O(N) with N being the number of keys in the database, under the assumption that the key names in the database and the given pattern have limited length.","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,KEYS_History,KEYS_tips,keysCommand,2,CMD_READONLY,ACL_CATEGORY_KEYSPACE|ACL_CATEGORY_DANGEROUS,.args=KEYS_Args},
 {"migrate","Atomically transfer a key from a Redis instance to another one.","This command actually executes a DUMP+DEL in the source instance, and a RESTORE in the target instance. See the pages of these commands for time complexity. Also an O(N) data transfer between the two instances is performed.","2.6.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,MIGRATE_History,MIGRATE_tips,migrateCommand,-6,CMD_WRITE,ACL_CATEGORY_KEYSPACE|ACL_CATEGORY_DANGEROUS,{{NULL,CMD_KEY_RW|CMD_KEY_ACCESS|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={3},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_RW|CMD_KEY_ACCESS|CMD_KEY_DELETE|CMD_KEY_INCOMPLETE,KSPEC_BS_KEYWORD,.bs.keyword={"KEYS",-2},KSPEC_FK_RANGE,.fk.range={-1,1,0}}},migrateGetKeys,.args=MIGRATE_Args},
-{"move","Move a key to another database","O(1)","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,MOVE_History,MOVE_tips,moveCommand,3,CMD_WRITE|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RW|CMD_KEY_ACCESS|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=MOVE_Args,.reply_schema=&MOVE_ReplySchema},
+{"move","Move a key to another database","O(1)","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,MOVE_History,MOVE_tips,moveCommand,3,CMD_WRITE|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RW|CMD_KEY_ACCESS|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=MOVE_Args},
 {"object","A container for object introspection commands","Depends on subcommand.","2.2.3",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,OBJECT_History,OBJECT_tips,NULL,-2,0,0,.subcommands=OBJECT_Subcommands},
 {"persist","Remove the expiration from a key","O(1)","2.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,PERSIST_History,PERSIST_tips,persistCommand,2,CMD_WRITE|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=PERSIST_Args},
 {"pexpire","Set a key's time to live in milliseconds","O(1)","2.6.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,PEXPIRE_History,PEXPIRE_tips,pexpireCommand,-3,CMD_WRITE|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=PEXPIRE_Args},
 {"pexpireat","Set the expiration for a key as a UNIX timestamp specified in milliseconds","O(1)","2.6.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,PEXPIREAT_History,PEXPIREAT_tips,pexpireatCommand,-3,CMD_WRITE|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=PEXPIREAT_Args},
 {"pexpiretime","Get the expiration Unix timestamp for a key in milliseconds","O(1)","7.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,PEXPIRETIME_History,PEXPIRETIME_tips,pexpiretimeCommand,2,CMD_READONLY|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=PEXPIRETIME_Args},
 {"pttl","Get the time to live for a key in milliseconds","O(1)","2.6.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,PTTL_History,PTTL_tips,pttlCommand,2,CMD_READONLY|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=PTTL_Args},
-{"randomkey","Return a random key from the keyspace","O(1)","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,RANDOMKEY_History,RANDOMKEY_tips,randomkeyCommand,1,CMD_READONLY,ACL_CATEGORY_KEYSPACE,.reply_schema=&RANDOMKEY_ReplySchema},
+{"randomkey","Return a random key from the keyspace","O(1)","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,RANDOMKEY_History,RANDOMKEY_tips,randomkeyCommand,1,CMD_READONLY|CMD_TOUCHES_ARBITRARY_KEYS,ACL_CATEGORY_KEYSPACE},
 {"rename","Rename a key","O(1)","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,RENAME_History,RENAME_tips,renameCommand,3,CMD_WRITE,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RW|CMD_KEY_ACCESS|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=RENAME_Args},
-{"renamenx","Rename a key, only if the new key does not exist","O(1)","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,RENAMENX_History,RENAMENX_tips,renamenxCommand,3,CMD_WRITE|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RW|CMD_KEY_ACCESS|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_OW|CMD_KEY_INSERT,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=RENAMENX_Args,.reply_schema=&RENAMENX_ReplySchema},
+{"renamenx","Rename a key, only if the new key does not exist","O(1)","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,RENAMENX_History,RENAMENX_tips,renamenxCommand,3,CMD_WRITE|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RW|CMD_KEY_ACCESS|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_OW|CMD_KEY_INSERT,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=RENAMENX_Args},
 {"restore","Create a key using the provided serialized value, previously obtained using DUMP.","O(1) to create the new key and additional O(N*M) to reconstruct the serialized value, where N is the number of Redis objects composing the value and M their average size. For small string values the time complexity is thus O(1)+O(1*M) where M is small, so simply O(1). However for sorted set values the complexity is O(N*M*log(N)) because inserting values into sorted sets is O(log(N)).","2.6.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,RESTORE_History,RESTORE_tips,restoreCommand,-4,CMD_WRITE|CMD_DENYOOM,ACL_CATEGORY_KEYSPACE|ACL_CATEGORY_DANGEROUS,{{NULL,CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=RESTORE_Args},
-{"scan","Incrementally iterate the keys space","O(1) for every call. O(N) for a complete iteration, including enough command calls for the cursor to return back to 0. N is the number of elements inside the collection.","2.8.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,SCAN_History,SCAN_tips,scanCommand,-2,CMD_READONLY,ACL_CATEGORY_KEYSPACE,.args=SCAN_Args},
+{"scan","Incrementally iterate the keys space","O(1) for every call. O(N) for a complete iteration, including enough command calls for the cursor to return back to 0. N is the number of elements inside the collection.","2.8.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,SCAN_History,SCAN_tips,scanCommand,-2,CMD_READONLY|CMD_TOUCHES_ARBITRARY_KEYS,ACL_CATEGORY_KEYSPACE,.args=SCAN_Args},
 {"sort","Sort the elements in a list, set or sorted set","O(N+M*log(M)) where N is the number of elements in the list or set to sort, and M the number of returned elements. When the elements are not sorted, complexity is O(N).","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,SORT_History,SORT_tips,sortCommand,-2,CMD_WRITE|CMD_DENYOOM,ACL_CATEGORY_SET|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_LIST|ACL_CATEGORY_DANGEROUS,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}},{"For the optional BY/GET keyword. It is marked 'unknown' because the key names derive from the content of the key we sort",CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_UNKNOWN,{{0}},KSPEC_FK_UNKNOWN,{{0}}},{"For the optional STORE keyword. It is marked 'unknown' because the keyword can appear anywhere in the argument array",CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_UNKNOWN,{{0}},KSPEC_FK_UNKNOWN,{{0}}}},sortGetKeys,.args=SORT_Args},
 {"sort_ro","Sort the elements in a list, set or sorted set. Read-only variant of SORT.","O(N+M*log(M)) where N is the number of elements in the list or set to sort, and M the number of returned elements. When the elements are not sorted, complexity is O(N).","7.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,SORT_RO_History,SORT_RO_tips,sortroCommand,-2,CMD_READONLY,ACL_CATEGORY_SET|ACL_CATEGORY_SORTEDSET|ACL_CATEGORY_LIST|ACL_CATEGORY_DANGEROUS,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}},{"For the optional BY/GET keyword. It is marked 'unknown' because the key names derive from the content of the key we sort",CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_UNKNOWN,{{0}},KSPEC_FK_UNKNOWN,{{0}}}},sortROGetKeys,.args=SORT_RO_Args},
 {"touch","Alters the last access time of a key(s). Returns the number of existing keys specified.","O(N) where N is the number of keys that will be touched.","3.2.1",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,TOUCH_History,TOUCH_tips,touchCommand,-2,CMD_READONLY|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RO,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={-1,1,0}}},.args=TOUCH_Args},
@@ -9841,16 +10223,16 @@ struct redisCommand redisCommandTable[] = {
 {"unlink","Delete a key asynchronously in another thread. Otherwise it is just as DEL, but non blocking.","O(1) for each key removed regardless of its size. Then the command does O(N) work in a different thread in order to reclaim memory, where N is the number of allocations the deleted objects where composed of.","4.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,UNLINK_History,UNLINK_tips,unlinkCommand,-2,CMD_WRITE|CMD_FAST,ACL_CATEGORY_KEYSPACE,{{NULL,CMD_KEY_RM|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={-1,1,0}}},.args=UNLINK_Args},
 {"wait","Wait for the synchronous replication of all the write commands sent in the context of the current connection","O(1)","3.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GENERIC,WAIT_History,WAIT_tips,waitCommand,3,CMD_NOSCRIPT,ACL_CATEGORY_CONNECTION,.args=WAIT_Args},
 /* geo */
-{"geoadd","Add one or more geospatial items in the geospatial index represented using a sorted set","O(log(N)) for each item added, where N is the number of elements in the sorted set.","3.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GEO,GEOADD_History,GEOADD_tips,geoaddCommand,-5,CMD_WRITE|CMD_DENYOOM,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEOADD_Args},
-{"geodist","Returns the distance between two members of a geospatial index","O(log(N))","3.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GEO,GEODIST_History,GEODIST_tips,geodistCommand,-4,CMD_READONLY,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEODIST_Args},
-{"geohash","Returns members of a geospatial index as standard geohash strings","O(log(N)) for each member requested, where N is the number of elements in the sorted set.","3.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GEO,GEOHASH_History,GEOHASH_tips,geohashCommand,-2,CMD_READONLY,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEOHASH_Args},
-{"geopos","Returns longitude and latitude of members of a geospatial index","O(N) where N is the number of members requested.","3.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GEO,GEOPOS_History,GEOPOS_tips,geoposCommand,-2,CMD_READONLY,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEOPOS_Args},
-{"georadius","Query a sorted set representing a geospatial index to fetch members matching a given maximum distance from a point","O(N+log(M)) where N is the number of elements inside the bounding box of the circular area delimited by center and radius and M is the number of items inside the index.","3.2.0",CMD_DOC_DEPRECATED,"`GEOSEARCH` and `GEOSEARCHSTORE` with the `BYRADIUS` argument","6.2.0",COMMAND_GROUP_GEO,GEORADIUS_History,GEORADIUS_tips,georadiusCommand,-6,CMD_WRITE|CMD_DENYOOM,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_KEYWORD,.bs.keyword={"STORE",6},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_KEYWORD,.bs.keyword={"STOREDIST",6},KSPEC_FK_RANGE,.fk.range={0,1,0}}},georadiusGetKeys,.args=GEORADIUS_Args},
-{"georadiusbymember","Query a sorted set representing a geospatial index to fetch members matching a given maximum distance from a member","O(N+log(M)) where N is the number of elements inside the bounding box of the circular area delimited by center and radius and M is the number of items inside the index.","3.2.0",CMD_DOC_DEPRECATED,"`GEOSEARCH` and `GEOSEARCHSTORE` with the `BYRADIUS` and `FROMMEMBER` arguments","6.2.0",COMMAND_GROUP_GEO,GEORADIUSBYMEMBER_History,GEORADIUSBYMEMBER_tips,georadiusbymemberCommand,-5,CMD_WRITE|CMD_DENYOOM,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_KEYWORD,.bs.keyword={"STORE",5},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_KEYWORD,.bs.keyword={"STOREDIST",5},KSPEC_FK_RANGE,.fk.range={0,1,0}}},georadiusGetKeys,.args=GEORADIUSBYMEMBER_Args},
-{"georadiusbymember_ro","A read-only variant for GEORADIUSBYMEMBER","O(N+log(M)) where N is the number of elements inside the bounding box of the circular area delimited by center and radius and M is the number of items inside the index.","3.2.10",CMD_DOC_DEPRECATED,"`GEOSEARCH` with the `BYRADIUS` and `FROMMEMBER` arguments","6.2.0",COMMAND_GROUP_GEO,GEORADIUSBYMEMBER_RO_History,GEORADIUSBYMEMBER_RO_tips,georadiusbymemberroCommand,-5,CMD_READONLY,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEORADIUSBYMEMBER_RO_Args},
-{"georadius_ro","A read-only variant for GEORADIUS","O(N+log(M)) where N is the number of elements inside the bounding box of the circular area delimited by center and radius and M is the number of items inside the index.","3.2.10",CMD_DOC_DEPRECATED,"`GEOSEARCH` with the `BYRADIUS` argument","6.2.0",COMMAND_GROUP_GEO,GEORADIUS_RO_History,GEORADIUS_RO_tips,georadiusroCommand,-6,CMD_READONLY,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEORADIUS_RO_Args},
-{"geosearch","Query a sorted set representing a geospatial index to fetch members inside an area of a box or a circle.","O(N+log(M)) where N is the number of elements in the grid-aligned bounding box area around the shape provided as the filter and M is the number of items inside the shape","6.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GEO,GEOSEARCH_History,GEOSEARCH_tips,geosearchCommand,-7,CMD_READONLY,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEOSEARCH_Args},
-{"geosearchstore","Query a sorted set representing a geospatial index to fetch members inside an area of a box or a circle, and store the result in another key.","O(N+log(M)) where N is the number of elements in the grid-aligned bounding box area around the shape provided as the filter and M is the number of items inside the shape","6.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GEO,GEOSEARCHSTORE_History,GEOSEARCHSTORE_tips,geosearchstoreCommand,-8,CMD_WRITE|CMD_DENYOOM,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEOSEARCHSTORE_Args},
+{"geoadd","Add one or more geospatial items in the geospatial index represented using a sorted set","O(log(N)) for each item added, where N is the number of elements in the sorted set.","3.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GEO,GEOADD_History,GEOADD_tips,geoaddCommand,-5,CMD_WRITE|CMD_DENYOOM,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEOADD_Args,.reply_schema=&GEOADD_ReplySchema},
+{"geodist","Returns the distance between two members of a geospatial index","O(log(N))","3.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GEO,GEODIST_History,GEODIST_tips,geodistCommand,-4,CMD_READONLY,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEODIST_Args,.reply_schema=&GEODIST_ReplySchema},
+{"geohash","Returns members of a geospatial index as standard geohash strings","O(log(N)) for each member requested, where N is the number of elements in the sorted set.","3.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GEO,GEOHASH_History,GEOHASH_tips,geohashCommand,-2,CMD_READONLY,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEOHASH_Args,.reply_schema=&GEOHASH_ReplySchema},
+{"geopos","Returns longitude and latitude of members of a geospatial index","O(N) where N is the number of members requested.","3.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GEO,GEOPOS_History,GEOPOS_tips,geoposCommand,-2,CMD_READONLY,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEOPOS_Args,.reply_schema=&GEOPOS_ReplySchema},
+{"georadius","Query a sorted set representing a geospatial index to fetch members matching a given maximum distance from a point","O(N+log(M)) where N is the number of elements inside the bounding box of the circular area delimited by center and radius and M is the number of items inside the index.","3.2.0",CMD_DOC_DEPRECATED,"`GEOSEARCH` and `GEOSEARCHSTORE` with the `BYRADIUS` argument","6.2.0",COMMAND_GROUP_GEO,GEORADIUS_History,GEORADIUS_tips,georadiusCommand,-6,CMD_WRITE|CMD_DENYOOM,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_KEYWORD,.bs.keyword={"STORE",6},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_KEYWORD,.bs.keyword={"STOREDIST",6},KSPEC_FK_RANGE,.fk.range={0,1,0}}},georadiusGetKeys,.args=GEORADIUS_Args,.reply_schema=&GEORADIUS_ReplySchema},
+{"georadiusbymember","Query a sorted set representing a geospatial index to fetch members matching a given maximum distance from a member","O(N+log(M)) where N is the number of elements inside the bounding box of the circular area delimited by center and radius and M is the number of items inside the index.","3.2.0",CMD_DOC_DEPRECATED,"`GEOSEARCH` and `GEOSEARCHSTORE` with the `BYRADIUS` and `FROMMEMBER` arguments","6.2.0",COMMAND_GROUP_GEO,GEORADIUSBYMEMBER_History,GEORADIUSBYMEMBER_tips,georadiusbymemberCommand,-5,CMD_WRITE|CMD_DENYOOM,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_KEYWORD,.bs.keyword={"STORE",5},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_KEYWORD,.bs.keyword={"STOREDIST",5},KSPEC_FK_RANGE,.fk.range={0,1,0}}},georadiusGetKeys,.args=GEORADIUSBYMEMBER_Args,.reply_schema=&GEORADIUSBYMEMBER_ReplySchema},
+{"georadiusbymember_ro","A read-only variant for GEORADIUSBYMEMBER","O(N+log(M)) where N is the number of elements inside the bounding box of the circular area delimited by center and radius and M is the number of items inside the index.","3.2.10",CMD_DOC_DEPRECATED,"`GEOSEARCH` with the `BYRADIUS` and `FROMMEMBER` arguments","6.2.0",COMMAND_GROUP_GEO,GEORADIUSBYMEMBER_RO_History,GEORADIUSBYMEMBER_RO_tips,georadiusbymemberroCommand,-5,CMD_READONLY,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEORADIUSBYMEMBER_RO_Args,.reply_schema=&GEORADIUSBYMEMBER_RO_ReplySchema},
+{"georadius_ro","A read-only variant for GEORADIUS","O(N+log(M)) where N is the number of elements inside the bounding box of the circular area delimited by center and radius and M is the number of items inside the index.","3.2.10",CMD_DOC_DEPRECATED,"`GEOSEARCH` with the `BYRADIUS` argument","6.2.0",COMMAND_GROUP_GEO,GEORADIUS_RO_History,GEORADIUS_RO_tips,georadiusroCommand,-6,CMD_READONLY,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEORADIUS_RO_Args,.reply_schema=&GEORADIUS_RO_ReplySchema},
+{"geosearch","Query a sorted set representing a geospatial index to fetch members inside an area of a box or a circle.","O(N+log(M)) where N is the number of elements in the grid-aligned bounding box area around the shape provided as the filter and M is the number of items inside the shape","6.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GEO,GEOSEARCH_History,GEOSEARCH_tips,geosearchCommand,-7,CMD_READONLY,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEOSEARCH_Args,.reply_schema=&GEOSEARCH_ReplySchema},
+{"geosearchstore","Query a sorted set representing a geospatial index to fetch members inside an area of a box or a circle, and store the result in another key.","O(N+log(M)) where N is the number of elements in the grid-aligned bounding box area around the shape provided as the filter and M is the number of items inside the shape","6.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_GEO,GEOSEARCHSTORE_History,GEOSEARCHSTORE_tips,geosearchstoreCommand,-8,CMD_WRITE|CMD_DENYOOM,ACL_CATEGORY_GEO,{{NULL,CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=GEOSEARCHSTORE_Args,.reply_schema=&GEOSEARCHSTORE_ReplySchema},
 /* hash */
 {"hdel","Delete one or more hash fields","O(N) where N is the number of fields to be removed.","2.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_HASH,HDEL_History,HDEL_tips,hdelCommand,-3,CMD_WRITE|CMD_FAST,ACL_CATEGORY_HASH,{{NULL,CMD_KEY_RW|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=HDEL_Args},
 {"hexists","Determine if a hash field exists","O(1)","2.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_HASH,HEXISTS_History,HEXISTS_tips,hexistsCommand,3,CMD_READONLY|CMD_FAST,ACL_CATEGORY_HASH,{{NULL,CMD_KEY_RO,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=HEXISTS_Args},
@@ -9920,7 +10302,7 @@ struct redisCommand redisCommandTable[] = {
 {"sentinel","A container for Sentinel commands","Depends on subcommand.","2.8.4",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SENTINEL,SENTINEL_History,SENTINEL_tips,NULL,-2,CMD_ADMIN|CMD_SENTINEL|CMD_ONLY_SENTINEL,0,.subcommands=SENTINEL_Subcommands},
 /* server */
 {"acl","A container for Access List Control commands ","Depends on subcommand.","6.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SERVER,ACL_History,ACL_tips,NULL,-2,CMD_SENTINEL,0,.subcommands=ACL_Subcommands},
-{"bgrewriteaof","Asynchronously rewrite the append-only file","O(1)","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SERVER,BGREWRITEAOF_History,BGREWRITEAOF_tips,bgrewriteaofCommand,1,CMD_NO_ASYNC_LOADING|CMD_ADMIN|CMD_NOSCRIPT,0,.reply_schema=&BGREWRITEAOF_ReplySchema},
+{"bgrewriteaof","Asynchronously rewrite the append-only file","O(1)","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SERVER,BGREWRITEAOF_History,BGREWRITEAOF_tips,bgrewriteaofCommand,1,CMD_NO_ASYNC_LOADING|CMD_ADMIN|CMD_NOSCRIPT,0},
 {"bgsave","Asynchronously save the dataset to disk","O(1)","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SERVER,BGSAVE_History,BGSAVE_tips,bgsaveCommand,-1,CMD_NO_ASYNC_LOADING|CMD_ADMIN|CMD_NOSCRIPT,0,.args=BGSAVE_Args},
 {"command","Get array of Redis command details","O(N) where N is the total number of Redis commands","2.8.13",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SERVER,COMMAND_History,COMMAND_tips,commandCommand,-1,CMD_LOADING|CMD_STALE|CMD_SENTINEL,ACL_CATEGORY_CONNECTION,.subcommands=COMMAND_Subcommands},
 {"config","A container for server configuration commands","Depends on subcommand.","2.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SERVER,CONFIG_History,CONFIG_tips,NULL,-2,0,0,.subcommands=CONFIG_Subcommands},
@@ -10004,20 +10386,20 @@ struct redisCommand redisCommandTable[] = {
 {"zunionstore","Add multiple sorted sets and store the resulting sorted set in a new key","O(N)+O(M log(M)) with N being the sum of the sizes of the input sorted sets, and M being the number of elements in the resulting sorted set.","2.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_SORTED_SET,ZUNIONSTORE_History,ZUNIONSTORE_tips,zunionstoreCommand,-4,CMD_WRITE|CMD_DENYOOM,ACL_CATEGORY_SORTEDSET,{{NULL,CMD_KEY_OW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}},{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={2},KSPEC_FK_KEYNUM,.fk.keynum={0,1,1}}},zunionInterDiffStoreGetKeys,.args=ZUNIONSTORE_Args},
 /* stream */
 {"xack","Marks a pending message as correctly processed, effectively removing it from the pending entries list of the consumer group. Return value of the command is the number of messages successfully acknowledged, that is, the IDs we were actually able to resolve in the PEL.","O(1) for each message ID processed.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XACK_History,XACK_tips,xackCommand,-4,CMD_WRITE|CMD_FAST,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XACK_Args},
-{"xadd","Appends a new entry to a stream","O(1) when adding a new entry, O(N) when trimming where N being the number of entries evicted.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XADD_History,XADD_tips,xaddCommand,-5,CMD_WRITE|CMD_DENYOOM|CMD_FAST,ACL_CATEGORY_STREAM,{{"UPDATE instead of INSERT because of the optional trimming feature",CMD_KEY_RW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XADD_Args,.reply_schema=&XADD_ReplySchema},
+{"xadd","Appends a new entry to a stream","O(1) when adding a new entry, O(N) when trimming where N being the number of entries evicted.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XADD_History,XADD_tips,xaddCommand,-5,CMD_WRITE|CMD_DENYOOM|CMD_FAST,ACL_CATEGORY_STREAM,{{"UPDATE instead of INSERT because of the optional trimming feature",CMD_KEY_RW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XADD_Args},
 {"xautoclaim","Changes (or acquires) ownership of messages in a consumer group, as if the messages were delivered to the specified consumer.","O(1) if COUNT is small.","6.2.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XAUTOCLAIM_History,XAUTOCLAIM_tips,xautoclaimCommand,-6,CMD_WRITE|CMD_FAST,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RW|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XAUTOCLAIM_Args,.reply_schema=&XAUTOCLAIM_ReplySchema},
 {"xclaim","Changes (or acquires) ownership of a message in a consumer group, as if the message was delivered to the specified consumer.","O(log N) with N being the number of messages in the PEL of the consumer group.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XCLAIM_History,XCLAIM_tips,xclaimCommand,-6,CMD_WRITE|CMD_FAST,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XCLAIM_Args},
-{"xdel","Removes the specified entries from the stream. Returns the number of items actually deleted, that may be different from the number of IDs passed in case certain IDs do not exist.","O(1) for each single item to delete in the stream, regardless of the stream size.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XDEL_History,XDEL_tips,xdelCommand,-3,CMD_WRITE|CMD_FAST,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RW|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XDEL_Args,.reply_schema=&XDEL_ReplySchema},
+{"xdel","Removes the specified entries from the stream. Returns the number of items actually deleted, that may be different from the number of IDs passed in case certain IDs do not exist.","O(1) for each single item to delete in the stream, regardless of the stream size.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XDEL_History,XDEL_tips,xdelCommand,-3,CMD_WRITE|CMD_FAST,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RW|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XDEL_Args},
 {"xgroup","A container for consumer groups commands","Depends on subcommand.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XGROUP_History,XGROUP_tips,NULL,-2,0,0,.subcommands=XGROUP_Subcommands},
 {"xinfo","A container for stream introspection commands","Depends on subcommand.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XINFO_History,XINFO_tips,NULL,-2,0,0,.subcommands=XINFO_Subcommands},
-{"xlen","Return the number of entries in a stream","O(1)","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XLEN_History,XLEN_tips,xlenCommand,2,CMD_READONLY|CMD_FAST,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RO,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XLEN_Args,.reply_schema=&XLEN_ReplySchema},
+{"xlen","Return the number of entries in a stream","O(1)","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XLEN_History,XLEN_tips,xlenCommand,2,CMD_READONLY|CMD_FAST,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RO,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XLEN_Args},
 {"xpending","Return information and entries from a stream consumer group pending entries list, that are messages fetched but never acknowledged.","O(N) with N being the number of elements returned, so asking for a small fixed number of entries per call is O(1). O(M), where M is the total number of entries scanned when used with the IDLE filter. When the command returns just the summary and the list of consumers is small, it runs in O(1) time; otherwise, an additional O(N) time for iterating every consumer.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XPENDING_History,XPENDING_tips,xpendingCommand,-3,CMD_READONLY,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XPENDING_Args,.reply_schema=&XPENDING_ReplySchema},
 {"xrange","Return a range of elements in a stream, with IDs matching the specified IDs interval","O(N) with N being the number of elements being returned. If N is constant (e.g. always asking for the first 10 elements with COUNT), you can consider it O(1).","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XRANGE_History,XRANGE_tips,xrangeCommand,-4,CMD_READONLY,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XRANGE_Args,.reply_schema=&XRANGE_ReplySchema},
-{"xread","Return never seen elements in multiple streams, with IDs greater than the ones reported by the caller for each stream. Can block.","For each stream mentioned: O(N) with N being the number of elements being returned, it means that XREAD-ing with a fixed COUNT is O(1). Note that when the BLOCK option is used, XADD will pay O(M) time in order to serve the M clients blocked on the stream getting new data.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XREAD_History,XREAD_tips,xreadCommand,-4,CMD_BLOCKING|CMD_READONLY|CMD_BLOCKING,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_KEYWORD,.bs.keyword={"STREAMS",1},KSPEC_FK_RANGE,.fk.range={-1,1,2}}},xreadGetKeys,.args=XREAD_Args,.reply_schema=&XREAD_ReplySchema},
+{"xread","Return never seen elements in multiple streams, with IDs greater than the ones reported by the caller for each stream. Can block.","For each stream mentioned: O(N) with N being the number of elements being returned, it means that XREAD-ing with a fixed COUNT is O(1). Note that when the BLOCK option is used, XADD will pay O(M) time in order to serve the M clients blocked on the stream getting new data.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XREAD_History,XREAD_tips,xreadCommand,-4,CMD_BLOCKING|CMD_READONLY|CMD_BLOCKING,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_KEYWORD,.bs.keyword={"STREAMS",1},KSPEC_FK_RANGE,.fk.range={-1,1,2}}},xreadGetKeys,.args=XREAD_Args},
 {"xreadgroup","Return new entries from a stream using a consumer group, or access the history of the pending entries for a given consumer. Can block.","For each stream mentioned: O(M) with M being the number of elements returned. If M is constant (e.g. always asking for the first 10 elements with COUNT), you can consider it O(1). On the other side when XREADGROUP blocks, XADD will pay the O(N) time in order to serve the N clients blocked on the stream getting new data.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XREADGROUP_History,XREADGROUP_tips,xreadCommand,-7,CMD_BLOCKING|CMD_WRITE,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_KEYWORD,.bs.keyword={"STREAMS",4},KSPEC_FK_RANGE,.fk.range={-1,1,2}}},xreadGetKeys,.args=XREADGROUP_Args},
-{"xrevrange","Return a range of elements in a stream, with IDs matching the specified IDs interval, in reverse order (from greater to smaller IDs) compared to XRANGE","O(N) with N being the number of elements returned. If N is constant (e.g. always asking for the first 10 elements with COUNT), you can consider it O(1).","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XREVRANGE_History,XREVRANGE_tips,xrevrangeCommand,-4,CMD_READONLY,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XREVRANGE_Args,.reply_schema=&XREVRANGE_ReplySchema},
-{"xsetid","An internal command for replicating stream values","O(1)","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XSETID_History,XSETID_tips,xsetidCommand,-3,CMD_WRITE|CMD_DENYOOM|CMD_FAST,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XSETID_Args,.reply_schema=&XSETID_ReplySchema},
-{"xtrim","Trims the stream to (approximately if '~' is passed) a certain size","O(N), with N being the number of evicted entries. Constant times are very small however, since entries are organized in macro nodes containing multiple entries that can be released with a single deallocation.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XTRIM_History,XTRIM_tips,xtrimCommand,-4,CMD_WRITE,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RW|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XTRIM_Args,.reply_schema=&XTRIM_ReplySchema},
+{"xrevrange","Return a range of elements in a stream, with IDs matching the specified IDs interval, in reverse order (from greater to smaller IDs) compared to XRANGE","O(N) with N being the number of elements returned. If N is constant (e.g. always asking for the first 10 elements with COUNT), you can consider it O(1).","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XREVRANGE_History,XREVRANGE_tips,xrevrangeCommand,-4,CMD_READONLY,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RO|CMD_KEY_ACCESS,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XREVRANGE_Args},
+{"xsetid","An internal command for replicating stream values","O(1)","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XSETID_History,XSETID_tips,xsetidCommand,-3,CMD_WRITE|CMD_DENYOOM|CMD_FAST,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RW|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XSETID_Args},
+{"xtrim","Trims the stream to (approximately if '~' is passed) a certain size","O(N), with N being the number of evicted entries. Constant times are very small however, since entries are organized in macro nodes containing multiple entries that can be released with a single deallocation.","5.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STREAM,XTRIM_History,XTRIM_tips,xtrimCommand,-4,CMD_WRITE,ACL_CATEGORY_STREAM,{{NULL,CMD_KEY_RW|CMD_KEY_DELETE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=XTRIM_Args},
 /* string */
 {"append","Append a value to a key","O(1). The amortized time complexity is O(1) assuming the appended value is small and the already present value is of any size, since the dynamic string library used by Redis will double the free space available on every reallocation.","2.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STRING,APPEND_History,APPEND_tips,appendCommand,3,CMD_WRITE|CMD_DENYOOM|CMD_FAST,ACL_CATEGORY_STRING,{{NULL,CMD_KEY_RW|CMD_KEY_INSERT,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=APPEND_Args,.reply_schema=&APPEND_ReplySchema},
 {"decr","Decrement the integer value of a key by one","O(1)","1.0.0",CMD_DOC_NONE,NULL,NULL,COMMAND_GROUP_STRING,DECR_History,DECR_tips,decrCommand,2,CMD_WRITE|CMD_DENYOOM|CMD_FAST,ACL_CATEGORY_STRING,{{NULL,CMD_KEY_RW|CMD_KEY_ACCESS|CMD_KEY_UPDATE,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={0,1,0}}},.args=DECR_Args},
