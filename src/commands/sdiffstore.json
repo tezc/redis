@@ -51,6 +51,10 @@
                 }
             }
         ],
+        "reply_schema": {
+            "description": "Number of the elements in the resulting set.",
+            "type": "integer"
+        },
         "arguments": [
             {
                 "name": "destination",
