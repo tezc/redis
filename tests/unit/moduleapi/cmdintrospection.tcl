@@ -37,7 +37,6 @@ start_server {tags {"modules"}} {
         dict unset redis_reply group
         dict unset module_reply group
         dict unset module_reply module
-        dict unset redis_reply reply_schema
 
         assert_equal $redis_reply $module_reply
     }
