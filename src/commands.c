@@ -7124,10 +7124,11 @@ struct jsonObject *SLOWLOG_GET_ReplySchema_items_items[] = {
 /* SLOWLOG_GET_ReplySchema_items reply schema */
 struct jsonObjectElement SLOWLOG_GET_ReplySchema_items_elements[] = {
 {JSON_TYPE_STRING,"type",.value.string="array"},
+{JSON_TYPE_BOOLEAN,"additionalItems",.value.boolean=0},
 {JSON_TYPE_ARRAY,"items",.value.array={.objects=SLOWLOG_GET_ReplySchema_items_items,.length=6}},
 };
 
-struct jsonObject SLOWLOG_GET_ReplySchema_items = {SLOWLOG_GET_ReplySchema_items_elements,.length=2};
+struct jsonObject SLOWLOG_GET_ReplySchema_items = {SLOWLOG_GET_ReplySchema_items_elements,.length=3};
 
 /* SLOWLOG_GET_ReplySchema reply schema */
 struct jsonObjectElement SLOWLOG_GET_ReplySchema_elements[] = {
