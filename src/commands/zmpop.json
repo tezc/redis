@@ -53,23 +53,21 @@
                         {
                             "type": "array",
                             "description": "Popped elements.",
-                            "items": [
-                                {
-                                    "type": "array",
-                                    "additionalItems": false,
-                                    "uniqueItems": true,
-                                    "items": [
-                                        {
-                                            "type": "string",
-                                            "description": "Name of the member."
-                                        },
-                                        {
-                                            "type": "number",
-                                            "description": "Score."
-                                        }
-                                    ]
-                                }
-                            ]
+                            "items": {
+                                "type": "array",
+                                "additionalItems": false,
+                                "uniqueItems": true,
+                                "items": [
+                                    {
+                                        "type": "string",
+                                        "description": "Name of the member."
+                                    },
+                                    {
+                                        "type": "number",
+                                        "description": "Score."
+                                    }
+                                ]
+                            }
                         }
                     ]
                 }

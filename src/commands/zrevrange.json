@@ -55,6 +55,7 @@
                         "type": "array",
                         "minItems": 2,
                         "maxItems": 2,
+                        "additionalItems": false,
                         "items": [
                             {
                                 "description": "Member.",
