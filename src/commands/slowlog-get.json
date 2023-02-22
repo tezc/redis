@@ -27,6 +27,7 @@
             "description": "Entries from the slow log in chronological order.",
             "items": {
                 "type": "array",
+                "uniqueItems": true,
                 "additionalItems": false,
                 "items": [
                     {

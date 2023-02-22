@@ -32,7 +32,7 @@
                             "minimum": 0
                         },
                         "histogram_usec": {
-                            "description": "Histogram map.",
+                            "description": "Histogram map, bucket id to latency",
                             "type": "object",
                             "additionalProperties": {
                                 "type": "integer"

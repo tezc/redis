@@ -23,10 +23,19 @@
             "description": "An array where each element is a two elements array representing the timestamp and the latency of the event.",
             "items": {
                 "type": "array",
-                "items": {
-                    "type": "integer",
-                    "minimum": 0
-                }
+                "additionalItems": false,
+                "items": [
+                    {
+                        "description": "timestamp of the event",
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    {
+                        "description": "latency of the event",
+                        "type": "integer",
+                        "minimum": 0
+                    }
+                ]
             }
         },
         "arguments": [
