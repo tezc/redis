@@ -769,10 +769,30 @@ const char *CLUSTER_LINKS_tips[] = {
 NULL
 };
 
+/* CLUSTER_LINKS_ReplySchema_items_properties_direction_oneOf_0 reply schema */
+struct jsonObjectElement CLUSTER_LINKS_ReplySchema_items_properties_direction_oneOf_0_elements[] = {
+{JSON_TYPE_STRING,"const",.value.string="from"},
+};
+
+struct jsonObject CLUSTER_LINKS_ReplySchema_items_properties_direction_oneOf_0 = {CLUSTER_LINKS_ReplySchema_items_properties_direction_oneOf_0_elements,.length=1};
+
+/* CLUSTER_LINKS_ReplySchema_items_properties_direction_oneOf_1 reply schema */
+struct jsonObjectElement CLUSTER_LINKS_ReplySchema_items_properties_direction_oneOf_1_elements[] = {
+{JSON_TYPE_STRING,"const",.value.string="to"},
+};
+
+struct jsonObject CLUSTER_LINKS_ReplySchema_items_properties_direction_oneOf_1 = {CLUSTER_LINKS_ReplySchema_items_properties_direction_oneOf_1_elements,.length=1};
+
+/* CLUSTER_LINKS_ReplySchema_items_properties_direction_oneOf array reply schema */
+struct jsonObject *CLUSTER_LINKS_ReplySchema_items_properties_direction_oneOf[] = {
+&CLUSTER_LINKS_ReplySchema_items_properties_direction_oneOf_0,
+&CLUSTER_LINKS_ReplySchema_items_properties_direction_oneOf_1,
+};
+
 /* CLUSTER_LINKS_ReplySchema_items_properties_direction reply schema */
 struct jsonObjectElement CLUSTER_LINKS_ReplySchema_items_properties_direction_elements[] = {
 {JSON_TYPE_STRING,"description",.value.string="This link is established by the local node _to_ the peer, or accepted by the local node _from_ the peer."},
-{JSON_TYPE_STRING,"type",.value.string="string"},
+{JSON_TYPE_ARRAY,"oneOf",.value.array={.objects=CLUSTER_LINKS_ReplySchema_items_properties_direction_oneOf,.length=2}},
 };
 
 struct jsonObject CLUSTER_LINKS_ReplySchema_items_properties_direction = {CLUSTER_LINKS_ReplySchema_items_properties_direction_elements,.length=2};
