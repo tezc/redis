@@ -917,6 +917,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install tcl8.6 tclx -y
+      - name: Install Python dependencies
+        uses: py-actions/py-dependency-install@v4
+        with:
+          path: "./utils/req-res-validator/requirements.txt"
       - name: test
         if: true && !contains(github.event.inputs.skiptests, 'redis')
         run: ./runtest --verbose --tags -slow --dump-logs --log-req-res --dont-clean --force-resp3 ${{github.event.inputs.test_args}}
