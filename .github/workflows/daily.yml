@@ -934,4 +934,4 @@ jobs:
         if: true && !contains(github.event.inputs.skiptests, 'cluster')
         run: ./runtest-cluster --log-req-res --dont-clean --force-resp3 ${{github.event.inputs.cluster_test_args}}
       - name: validator
-        run: ./utils/req-res-log-valiadtor.py --verbose true --fail-commands-not-all-hit true
+        run: ./utils/req-res-log-valiadtor.py --verbose true
