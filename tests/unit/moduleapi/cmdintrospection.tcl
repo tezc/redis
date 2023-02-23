@@ -30,6 +30,7 @@ start_server {tags {"modules"}} {
         }
     }
 
+    if {!$::log_req_res} {
     test "Module command introspection via COMMAND DOCS" {
         set redis_reply [dict create {*}[lindex [r command docs xadd] 1]]
         set module_reply [dict create {*}[lindex [r command docs cmdintrospection.xadd] 1]]
@@ -39,6 +40,7 @@ start_server {tags {"modules"}} {
         dict unset module_reply module
 
         assert_equal $redis_reply $module_reply
+    }
     }
 
     test "Unload the module - cmdintrospection" {
