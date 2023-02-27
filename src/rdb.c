@@ -1491,7 +1491,7 @@ werr:
 int rdbSaveToFile(const char *filename) {
     startSaving(RDBFLAGS_NONE);
 
-    if (rdbSaveInternal(SLAVE_REQ_NONE,filename,NULL, 0) != C_OK) {
+    if (rdbSaveInternal(SLAVE_REQ_NONE,filename,NULL, RDBFLAGS_NONE) != C_OK) {
         stopSaving(0);
         return C_ERR;
     }
