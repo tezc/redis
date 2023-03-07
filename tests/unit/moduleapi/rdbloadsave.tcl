@@ -23,9 +23,9 @@ start_server {tags {"modules"}} {
         r config set key-load-delay 50
         r flushdb
 
-        populate 20000 a 256
+        populate 5000 a 1024
         r set x 111
-        assert_equal [r dbsize] 20001
+        assert_equal [r dbsize] 5001
 
         assert_equal OK [r test.rdbsave blabla.rdb]
         r flushdb
@@ -51,8 +51,9 @@ start_server {tags {"modules"}} {
 
         assert_equal OK [$rd1 read]
         assert_equal 111 [$rd1 read]
-        assert_equal 20001 [$rd1 read]
+        assert_equal 5001 [$rd1 read]
         r flushdb
+        r config set key-load-delay 0
     }
 
     test "Module rdbloadsave with aof" {
@@ -116,7 +117,7 @@ start_server {tags {"modules"}} {
     test "Module rdbloadsave calls rdbsave in a module fork" {
         r flushdb
         r config set save ""
-        r config set rdb-key-save-delay 3000000
+        r config set rdb-key-save-delay 500000
 
         r set k v1
 
