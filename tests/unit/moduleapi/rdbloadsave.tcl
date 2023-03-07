@@ -23,9 +23,9 @@ start_server {tags {"modules"}} {
         r config set key-load-delay 50
         r flushdb
 
-        populate 5000 a 1024
+        populate 4000 a 1024
         r set x 111
-        assert_equal [r dbsize] 5001
+        assert_equal [r dbsize] 4001
 
         assert_equal OK [r test.rdbsave blabla.rdb]
         r flushdb
@@ -51,7 +51,7 @@ start_server {tags {"modules"}} {
 
         assert_equal OK [$rd1 read]
         assert_equal 111 [$rd1 read]
-        assert_equal 5001 [$rd1 read]
+        assert_equal 4001 [$rd1 read]
         r flushdb
         r config set key-load-delay 0
     }
