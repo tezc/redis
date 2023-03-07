@@ -96,7 +96,7 @@ start_server {tags {"modules"}} {
         assert_equal OK [r test.rdbsave bgsave.rdb]
 
         r set k v2
-        r config set rdb-key-save-delay 10000000
+        r config set rdb-key-save-delay 500000
         r bgsave
 
         # RM_RdbLoad() should kill RDB fork
