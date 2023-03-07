@@ -12318,12 +12318,12 @@ int RM_RdbLoad(RedisModuleRdbStream *stream, int flags) {
      * RM_RdbLoad() is called inside a command callback, we don't want to
      * process the current client. Otherwise, we may free the client or try to
      * process next message while we are already in the command callback. */
-    //if (server.current_client) protectClient(server.current_client);
+    if (server.current_client) protectClient(server.current_client);
 
     serverAssert(stream->type == REDISMODULE_RDB_STREAM_FILE);
     int ret = rdbLoad(stream->data.filename,NULL,RDBFLAGS_NONE);
 
-    //if (server.current_client) unprotectClient(server.current_client);
+    if (server.current_client) unprotectClient(server.current_client);
     if (server.aof_state != AOF_OFF) startAppendOnly();
 
     if (ret != RDB_OK) {
