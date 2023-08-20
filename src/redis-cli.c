@@ -66,6 +66,7 @@
 #include "mt19937-64.h"
 
 #include "cli_commands.h"
+#include "../deps/chat/chat.h"
 
 #define UNUSED(V) ((void) V)
 
@@ -3312,7 +3313,7 @@ static int isSensitiveCommand(int argc, char **argv) {
 static void repl(void) {
     sds historyfile = NULL;
     int history = 0;
-    char *line;
+    char *line, *orig_line = NULL;
     int argc;
     sds *argv;
 
@@ -3344,6 +3345,36 @@ static void repl(void) {
     cliRefreshPrompt();
     while(1) {
         line = linenoise(context ? config.prompt : "not connected> ");
+
+        free(orig_line);
+        orig_line = strdup(line);
+
+        /* If line starts with EVAL, skip chat gpt step. */
+        if (strlen(line) >= 4 && strncasecmp("EVAL", line, 4) != 0) {
+            char *tmp = chat_get(line);
+
+            #define ANSI_ITALIC  "\x1b[90m"
+            #define ANSI_NORMAL  "\x1b[39m"
+            #define ANSI_GRAY    "\x1B[3m"
+            #define ANSI_RESET   "\x1b[0m"
+
+            printf(ANSI_GRAY ANSI_ITALIC "\n %s \n"ANSI_RESET ANSI_NORMAL, tmp);
+            printf("\n ----- \n execute this? [y/N] ");
+
+            char yes;
+            scanf("%c", &yes);
+            getchar();
+            printf("\n");
+
+            if (yes != 'y') {
+                free(tmp);
+                continue;
+            }
+
+            free(line);
+            line = strdup(chat_prepare(tmp));
+            free(tmp);
+        }
         if (line == NULL) {
             /* ^C, ^D or similar. */
             if (config.pubsub_mode) {
@@ -3388,7 +3419,7 @@ static void repl(void) {
             }
 
             if (!isSensitiveCommand(argc - skipargs, argv + skipargs)) {
-                if (history) linenoiseHistoryAdd(line);
+                if (history) linenoiseHistoryAdd(orig_line);
                 if (historyfile) linenoiseHistorySave(historyfile);
             }
 
@@ -9749,6 +9780,8 @@ void testHintSuite(char *filename) {
 int main(int argc, char **argv) {
     int firstarg;
     struct timeval tv;
+
+    chat_init();
 
     memset(&config.sslconfig, 0, sizeof(config.sslconfig));
     config.conn_info.hostip = sdsnew("127.0.0.1");
