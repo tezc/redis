@@ -10826,6 +10826,7 @@ size_t RM_MallocUsableSize(void *ptr) {
     /* It is safe to use 'zmalloc_usable_size()' to manipulate additional
      * memory space, as we guarantee that the compiler can recognize this
      * after 'RM_Alloc', 'RM_TryAlloc', 'RM_Realloc', or 'RM_Calloc'. */
+    sched_yield();
     return zmalloc_usable_size(ptr);
 }
 
