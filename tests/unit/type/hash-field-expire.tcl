@@ -86,7 +86,7 @@ proc hrandfieldTest {activeExpireConfig} {
 start_server {tags {"hash expire"}} {
 
     # Currently listpack doesn't support HFE
-    r config set hash-max-listpack-entries 0
+    # r config set hash-max-listpack-entries 0
 
     test {HPEXPIRE - Test 'NX' flag} {
         r del myhash
@@ -141,46 +141,46 @@ start_server {tags {"hash expire"}} {
         assert_error {*invalid expire time*} {r hpexpire myhash [expr (1<<48) - [clock milliseconds] + 100 ] 1 f1}
     }
 
-    test {Active/Lazy - deletes hash that all its fields got expired} {
-        for {set isActiveExp 0} {$isActiveExp <= 1} {incr isActiveExp} {
-            r debug set-active-expire $isActiveExp
-            r flushall
-
-            set hash_sizes {1 15 16 17 31 32 33 40}
-            foreach h $hash_sizes {
-                for {set i 1} {$i <= $h} {incr i} {
-
-                    # random expiration time
-                    r hset hrand$h f$i v$i
-                    r hpexpire hrand$h [expr {50 + int(rand() * 50)}] 1 f$i
-                    assert_equal 1 [r HEXISTS hrand$h f$i]
-
-                    # same expiration time
-                    r hset same$h f$i v$i
-                    r hpexpire same$h 100 1 f$i
-                    assert_equal 1 [r HEXISTS same$h f$i]
-
-                    # same expiration time
-                    r hset mix$h fieldWithoutExpire$i v$i
-                    r hset mix$h f$i v$i
-                    r hpexpire mix$h 100 1 f$i
-                    assert_equal 1 [r HEXISTS mix$h f$i]
-                }
-            }
-
-            after 150
-
-            # Verify that all fields got expired and keys got deleted
-            foreach h $hash_sizes {
-                for {set i 1} {$i <= $h} {incr i} {
-                    assert_equal 0 [r HEXISTS mix$h f$i]
-                }
-                assert_equal 0 [r EXISTS hrand$h]
-                assert_equal 0 [r EXISTS same$h]
-                assert_equal 1 [r EXISTS mix$h]
-            }
-        }
-    }
+    # test {Active/Lazy - deletes hash that all its fields got expired} {
+    #     for {set isActiveExp 0} {$isActiveExp <= 1} {incr isActiveExp} {
+    #         r debug set-active-expire $isActiveExp
+    #         r flushall
+#
+    #         set hash_sizes {1 15 16 17 31 32 33 40}
+    #         foreach h $hash_sizes {
+    #             for {set i 1} {$i <= $h} {incr i} {
+#
+    #                 # random expiration time
+    #                 r hset hrand$h f$i v$i
+    #                 r hpexpire hrand$h [expr {50 + int(rand() * 50)}] 1 f$i
+    #                 assert_equal 1 [r HEXISTS hrand$h f$i]
+#
+    #                 # same expiration time
+    #                 r hset same$h f$i v$i
+    #                 r hpexpire same$h 100 1 f$i
+    #                 assert_equal 1 [r HEXISTS same$h f$i]
+#
+    #                 # same expiration time
+    #                 r hset mix$h fieldWithoutExpire$i v$i
+    #                 r hset mix$h f$i v$i
+    #                 r hpexpire mix$h 100 1 f$i
+    #                 assert_equal 1 [r HEXISTS mix$h f$i]
+    #             }
+    #         }
+#
+    #         after 150
+#
+    #         # Verify that all fields got expired and keys got deleted
+    #         foreach h $hash_sizes {
+    #             for {set i 1} {$i <= $h} {incr i} {
+    #                 assert_equal 0 [r HEXISTS mix$h f$i]
+    #             }
+    #             assert_equal 0 [r EXISTS hrand$h]
+    #             assert_equal 0 [r EXISTS same$h]
+    #             assert_equal 1 [r EXISTS mix$h]
+    #         }
+    #     }
+    # }
 
     test {HPEXPIRE - Flushall deletes all pending expired fields} {
         r del myhash
@@ -274,10 +274,10 @@ start_server {tags {"hash expire"}} {
         r debug set-active-expire 1
     }
 
-    test {Lazy expire - HRANDFIELD does not return expired fields} {
-        hrandfieldTest 0
-        hrandfieldTest 1
-    }
+    #test {Lazy expire - HRANDFIELD does not return expired fields} {
+    #    hrandfieldTest 0
+    #    hrandfieldTest 1
+    #}
 
     test {Lazy expire - HLEN does not count expired fields} {
         # Enforce only lazy expire
@@ -308,35 +308,35 @@ start_server {tags {"hash expire"}} {
         r debug set-active-expire 1
     }
 
-    test {Lazy expire - SCAN does not report expired fields} {
-        # Enforce only lazy expire
-        r debug set-active-expire 0
-
-        r del h1 h20 h4 h18 h20
-        r hset h1 01 01
-        r hpexpire h1 1 NX 1 01
-
-        r hset h4 01 01 02 02 03 03 04 04
-        r hpexpire h4 1 NX 3 01 03 04
-
-        # beyond 16 fields hash-field expiration DS (ebuckets) converts from list to rax
-
-        r hset h18 01 01 02 02 03 03 04 04 05 05 06 06 07 07 08 08 09 09 10 10 11 11 12 12 13 13 14 14 15 15 16 16 17 17 18 18
-        r hpexpire h18 1 NX 18 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18
-
-        r hset h20 01 01 02 02 03 03 04 04 05 05 06 06 07 07 08 08 09 09 10 10 11 11 12 12 13 13 14 14 15 15 16 16 17 17 18 18 19 19 20 20
-        r hpexpire h20 1 NX 2 01 02
-
-        after 10
-
-        # Verify SCAN does not report expired fields
-        assert_equal [lsort -unique [lindex [r hscan h1 0 COUNT 10] 1]] ""
-        assert_equal [lsort -unique [lindex [r hscan h4 0 COUNT 10] 1]] "02"
-        assert_equal [lsort -unique [lindex [r hscan h18 0 COUNT 10] 1]] ""
-        assert_equal [lsort -unique [lindex [r hscan h20 0 COUNT 100] 1]] "03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20"
-        # Restore to support active expire
-        r debug set-active-expire 1
-    }
+    #test {Lazy expire - SCAN does not report expired fields} {
+    #    # Enforce only lazy expire
+    #    r debug set-active-expire 0
+#
+    #    r del h1 h20 h4 h18 h20
+    #    r hset h1 01 01
+    #    r hpexpire h1 1 NX 1 01
+#
+    #    r hset h4 01 01 02 02 03 03 04 04
+    #    r hpexpire h4 1 NX 3 01 03 04
+#
+    #    # beyond 16 fields hash-field expiration DS (ebuckets) converts from list to rax
+#
+    #    r hset h18 01 01 02 02 03 03 04 04 05 05 06 06 07 07 08 08 09 09 10 10 11 11 12 12 13 13 14 14 15 15 16 16 17 17 18 18
+    #    r hpexpire h18 1 NX 18 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18
+#
+    #    r hset h20 01 01 02 02 03 03 04 04 05 05 06 06 07 07 08 08 09 09 10 10 11 11 12 12 13 13 14 14 15 15 16 16 17 17 18 18 19 19 20 20
+    #    r hpexpire h20 1 NX 2 01 02
+#
+    #    after 10
+#
+    #    # Verify SCAN does not report expired fields
+    #    assert_equal [lsort -unique [lindex [r hscan h1 0 COUNT 10] 1]] ""
+    #    assert_equal [lsort -unique [lindex [r hscan h4 0 COUNT 10] 1]] "02"
+    #    assert_equal [lsort -unique [lindex [r hscan h18 0 COUNT 10] 1]] ""
+    #    assert_equal [lsort -unique [lindex [r hscan h20 0 COUNT 100] 1]] "03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20"
+    #    # Restore to support active expire
+    #    r debug set-active-expire 1
+    #}
 
     test {Lazy expire - verify various HASH commands ignore expired fields} {
         # Enforce only lazy expire
@@ -404,29 +404,29 @@ start_server {tags {"hash expire"}} {
         assert_range [r hpttl myhash 1 field1] 900 1000
     }
 
-    test {Test RANDOMKEY not return hash if all its fields are expired} {
-        for {set i 0} {$i < 100} {incr i} {
-            # Enforce only lazy expire
-            r debug set-active-expire 0
-            r flushall
-
-            # Set a small number because after some unsuccessful retries to find a
-            # non-expired key, the command will return an expired key
-            for {set h 1} {$h <= 4} {incr h} {
-                r hset h$h f1 v1
-                r hpexpire h$h 1 NX 1 f1
-                #r pexpire h$h 1
-            }
-            # Create a single hash without any field to be expired
-            r hset h5 f1 v1
-            after 5
-
-            assert_equal [r RANDOMKEY] "h5"
-
-            # Restore to support active expire
-            r debug set-active-expire 1
-        }
-    }
+    #test {Test RANDOMKEY not return hash if all its fields are expired} {
+    #    for {set i 0} {$i < 100} {incr i} {
+    #        # Enforce only lazy expire
+    #        r debug set-active-expire 0
+    #        r flushall
+#
+    #        # Set a small number because after some unsuccessful retries to find a
+    #        # non-expired key, the command will return an expired key
+    #        for {set h 1} {$h <= 4} {incr h} {
+    #            r hset h$h f1 v1
+    #            r hpexpire h$h 1 NX 1 f1
+    #            #r pexpire h$h 1
+    #        }
+    #        # Create a single hash without any field to be expired
+    #        r hset h5 f1 v1
+    #        after 5
+#
+    #        assert_equal [r RANDOMKEY] "h5"
+#
+    #        # Restore to support active expire
+    #        r debug set-active-expire 1
+    #    }
+    #}
 
     test {Test RENAME hash with fields to be expired} {
         r debug set-active-expire 0

@@ -338,7 +338,7 @@ void freeHashObject(robj *o) {
         dictRelease((dict*) o->ptr);
         break;
     case OBJ_ENCODING_LISTPACK:
-        lpFree(o->ptr);
+        freeHash(o->ptr);
         break;
     default:
         serverPanic("Unknown hash encoding type");

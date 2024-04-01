@@ -1347,7 +1347,7 @@ void renameGenericCommand(client *c, int nx) {
     /* If hash with expiration on fields then remove it from global HFE DS and
      * keep next expiration time. Otherwise, dbDelete() will remove it from the
      * global HFE DS and we will lose the expiration time. */
-    if (o->type == OBJ_HASH && o->encoding == OBJ_ENCODING_HT) {
+    if (o->type == OBJ_HASH) {
         minHashExpireTime = hashTypeRemoveFromExpires(&c->db->hexpires, o);
         /* update its key reference to the new name */
         hashTypeRename(o, c->argv[2]->ptr);
@@ -1429,7 +1429,7 @@ void moveCommand(client *c) {
     /* If hash with expiration on fields, remove it from global HFE DS and keep
      * aside registered expiration time. Must be before deletion of the object.
      * hexpires (ebuckets) embed in stored items its structure. */
-    if (o->type == OBJ_HASH && o->encoding == OBJ_ENCODING_HT)
+    if (o->type == OBJ_HASH)
         hashExpireTime = hashTypeRemoveFromExpires(&src->hexpires, o);
 
     incrRefCount(o);

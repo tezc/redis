@@ -3171,6 +3171,8 @@ int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags);
 robj *hashTypeDup(robj *o, sds newkey, uint64_t *minHashExpire);
 uint64_t hashTypeRemoveFromExpires(ebuckets *hexpires, robj *o);
 void hashTypeAddToExpires(redisDb *db, robj *keyObj, robj *hashObj, uint64_t expireTime);
+/* TODO: Find a better place */
+void freeHash(void *ptr);
 
 /* Hash-Field data type (of t_hash.c) */
 hfield hfieldNew(const void *field, size_t fieldlen, int withExpireMeta);
