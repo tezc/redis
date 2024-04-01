@@ -141,46 +141,46 @@ start_server {tags {"hash expire"}} {
         assert_error {*invalid expire time*} {r hpexpire myhash [expr (1<<48) - [clock milliseconds] + 100 ] 1 f1}
     }
 
-    # test {Active/Lazy - deletes hash that all its fields got expired} {
-    #     for {set isActiveExp 0} {$isActiveExp <= 1} {incr isActiveExp} {
-    #         r debug set-active-expire $isActiveExp
-    #         r flushall
-#
-    #         set hash_sizes {1 15 16 17 31 32 33 40}
-    #         foreach h $hash_sizes {
-    #             for {set i 1} {$i <= $h} {incr i} {
-#
-    #                 # random expiration time
-    #                 r hset hrand$h f$i v$i
-    #                 r hpexpire hrand$h [expr {50 + int(rand() * 50)}] 1 f$i
-    #                 assert_equal 1 [r HEXISTS hrand$h f$i]
-#
-    #                 # same expiration time
-    #                 r hset same$h f$i v$i
-    #                 r hpexpire same$h 100 1 f$i
-    #                 assert_equal 1 [r HEXISTS same$h f$i]
-#
-    #                 # same expiration time
-    #                 r hset mix$h fieldWithoutExpire$i v$i
-    #                 r hset mix$h f$i v$i
-    #                 r hpexpire mix$h 100 1 f$i
-    #                 assert_equal 1 [r HEXISTS mix$h f$i]
-    #             }
-    #         }
-#
-    #         after 150
-#
-    #         # Verify that all fields got expired and keys got deleted
-    #         foreach h $hash_sizes {
-    #             for {set i 1} {$i <= $h} {incr i} {
-    #                 assert_equal 0 [r HEXISTS mix$h f$i]
-    #             }
-    #             assert_equal 0 [r EXISTS hrand$h]
-    #             assert_equal 0 [r EXISTS same$h]
-    #             assert_equal 1 [r EXISTS mix$h]
-    #         }
-    #     }
-    # }
+     test {Active/Lazy - deletes hash that all its fields got expired} {
+         for {set isActiveExp 0} {$isActiveExp <= 1} {incr isActiveExp} {
+             r debug set-active-expire $isActiveExp
+             r flushall
+
+             set hash_sizes {1 15 16 17 31 32 33 40}
+             foreach h $hash_sizes {
+                 for {set i 1} {$i <= $h} {incr i} {
+
+                     # random expiration time
+                     r hset hrand$h f$i v$i
+                     r hpexpire hrand$h [expr {50 + int(rand() * 50)}] 1 f$i
+                     assert_equal 1 [r HEXISTS hrand$h f$i]
+
+                     # same expiration time
+                     r hset same$h f$i v$i
+                     r hpexpire same$h 100 1 f$i
+                     assert_equal 1 [r HEXISTS same$h f$i]
+
+                     # same expiration time
+                     r hset mix$h fieldWithoutExpire$i v$i
+                     r hset mix$h f$i v$i
+                     r hpexpire mix$h 100 1 f$i
+                     assert_equal 1 [r HEXISTS mix$h f$i]
+                 }
+             }
+
+             after 150
+
+             # Verify that all fields got expired and keys got deleted
+             foreach h $hash_sizes {
+                 for {set i 1} {$i <= $h} {incr i} {
+                     assert_equal 0 [r HEXISTS mix$h f$i]
+                 }
+                 assert_equal 0 [r EXISTS hrand$h]
+                 assert_equal 0 [r EXISTS same$h]
+                 assert_equal 1 [r EXISTS mix$h]
+             }
+         }
+     }
 
     test {HPEXPIRE - Flushall deletes all pending expired fields} {
         r del myhash
