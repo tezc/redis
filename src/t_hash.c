@@ -628,10 +628,12 @@ int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags) {
                 /* Replace value */
                 zl = lpReplace(zl, &vptr, (unsigned char*)value, sdslen(value));
 
-                /* Clear TTL */
-                vptr = lpNext(zl, vptr);
-                serverAssert(vptr != NULL);
-                zl = lpReplaceInteger(zl, &vptr, HASH_LP_NO_TTL);
+                if (isHfe) {
+                    /* Clear TTL */
+                    vptr = lpNext(zl, vptr);
+                    serverAssert(vptr != NULL);
+                    zl = lpReplaceInteger(zl, &vptr, HASH_LP_NO_TTL);
+                }
             }
         }
 
