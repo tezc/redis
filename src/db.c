@@ -344,8 +344,7 @@ robj *dbRandomKey(redisDb *db) {
         valobj = dictGetVal(de);
 
         /* Special care to hash that all its fields got expired */
-        if (valobj->type == OBJ_HASH && valobj->encoding == OBJ_ENCODING_HT &&
-            hashTypeIsEmpty(valobj)) {
+        if (valobj->type == OBJ_HASH && hashTypeIsEmpty(valobj)) {
             if (--maxtries) {
                 expireIfNeeded(db, keyobj, 0, valobj);
                 decrRefCount(keyobj);
@@ -1218,9 +1217,7 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
         }
         setTypeReleaseIterator(si);
         cursor = 0;
-    } else if ((o->type == OBJ_HASH || o->type == OBJ_ZSET) &&
-               o->encoding == OBJ_ENCODING_LISTPACK)
-    {
+    } else if (o->type == OBJ_ZSET && o->encoding == OBJ_ENCODING_LISTPACK) {
         unsigned char *p = lpFirst(o->ptr);
         unsigned char *str;
         int64_t len;
@@ -1245,7 +1242,50 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
             p = lpNext(o->ptr, p);
         }
         cursor = 0;
-    } else {
+    } else if (o->type == OBJ_HASH &&
+                (o->encoding == OBJ_ENCODING_LISTPACK ||
+                 o->encoding == OBJ_ENCODING_LISTPACK_TTL)) {
+        unsigned char *lp = hashLpGetListpack(o);
+        unsigned char *p = lpFirst(lp);
+        unsigned char *str, *t;
+        int expired;
+        int64_t len;
+        long long ttl;
+        unsigned char intbuf[LP_INTBUF_SIZE];
+
+        while(p) {
+            expired = 0;
+            t = NULL;
+
+            str = lpGet(p, &len, intbuf);
+            /* point to the value */
+            p = lpNext(lp, p);
+
+            if (o->encoding == OBJ_ENCODING_LISTPACK_TTL) {
+                t = lpNext(lp, p);
+                lpGetValue(t, NULL, &ttl);
+                expired = hashLpIsExpired(ttl);
+            }
+
+            if (expired || (use_pattern && !stringmatchlen(pat, sdslen(pat), (char *)str, len, 0))) {
+                /* jump to the next key/val pair */
+                p = lpNext(lp, t ? t : p);
+                continue;
+            }
+
+            /* add key object */
+            listAddNodeTail(keys, sdsnewlen(str, len));
+            /* add value object */
+            if (!no_values) {
+                str = lpGet(p, &len, intbuf);
+                listAddNodeTail(keys, sdsnewlen(str, len));
+            }
+            p = lpNext(lp, t ? t : p);
+        }
+        cursor = 0;
+    }
+
+    else {
         serverPanic("Not handled encoding in SCAN.");
     }
 
@@ -1413,7 +1453,7 @@ void renameGenericCommand(client *c, int nx) {
     /* If hash with expiration on fields then remove it from global HFE DS and
      * keep next expiration time. Otherwise, dbDelete() will remove it from the
      * global HFE DS and we will lose the expiration time. */
-    if (o->type == OBJ_HASH && o->encoding == OBJ_ENCODING_HT) {
+    if (o->type == OBJ_HASH) {
         minHashExpireTime = hashTypeRemoveFromExpires(&c->db->hexpires, o);
         /* update its key reference to the new name */
         hashTypeRename(o, c->argv[2]->ptr);
@@ -1495,7 +1535,7 @@ void moveCommand(client *c) {
     /* If hash with expiration on fields, remove it from global HFE DS and keep
      * aside registered expiration time. Must be before deletion of the object.
      * hexpires (ebuckets) embed in stored items its structure. */
-    if (o->type == OBJ_HASH && o->encoding == OBJ_ENCODING_HT)
+    if (o->type == OBJ_HASH)
         hashExpireTime = hashTypeRemoveFromExpires(&src->hexpires, o);
 
     incrRefCount(o);

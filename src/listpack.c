@@ -1409,14 +1409,14 @@ static inline void lpSaveValue(unsigned char *val, unsigned int len, int64_t lva
  * total_count is a pre-computed length/2 of the listpack (to avoid calls to lpLength)
  * 'key' and 'val' are used to store the result key value pair.
  * 'val' can be NULL if the value is not needed. */
-void lpRandomPair(unsigned char *lp, unsigned long total_count, listpackEntry *key, listpackEntry *val) {
+void lpRandomPair(unsigned char *lp, unsigned long total_count, listpackEntry *key, listpackEntry *val, int skip) {
     unsigned char *p;
 
     /* Avoid div by zero on corrupt listpack */
     assert(total_count);
 
     /* Generate even numbers, because listpack saved K-V pair */
-    int r = (rand() % total_count) * 2;
+    int r = (rand() % total_count) * (2 + skip);
     assert((p = lpSeek(lp, r)));
     key->sval = lpGetValue(p, &(key->slen), &(key->lval));
 
@@ -1467,7 +1467,7 @@ void lpRandomEntries(unsigned char *lp, unsigned int count, listpackEntry *entri
  * 'vals' args. The order of the picked entries is random, and the selections
  * are non-unique (repetitions are possible).
  * The 'vals' arg can be NULL in which case we skip these. */
-void lpRandomPairs(unsigned char *lp, unsigned int count, listpackEntry *keys, listpackEntry *vals) {
+void lpRandomPairs(unsigned char *lp, unsigned int count, listpackEntry *keys, listpackEntry *vals, int skip) {
     unsigned char *p, *key, *value;
     unsigned int klen = 0, vlen = 0;
     long long klval = 0, vlval = 0;
@@ -1478,14 +1478,14 @@ void lpRandomPairs(unsigned char *lp, unsigned int count, listpackEntry *keys, l
         unsigned int order;
     } rand_pick;
     rand_pick *picks = lp_malloc(sizeof(rand_pick)*count);
-    unsigned int total_size = lpLength(lp)/2;
+    unsigned int total_size = lpLength(lp)/(2 + skip);
 
     /* Avoid div by zero on corrupt listpack */
     assert(total_size);
 
     /* create a pool of random indexes (some may be duplicate). */
     for (unsigned int i = 0; i < count; i++) {
-        picks[i].index = (rand() % total_size) * 2; /* Generate even indexes */
+        picks[i].index = (rand() % total_size) * (2 + skip); /* Generate even indexes */
         /* keep track of the order we picked them */
         picks[i].order = i;
     }
@@ -1507,7 +1507,7 @@ void lpRandomPairs(unsigned char *lp, unsigned int count, listpackEntry *keys, l
                 lpSaveValue(value, vlen, vlval, &vals[storeorder]);
              pickindex++;
         }
-        lpindex += 2;
+        lpindex += (2 + skip);
         p = lpNext(lp, p);
     }
 
@@ -1520,7 +1520,7 @@ void lpRandomPairs(unsigned char *lp, unsigned int count, listpackEntry *keys, l
  * The 'vals' arg can be NULL in which case we skip these.
  * The return value is the number of items picked which can be lower than the
  * requested count if the listpack doesn't hold enough pairs. */
-unsigned int lpRandomPairsUnique(unsigned char *lp, unsigned int count, listpackEntry *keys, listpackEntry *vals) {
+unsigned int lpRandomPairsUnique(unsigned char *lp, unsigned int count, listpackEntry *keys, listpackEntry *vals, int skip) {
     unsigned char *p, *key;
     unsigned int klen = 0;
     long long klval = 0;
@@ -1545,6 +1545,12 @@ unsigned int lpRandomPairsUnique(unsigned char *lp, unsigned int count, listpack
         remaining--;
         picked++;
         index++;
+
+        for (int i = 0; i < skip; i++) {
+            p = lpNext(lp, p);
+            remaining--;
+            index++;
+        }
     }
     return picked;
 }
