@@ -412,7 +412,7 @@ void hashTypeTryConversion(robj *o, robj **argv, int start, int end) {
      * might over allocate memory if there are duplicates. */
     size_t new_fields = (end - start + 1) / 2;
     if (new_fields > server.hash_max_listpack_entries) {
-        hashTypeConvert(o, OBJ_ENCODING_HT);
+        hashTypeConvert(o, OBJ_ENCODING_HT, NULL);
         dictExpand(o->ptr, new_fields);
         return;
     }
@@ -422,13 +422,13 @@ void hashTypeTryConversion(robj *o, robj **argv, int start, int end) {
             continue;
         size_t len = sdslen(argv[i]->ptr);
         if (len > server.hash_max_listpack_value) {
-            hashTypeConvert(o, OBJ_ENCODING_HT);
+            hashTypeConvert(o, OBJ_ENCODING_HT, NULL);
             return;
         }
         sum += len;
     }
     if (!lpSafeToAdd(hashLpGetListpack(o), sum))
-        hashTypeConvert(o, OBJ_ENCODING_HT);
+        hashTypeConvert(o, OBJ_ENCODING_HT, NULL);
 }
 
 /* Get the value from a listpack encoded hash, identified by field.
@@ -599,7 +599,7 @@ int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags) {
     if (o->encoding == OBJ_ENCODING_LISTPACK ||
         o->encoding == OBJ_ENCODING_LISTPACK_TTL) {
         if (sdslen(field) > server.hash_max_listpack_value || sdslen(value) > server.hash_max_listpack_value)
-            hashTypeConvert(o, OBJ_ENCODING_HT);
+            hashTypeConvert(o, OBJ_ENCODING_HT, db);
     }
 
     if (o->encoding == OBJ_ENCODING_LISTPACK) {
@@ -629,7 +629,7 @@ int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags) {
 
         /* Check if the listpack needs to be converted to a hash table */
         if (hashTypeLength(o, 0) > server.hash_max_listpack_entries)
-            hashTypeConvert(o, OBJ_ENCODING_HT);
+            hashTypeConvert(o, OBJ_ENCODING_HT, db);
 
     } else if (o->encoding == OBJ_ENCODING_LISTPACK_TTL){
         unsigned char *fptr, *vptr;
@@ -663,7 +663,7 @@ int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags) {
 
         /* Check if the listpack needs to be converted to a hash table */
         if (hashTypeLength(o, 0) > server.hash_max_listpack_entries)
-            hashTypeConvert(o, OBJ_ENCODING_HT);
+            hashTypeConvert(o, OBJ_ENCODING_HT, db);
     }  else if (o->encoding == OBJ_ENCODING_HT) {
         dict *ht = o->ptr;
         dictEntry *de, *existingEntry;
@@ -1056,7 +1056,7 @@ sds hashTypeCurrentObjectNewSds(hashTypeIterator *hi, int what) {
 }
 
 /* Return the key at the current iterator position as a new hfield string. */
-hfield hashTypeCurrentObjectNewHfield(hashTypeIterator *hi) {
+hfield hashTypeCurrentObjectNewHfield(hashTypeIterator *hi, int withExpireMeta) {
     char buf[LONG_STR_SIZE];
     unsigned char *vstr;
     unsigned int vlen;
@@ -1070,7 +1070,7 @@ hfield hashTypeCurrentObjectNewHfield(hashTypeIterator *hi) {
         vstr = (unsigned char *) buf;
     }
 
-    hf = hfieldNew(vstr,vlen, 0);
+    hf = hfieldNew(vstr,vlen, withExpireMeta);
     return hf;
 }
 
@@ -1139,7 +1139,7 @@ void hashTypeConvertListpack(robj *o, int enc) {
 
         while (hashTypeNext(hi, 0) != C_ERR) {
 
-            hfield key = hashTypeCurrentObjectNewHfield(hi);
+            hfield key = hashTypeCurrentObjectNewHfield(hi, 0);
             sds value = hashTypeCurrentObjectNewSds(hi,OBJ_HASH_VALUE);
             dictUseStoredKeyApi(dict, 1);
             ret = dictAdd(dict, key, value);
@@ -1161,9 +1161,70 @@ void hashTypeConvertListpack(robj *o, int enc) {
     }
 }
 
-void hashTypeConvert(robj *o, int enc) {
+void hashTypeConvertListpackTTL(robj *o, int enc, redisDb *db) {
+    serverAssert(o->encoding == OBJ_ENCODING_LISTPACK_TTL);
+
+    if (enc == OBJ_ENCODING_LISTPACK_TTL) {
+        return;
+    } else if (enc == OBJ_ENCODING_HT) {
+        hashTypeIterator *hi;
+        dict *dict;
+        int ret;
+        dictExpireMetadata *dictExpireMeta;
+        listpackTTL *lpt = o->ptr;
+        uint64_t minExpire = hashTypeGetMinExpire(o);
+
+        if (db && lpt->meta.trash != 1)
+            ebRemove(&db->hexpires, &hashExpireBucketsType, o);
+
+        dict = dictCreate(&mstrHashDictTypeWithHFE);
+        dictExpand(dict,hashTypeLength(o, 0));
+        dictExpireMeta = (dictExpireMetadata *) dictMetadata(dict);
+
+        /* Fillup dict HFE metadata */
+        dictExpireMeta->key = lpt->key;            /* reference key in keyspace */
+        dictExpireMeta->hfe = ebCreate();     /* Allocate HFE DS */
+        dictExpireMeta->expireMeta.trash = 1; /* mark as trash (as long it wasn't ebAdd()) */
+
+        hi = hashTypeInitIterator(o);
+
+        while (hashTypeNext(hi, 0) != C_ERR) {
+            hfield key = hashTypeCurrentObjectNewHfield(hi, hi->ttl != HASH_LP_NO_TTL);
+            sds value = hashTypeCurrentObjectNewSds(hi,OBJ_HASH_VALUE);
+            dictUseStoredKeyApi(dict, 1);
+            ret = dictAdd(dict, key, value);
+            dictUseStoredKeyApi(dict, 0);
+            if (ret != DICT_OK) {
+                hfieldFree(key); sdsfree(value); /* Needed for gcc ASAN */
+                hashTypeReleaseIterator(hi);  /* Needed for gcc ASAN */
+                serverLogHexDump(LL_WARNING,"listpack with dup elements dump",
+                                 o->ptr,lpBytes(o->ptr));
+                serverPanic("Listpack corruption detected");
+            }
+
+            if (hi->ttl != HASH_LP_NO_TTL)
+                ebAdd(&dictExpireMeta->hfe, &hashFieldExpireBucketsType, key, hi->ttl);
+        }
+        hashTypeReleaseIterator(hi);
+        lpFree(lpt->lp);
+        zfree(lpt);
+
+        o->encoding = OBJ_ENCODING_HT;
+        o->ptr = dict;
+
+        if (minExpire != EB_EXPIRE_TIME_INVALID)
+            ebAdd(&db->hexpires, &hashExpireBucketsType, o, minExpire);
+
+    } else {
+        serverPanic("Unknown hash encoding");
+    }
+}
+
+void hashTypeConvert(robj *o, int enc, redisDb *db) {
     if (o->encoding == OBJ_ENCODING_LISTPACK) {
         hashTypeConvertListpack(o, enc);
+    } else if (o->encoding == OBJ_ENCODING_LISTPACK_TTL) {
+        hashTypeConvertListpackTTL(o, enc, db);
     } else if (o->encoding == OBJ_ENCODING_HT) {
         serverPanic("Not implemented");
     } else {
@@ -1378,7 +1439,9 @@ static ExpireAction hashTypeActiveExpire(eItem _hashObj, void *ctx) {
 /* Return the next/minimum expiry time of the hash-field.
  * If not found, return EB_EXPIRE_TIME_INVALID */
 int64_t hashTypeGetMinExpire(robj *o) {
-    if (o->encoding == OBJ_ENCODING_LISTPACK_TTL) {
+    if (o->encoding == OBJ_ENCODING_LISTPACK) {
+        return EB_EXPIRE_TIME_INVALID;
+    } else if (o->encoding == OBJ_ENCODING_LISTPACK_TTL) {
         return hashLpGetMinExpire(o);
     }
 
@@ -2500,7 +2563,7 @@ static void hexpireGenericCommand(client *c, const char *cmd, long long basetime
     }
 
     if (hashObj->encoding == OBJ_ENCODING_LISTPACK) {
-        hashTypeConvert(hashObj, OBJ_ENCODING_LISTPACK_TTL);
+        hashTypeConvert(hashObj, OBJ_ENCODING_LISTPACK_TTL, c->db);
         listpackTTL *lpt = hashObj->ptr;
 
         dictEntry *de = dbFind(c->db, keyArg->ptr);

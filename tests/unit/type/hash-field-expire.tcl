@@ -354,36 +354,36 @@ start_server {tags {"hash expire"}} {
         r debug set-active-expire 1
     }
 
-#    test {Test HSCAN with mostly expired fields return empty result} {
-#        r debug set-active-expire 0
-#
-#        # Create hash with 1000 fields and 999 of them will be expired
-#        r del myhash
-#        for {set i 1} {$i <= 1000} {incr i} {
-#            r hset myhash field$i value$i
-#            if {$i > 1} {
-#                r hpexpire myhash 1 NX 1 field$i
-#            }
-#        }
-#        after 3
-#
-#        # Verify iterative HSCAN returns either empty result or only the first field
-#        set countEmptyResult 0
-#        set cur 0
-#        while 1 {
-#            set res [r hscan myhash $cur]
-#            set cur [lindex $res 0]
-#            # if the result is not empty, it should contain only the first field
-#            if {[llength [lindex $res 1]] > 0} {
-#                assert_equal [lindex $res 1] "field1 value1"
-#            } else {
-#                incr countEmptyResult
-#            }
-#            if {$cur == 0} break
-#        }
-#        assert {$countEmptyResult > 0}
-#        r debug set-active-expire 1
-#    }
+    test {Test HSCAN with mostly expired fields return empty result} {
+        r debug set-active-expire 0
+
+        # Create hash with 1000 fields and 999 of them will be expired
+        r del myhash
+        for {set i 1} {$i <= 1000} {incr i} {
+            r hset myhash field$i value$i
+            if {$i > 1} {
+                r hpexpire myhash 1 NX 1 field$i
+            }
+        }
+        after 3
+
+        # Verify iterative HSCAN returns either empty result or only the first field
+        set countEmptyResult 0
+        set cur 0
+        while 1 {
+            set res [r hscan myhash $cur]
+            set cur [lindex $res 0]
+            # if the result is not empty, it should contain only the first field
+            if {[llength [lindex $res 1]] > 0} {
+                assert_equal [lindex $res 1] "field1 value1"
+            } else {
+                incr countEmptyResult
+            }
+            if {$cur == 0} break
+        }
+        assert {$countEmptyResult > 0}
+        r debug set-active-expire 1
+    }
 
     test {Lazy expire - verify various HASH commands ignore expired fields} {
         # Enforce only lazy expire
