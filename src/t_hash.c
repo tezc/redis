@@ -207,9 +207,22 @@ static void hashDictWithExpireOnRelease(dict *d) {
 
 typedef struct listpackTTL {
     ExpireMeta meta;
-    void *lp;
     sds key;
+    void *lp;
 } listpackTTL;
+
+struct listpackTTL *listpackTTLCreate(size_t lpCap) {
+    listpackTTL *lpt = zcalloc(sizeof(*lpt));
+    lpt->lp = lpNew(lpCap);
+    lpt->meta.trash = 1;
+    lpt->key = NULL;
+    return lpt;
+}
+
+void listpackTTLFree(listpackTTL *lpt) {
+    lpFree(lpt->lp);
+    zfree(lpt);
+}
 
 int hashLpIsExpired(uint64_t ttl) {
     return ttl != HASH_LP_NO_TTL && (mstime_t) ttl < commandTimeSnapshot();
@@ -367,9 +380,8 @@ static int hashLpPersist(robj *o, redisDb *db, sds field, long long now) {
     ebRemove(&db->hexpires, &hashExpireBucketsType, o);
 
     uint64_t minExpire = hashLpGetMinExpire(o);
-    if (minExpire != EB_EXPIRE_TIME_INVALID) {
+    if (minExpire != EB_EXPIRE_TIME_INVALID)
         ebAdd(&db->hexpires, &hashExpireBucketsType, o, minExpire);
-    }
 
     return HFE_SET_OK;
 }
@@ -383,8 +395,7 @@ void freeHash(robj *o) {
             lpFree(o->ptr);
             break;
         case OBJ_ENCODING_LISTPACK_TTL:
-            lpFree(((listpackTTL*)o->ptr)->lp);
-            zfree(o->ptr);
+            listpackTTLFree(o->ptr);
             break;
         default:
             serverPanic("Unknown hash encoding type");
@@ -455,6 +466,9 @@ int hashTypeGetFromListpack(robj *o, sds field,
             }
         }
     } else if (o->encoding == OBJ_ENCODING_LISTPACK_TTL) {
+        long long expire;
+        unsigned char *h;
+
         zl = ((listpackTTL*)o->ptr)->lp;
         fptr = lpFirst(zl);
         if (fptr != NULL) {
@@ -462,9 +476,6 @@ int hashTypeGetFromListpack(robj *o, sds field,
             if (fptr != NULL) {
                 vptr = lpNext(zl, fptr);
                 serverAssert(vptr != NULL);
-
-                long long expire;
-                unsigned char *h;
 
                 h = lpNext(zl, vptr);
                 h = lpGetValue(h, NULL, &expire);
@@ -630,7 +641,6 @@ int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags) {
         /* Check if the listpack needs to be converted to a hash table */
         if (hashTypeLength(o, 0) > server.hash_max_listpack_entries)
             hashTypeConvert(o, OBJ_ENCODING_HT, db);
-
     } else if (o->encoding == OBJ_ENCODING_LISTPACK_TTL){
         unsigned char *fptr, *vptr;
         listpackTTL *lpt = o->ptr;
@@ -885,7 +895,7 @@ int hashTypeNext(hashTypeIterator *hi, int skipExpiredFields) {
         unsigned char *zl;
         unsigned char *fptr, *vptr;
 
-        zl = hashLpGetListpack(hi->subject);
+        zl = hi->subject->ptr;
         fptr = hi->fptr;
         vptr = hi->vptr;
 
@@ -908,6 +918,7 @@ int hashTypeNext(hashTypeIterator *hi, int skipExpiredFields) {
         hi->fptr = fptr;
         hi->vptr = vptr;
     } else if (hi->encoding == OBJ_ENCODING_LISTPACK_TTL) {
+        long long ttl;
         unsigned char *zl = hashLpGetListpack(hi->subject);
         unsigned char *fptr, *vptr, *tptr;
 
@@ -925,8 +936,6 @@ int hashTypeNext(hashTypeIterator *hi, int skipExpiredFields) {
             fptr = lpNext(zl, tptr);
         }
         if (fptr == NULL) return C_ERR;
-
-        long long ttl;
 
         while (fptr != NULL) {
             /* Grab pointer to the value (fptr points to the field) */
@@ -1096,10 +1105,8 @@ void hashTypeConvertListpack(robj *o, int enc) {
         void *fptr;
         long long val;
         unsigned int slen;
-        listpackTTL *lpt = zcalloc(sizeof(*lpt));
-
-        lpt->lp = lpNew(lpBytes(o->ptr) + lpLength(o->ptr));
-        lpt->meta.trash = 1;
+        size_t cap = lpBytes(o->ptr) + lpLength(o->ptr);
+        listpackTTL *lpt = listpackTTLCreate(cap);
 
         fptr = lpFirst(o->ptr);
         while (fptr != NULL) {
@@ -1212,7 +1219,7 @@ void hashTypeConvertListpackTTL(robj *o, int enc, redisDb *db) {
         o->encoding = OBJ_ENCODING_HT;
         o->ptr = dict;
 
-        if (minExpire != EB_EXPIRE_TIME_INVALID)
+        if (db && minExpire != EB_EXPIRE_TIME_INVALID)
             ebAdd(&db->hexpires, &hashExpireBucketsType, o, minExpire);
 
     } else {
@@ -1252,17 +1259,15 @@ robj *hashTypeDup(robj *o, sds newkey, uint64_t *minHashExpire) {
         hobj->encoding = OBJ_ENCODING_LISTPACK;
     } else if(o->encoding == OBJ_ENCODING_LISTPACK_TTL) {
         listpackTTL *lpt = o->ptr;
-        size_t sz = lpBytes(lpt->lp);
-        unsigned char *new_zl = zmalloc(sz);
-        memcpy(new_zl, lpt->lp, sz);
 
         if (lpt->meta.trash == 0)
             *minHashExpire = ebGetMetaExpTime(&lpt->meta);
 
-        listpackTTL *dup = zcalloc(sizeof(*dup));
-        dup->lp = new_zl;
+        size_t sz = lpBytes(lpt->lp);
+        listpackTTL *dup = listpackTTLCreate(sz);
         dup->key = newkey;
-        dup->meta.trash = 1;
+        memcpy(dup->lp, lpt->lp, sz);
+
         hobj = createObject(OBJ_HASH, dup);
         hobj->encoding = OBJ_ENCODING_LISTPACK_TTL;
     } else if(o->encoding == OBJ_ENCODING_HT) {
@@ -2380,8 +2385,6 @@ static void httlGenericCommand(client *c, const char *cmd, long long basetime, i
     if ((hashObj = lookupKeyReadOrReply(c, c->argv[1], shared.null[c->resp])) == NULL ||
         checkType(c, hashObj, OBJ_HASH)) return;
 
-
-
     /* Read number of fields */
     if (getRangeLongFromObjectOrReply(c, c->argv[numFieldsAt], 1, LONG_MAX,
                                       &numFields, "Parameter `numFileds` should be greater than 0") != C_OK)
@@ -2408,6 +2411,7 @@ static void httlGenericCommand(client *c, const char *cmd, long long basetime, i
             else
                 addReplyLongLong(c, HFE_GET_NO_TTL);
         }
+        return;
     } else if (hashObj->encoding == OBJ_ENCODING_LISTPACK_TTL) {
         listpackTTL *lpt = hashObj->ptr;
 
@@ -2444,35 +2448,38 @@ static void httlGenericCommand(client *c, const char *cmd, long long basetime, i
                 addReplyLongLong(c, (expire - basetime));
         }
         return;
-    }
+    } else if (hashObj->encoding == OBJ_ENCODING_HT) {
+        dict *d = hashObj->ptr;
 
-    dict *d = hashObj->ptr;
+        addReplyArrayLen(c, numFields);
+        for (int i = 0 ; i < numFields ; i++) {
+            sds field = c->argv[3+i]->ptr;
+            dictEntry *de = dictFind(d, field);
+            if (de == NULL) {
+                addReplyLongLong(c, HFE_GET_NO_FIELD);
+                continue;
+            }
 
-    addReplyArrayLen(c, numFields);
-    for (int i = 0 ; i < numFields ; i++) {
-        sds field = c->argv[3+i]->ptr;
-        dictEntry *de = dictFind(d, field);
-        if (de == NULL) {
-            addReplyLongLong(c, HFE_GET_NO_FIELD);
-            continue;
+            hfield hf = dictGetKey(de);
+            uint64_t expire = hfieldGetExpireTime(hf);
+            if (expire == EB_EXPIRE_TIME_INVALID) {
+                addReplyLongLong(c, HFE_GET_NO_TTL); /* no ttl */
+                continue;
+            }
+
+            if ( (long long) expire <= commandTimeSnapshot()) {
+                addReplyLongLong(c, HFE_GET_NO_FIELD);
+                continue;
+            }
+
+            if (unit == UNIT_SECONDS)
+                addReplyLongLong(c, (expire + 999 - basetime) / 1000);
+            else
+                addReplyLongLong(c, (expire - basetime));
         }
-
-        hfield hf = dictGetKey(de);
-        uint64_t expire = hfieldGetExpireTime(hf);
-        if (expire == EB_EXPIRE_TIME_INVALID) {
-            addReplyLongLong(c, HFE_GET_NO_TTL); /* no ttl */
-            continue;
-        }
-
-        if ( (long long) expire <= commandTimeSnapshot()) {
-            addReplyLongLong(c, HFE_GET_NO_FIELD);
-            continue;
-        }
-
-        if (unit == UNIT_SECONDS)
-            addReplyLongLong(c, (expire + 999 - basetime) / 1000);
-        else
-            addReplyLongLong(c, (expire - basetime));
+        return;
+    } else {
+        serverAssert(0);
     }
 }
 

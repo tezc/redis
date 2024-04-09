@@ -1245,12 +1245,12 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
     } else if (o->type == OBJ_HASH &&
                 (o->encoding == OBJ_ENCODING_LISTPACK ||
                  o->encoding == OBJ_ENCODING_LISTPACK_TTL)) {
-        unsigned char *lp = hashLpGetListpack(o);
-        unsigned char *p = lpFirst(lp);
-        unsigned char *str, *t;
         int expired;
         int64_t len;
         long long ttl;
+        unsigned char *lp = hashLpGetListpack(o);
+        unsigned char *p = lpFirst(lp);
+        unsigned char *str, *t;
         unsigned char intbuf[LP_INTBUF_SIZE];
 
         while(p) {
