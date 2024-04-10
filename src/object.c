@@ -333,7 +333,7 @@ void freeZsetObject(robj *o) {
 }
 
 void freeHashObject(robj *o) {
-    freeHash(o);
+    hashTypeFree(o);
 }
 
 void freeModuleObject(robj *o) {

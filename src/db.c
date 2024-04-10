@@ -1244,32 +1244,32 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
         cursor = 0;
     } else if (o->type == OBJ_HASH &&
                 (o->encoding == OBJ_ENCODING_LISTPACK ||
-                 o->encoding == OBJ_ENCODING_LISTPACK_TTL)) {
+                 o->encoding == OBJ_ENCODING_LISTPACK_TTL))
+    {
         int expired;
         int64_t len;
-        long long ttl;
-        unsigned char *lp = hashLpGetListpack(o);
+        long long expireAt;
+        unsigned char *lp = hashTypeListpackGetLp(o);
         unsigned char *p = lpFirst(lp);
-        unsigned char *str, *t;
+        unsigned char *str, *val;
         unsigned char intbuf[LP_INTBUF_SIZE];
 
         while(p) {
             expired = 0;
-            t = NULL;
 
             str = lpGet(p, &len, intbuf);
-            /* point to the value */
             p = lpNext(lp, p);
+            val = p;
 
             if (o->encoding == OBJ_ENCODING_LISTPACK_TTL) {
-                t = lpNext(lp, p);
-                lpGetValue(t, NULL, &ttl);
-                expired = hashLpIsExpired(ttl);
+                p = lpNext(lp, p);
+                lpGetValue(p, NULL, &expireAt);
+                expired = hashTypeListpackIsExpired(expireAt);
             }
 
             if (expired || (use_pattern && !stringmatchlen(pat, sdslen(pat), (char *)str, len, 0))) {
                 /* jump to the next key/val pair */
-                p = lpNext(lp, t ? t : p);
+                p = lpNext(lp, p);
                 continue;
             }
 
@@ -1277,10 +1277,10 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
             listAddNodeTail(keys, sdsnewlen(str, len));
             /* add value object */
             if (!no_values) {
-                str = lpGet(p, &len, intbuf);
+                str = lpGet(val, &len, intbuf);
                 listAddNodeTail(keys, sdsnewlen(str, len));
             }
-            p = lpNext(lp, t ? t : p);
+            p = lpNext(lp, p);
         }
         cursor = 0;
     }
