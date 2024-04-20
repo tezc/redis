@@ -634,7 +634,7 @@ start_server {tags {"external:skip needs:debug"}} {
     r config set hash-max-listpack-entries 512
 }
 
-start_server {tags {"hash expire"}} {
+start_server {tags {"external:skip needs:debug"}} {
 
     # Tests that only applies to listpack
 
