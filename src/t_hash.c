@@ -455,7 +455,7 @@ static void listpackTTLUpdateExpiry(robj *o, sds field,
         s = lpGetValue(fptr, NULL, &currExpiry);
         serverAssert(!s);
 
-        if (currExpiry == HASH_LP_NO_TTL || (uint64_t) currExpiry > expireAt) {
+        if (currExpiry == HASH_LP_NO_TTL || (uint64_t) currExpiry >= expireAt) {
             /* Found a field with no expiry time or with a higher expiry time.
              * Insert new field just before it. */
             lpt->lp = lpInsertString(lpt->lp, (unsigned char*) field,
