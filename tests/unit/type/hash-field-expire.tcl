@@ -638,7 +638,23 @@ start_server {tags {"external:skip needs:debug"}} {
 
     # Tests that only applies to listpack
 
-    test "Test listpack converts to ht and expiry works" {
+    test "Test listpack memory usage" {
+        r hset myhash f1 v1 f2 v2 f3 v3 f4 v4 f5 v5
+        r hpexpire myhash 5 2 f2 f4
+
+        # Just to have code coverage for the new listpack encoding
+        r memory usage myhash
+    }
+
+    test "Test listpack object encoding" {
+        r hset myhash f1 v1 f2 v2 f3 v3 f4 v4 f5 v5
+        r hpexpire myhash 5 2 f2 f4
+
+        # Just to have code coverage for the new listpack encoding
+        assert_equal [r object encoding myhash] "listpack_ttl"
+    }
+
+    test "Test listpack converts to ht and passive expiry works" {
         set prev [lindex [r config get hash-max-listpack-entries] 1]
         r config set hash-max-listpack-entries 10
         r debug set-active-expire 0
@@ -650,10 +666,53 @@ start_server {tags {"external:skip needs:debug"}} {
             r hset myhash f$i v$i
         }
 
-        r debug set-active-expire 1
         after 50
 
         assert_equal [lsort [r hgetall myhash]] [lsort "f1 f3 f5 f6 f7 f8 f9 f10 v1 v3 v5 v6 v7 v8 v9 v10"]
         r config set hash-max-listpack-entries $prev
+        r debug set-active-expire 1
+    }
+
+    test "Test listpack converts to ht and active expiry works" {
+        r del myhash
+        r debug set-active-expire 0
+
+        r hset myhash f1 v1 f2 v2 f3 v3 f4 v4 f5 v5
+        r hpexpire myhash 10 1 f1
+
+        for {set i 0} {$i < 2048} {incr i} {
+            r hset myhash f$i v$i
+        }
+
+        for {set i 0} {$i < 2048} {incr i} {
+            r hpexpire myhash 10 1 f$i
+        }
+
+        r debug set-active-expire 1
+        wait_for_condition 50 20 { [r EXISTS myhash] == 0 } else { fail "'myhash' should be expired" }
+    }
+
+    test "HPERSIST/HEXPIRE - Test listpack with large values" {
+        r del myhash
+
+        # Test with larger values to verify we successfully move fields in
+        # listpack when we are ordering according to TTL. This config change
+        # will make code to use temporary heap allocation when moving fields.
+        # See listpackTTLUpdateExpiry() for details.
+        r config set hash-max-listpack-value 2048
+
+        set payload1 [string repeat v3 1024]
+        set payload2 [string repeat v1 1024]
+        r hset myhash f1 $payload2 f2 v2 f3 $payload1 f4 v4
+
+        r hexpire myhash 100000 1 f3
+        r hpersist myhash 1 f3
+        assert_equal [r hpersist myhash 1 f3] $P_NO_EXPIRY
+
+        r hpexpire myhash 10 1 f1
+        after 20
+        assert_equal [lsort [r hgetall myhash]] [lsort "f2 f3 f4 v2 $payload1 v4"]
+
+        r config set hash-max-listpack-value 64
     }
 }

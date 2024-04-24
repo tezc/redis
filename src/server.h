@@ -3184,6 +3184,7 @@ uint64_t hashTypeGetNextTimeToExpire(robj *o);
 uint64_t hashTypeGetMinExpire(robj *keyObj);
 void hashTypeFree(robj *o);
 unsigned char *hashTypeListpackGetLp(robj *o);
+size_t hashTypeListpackMemUsage(robj *o);
 int hashTypeListpackIsExpired(uint64_t expireTime);
 
 /* Hash-Field data type (of t_hash.c) */
