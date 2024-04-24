@@ -2377,7 +2377,7 @@ SetExpireTimeRes hashTypeSetExpire(robj *hashObj,
     hfield hf = NULL;
     dict *d = NULL;
     dictEntry *de = NULL;
-    unsigned char *fptr, *vptr, *tptr;
+    unsigned char *fptr = NULL, *vptr = NULL, *tptr = NULL;
     listpackTTL *lpt = NULL;
 
     if (hashObj->encoding == OBJ_ENCODING_HT) {
