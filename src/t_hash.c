@@ -3090,7 +3090,7 @@ void hpersistCommand(client *c) {
 }
 
 /**
- * HGETF command
+ * HGETF - HSETF commands
  */
 #define HFE_CMD_NX          (1<<0)
 #define HFE_CMD_XX          (1<<1)
@@ -3103,7 +3103,14 @@ void hpersistCommand(client *c) {
 #define HFE_CMD_PXAT        (1<<6)
 #define HFE_CMD_EXAT        (1<<7)
 #define HFE_CMD_PERSIST     (1<<8)
+#define HFE_CMD_KEEPTTL     (1<<9)
 #define HFE_CMD_EXPIRY_MASK  0x3F0
+
+#define HFE_CMD_DC          (1<<10)
+#define HFE_CMD_DCF         (1<<11)
+#define HFE_CMD_DOF         (1<<12)
+#define HFE_CMD_GETNEW      (1<<13)
+#define HFE_CMD_GETOLD      (1<<14)
 
 /* Validate expire time is not more than EB_EXPIRE_TIME_MAX,
  * or it does not overflow */
@@ -3481,3 +3488,334 @@ void hgetfCommand(client *c) {
     }
 }
 
+static int setHashFieldToReply(client *c, robj *o, sds field, sds value, int flag, uint64_t expireAt, uint64_t *minPrevExp) {
+    unsigned char *vstr = NULL;
+    unsigned int vlen = UINT_MAX;
+    long long vll = LLONG_MAX;
+    listpackTTL *lpt = NULL;
+    unsigned char *fptr, *vptr = NULL, *tptr, *h;
+    hfield hf = NULL;
+    dict *d = NULL;
+    dictEntry *de = NULL;
+    uint64_t prevExpire = EB_EXPIRE_TIME_INVALID;
+
+    if (o->encoding == OBJ_ENCODING_LISTPACK_TTL) {
+        long long expire;
+        lpt = o->ptr;
+
+        fptr = lpFirst(lpt->lp);
+        if (fptr != NULL) {
+            fptr = lpFind(lpt->lp, fptr, (unsigned char *) field, sdslen(field), 2);
+            if (fptr != NULL) {
+                vptr = lpNext(lpt->lp, fptr);
+                serverAssert(vptr != NULL);
+
+                tptr = lpNext(lpt->lp, vptr);
+                serverAssert(tptr != NULL);
+
+                h = lpGetValue(tptr, NULL, &expire);
+                serverAssert(h == NULL);
+
+                if (expire != HASH_LP_NO_TTL)
+                    prevExpire = expire;
+            }
+        }
+
+        if (fptr == NULL) {
+            int code = 0;
+            if (flag & HFE_CMD_DCF) {
+                if (flag & (HFE_CMD_GETNEW | HFE_CMD_GETOLD))
+                    addReplyNull(c);
+                else
+                    addReplyLongLong(c, code);
+
+                return 0;
+            }
+
+            code++;
+
+            uint64_t expi = HASH_LP_NO_TTL;
+            if (flag & (HFE_CMD_EX | HFE_CMD_EXAT | HFE_CMD_PX | HFE_CMD_PXAT)) {
+                if (flag & HFE_NX) {
+                    code++;
+                    expi = expireAt;
+
+                    if (*minPrevExp > expireAt)
+                        *minPrevExp = expireAt;
+                }
+            }
+
+            listpackTTLAddNew(o, field, value, expi);
+
+            if (flag & HFE_CMD_GETOLD)
+                addReplyNull(c);
+            else if (flag & HFE_CMD_GETNEW)
+                addReplyBulkCBuffer(c, value, sdslen(value));
+            else
+                addReplyLongLong(c, code);
+
+            return 1;
+        } else {
+            int code = 0;
+            if (flag & HFE_CMD_DOF) {
+                if (flag & (HFE_CMD_GETNEW | HFE_CMD_GETOLD))
+                    addReplyNull(c);
+                else
+                    addReplyLongLong(c, code);
+
+                return 0;
+            }
+
+            if (flag & HFE_CMD_GETOLD) {
+                vstr = lpGetValue(vptr, &vlen, &vll);
+                if (vstr)
+                    addReplyBulkCBuffer(c, vstr, vlen);
+                else
+                    addReplyLongLong(c, vll);
+            } else if (flag & HFE_CMD_GETNEW) {
+                addReplyBulkCBuffer(c, value, sdslen(value));
+            }
+
+            code++;
+            /* Replace value */
+            lpt->lp = lpReplace(lpt->lp, &vptr, (unsigned char *) value, sdslen(value));
+            fptr = lpPrev(lpt->lp, vptr);
+            serverAssert(fptr != NULL);
+
+            uint64_t expi = EB_EXPIRE_TIME_INVALID;
+
+            if (prevExpire == EB_EXPIRE_TIME_INVALID) {
+                if (flag & (HFE_CMD_NX)) {
+                    listpackTTLUpdateExpiry(o, field, fptr, vptr, expireAt);
+                    code++;
+                }
+            } else {
+                if (!(flag & HFE_CMD_EXPIRY_MASK)) {
+                    code++;
+                    listpackTTLPersist(o, field, fptr, vptr);
+                } else if (((flag & HFE_CMD_GT) && (expireAt > prevExpire)) ||
+                           ((flag & HFE_CMD_LT) && (expireAt < prevExpire)) ||
+                           (flag & HFE_CMD_XX)) {
+                    code++;
+                    listpackTTLUpdateExpiry(o, field, fptr, vptr, expireAt);
+                }
+            }
+
+            if (code == 2) {
+                if (*minPrevExp > prevExpire)
+                    *minPrevExp = prevExpire;
+
+                if (*minPrevExp > expireAt)
+                    *minPrevExp = expireAt;
+            }
+
+            if (!(flag & (HFE_CMD_GETOLD | HFE_CMD_GETNEW))) {
+                addReplyLongLong(c, code);
+            }
+
+            return 1;
+        }
+    }
+
+
+
+    return 1;
+}
+
+/* Parse hsetf command arguments. */
+static int parseHsetfArgs(client *c, int *flags, uint64_t *expireAt,
+                          int *firstFieldPos, int *fieldCount)
+{
+    long long val;
+
+    *flags = 0;
+    *firstFieldPos = -1;
+    *fieldCount = -1;
+
+    for (int i = 2; i < c->argc; i++) {
+        if (!strcasecmp(c->argv[i]->ptr, "fvs")) {
+            if (i >= c->argc - 3) {
+                addReplyErrorArity(c);
+                return C_ERR;
+            }
+
+            if (getLongLongFromObjectOrReply(c, c->argv[i + 1], &val, NULL) != C_OK)
+                return C_ERR;
+
+            if (val > ((c->argc - i  - 2) / 2)) {
+                addReplyErrorArity(c);
+                return C_ERR;
+            }
+
+            *firstFieldPos = i + 2;
+            *fieldCount = val;
+            i = *firstFieldPos + (*fieldCount) * 2 - 1;
+            continue;
+        } else if (!strcasecmp(c->argv[i]->ptr, "NX")) {
+            *flags &= ~HFE_CMD_COND_MASK;
+            *flags |= HFE_NX;
+        } else if (!strcasecmp(c->argv[i]->ptr, "XX")) {
+            *flags &= ~HFE_CMD_COND_MASK;
+            *flags |= HFE_XX;
+        } else if (!strcasecmp(c->argv[i]->ptr, "GT")) {
+            *flags &= ~HFE_CMD_COND_MASK;
+            *flags |= HFE_GT;
+        } else if (!strcasecmp(c->argv[i]->ptr, "LT")) {
+            *flags &= ~HFE_CMD_COND_MASK;
+            *flags |= HFE_LT;
+        } else if (!strcasecmp(c->argv[i]->ptr, "EX")) {
+            *flags &= ~HFE_CMD_EXPIRY_MASK;
+            *flags |= HFE_CMD_EX;
+            if (i >= c->argc - 1) {
+                addReplyError(c, "missing expire time");
+                return C_ERR;
+            }
+            i++;
+            if (validateExpire(c, UNIT_SECONDS, c->argv[i],
+                               commandTimeSnapshot(), expireAt) != C_OK)
+                return C_ERR;
+
+        } else if (!strcasecmp(c->argv[i]->ptr, "PX")) {
+            *flags &= ~HFE_CMD_EXPIRY_MASK;
+            *flags |= HFE_CMD_PX;
+            if (i >= c->argc - 1) {
+                addReplyError(c, "missing expire time");
+                return C_ERR;
+            }
+            i++;
+            if (validateExpire(c, UNIT_MILLISECONDS, c->argv[i],
+                               commandTimeSnapshot(), expireAt) != C_OK)
+                return C_ERR;
+        } else if (!strcasecmp(c->argv[i]->ptr, "EXAT")) {
+            *flags &= ~HFE_CMD_EXPIRY_MASK;
+            *flags |= HFE_CMD_EXAT;
+            if (i >= c->argc - 1) {
+                addReplyError(c, "missing expire time");
+                return C_ERR;
+            }
+            i++;
+            if (validateExpire(c, UNIT_SECONDS, c->argv[i], 0, expireAt) != C_OK)
+                return C_ERR;
+        } else if (!strcasecmp(c->argv[i]->ptr, "PXAT")) {
+            *flags &= ~HFE_CMD_EXPIRY_MASK;
+            *flags |= HFE_CMD_PXAT;
+            if (i >= c->argc - 1) {
+                addReplyError(c, "missing expire time");
+                return C_ERR;
+            }
+            i++;
+            if (validateExpire(c, UNIT_MILLISECONDS, c->argv[i], 0, expireAt) != C_OK)
+                return C_ERR;
+        } else if (!strcasecmp(c->argv[i]->ptr, "KEEPTTL")) {
+            *flags &= ~HFE_CMD_EXPIRY_MASK;
+            *flags |= HFE_CMD_KEEPTTL;
+        } else if (!strcasecmp(c->argv[i]->ptr, "DC")) {
+            *flags |= HFE_CMD_DC;
+        } else if (!strcasecmp(c->argv[i]->ptr, "DCF")) {
+            *flags &= ~HFE_CMD_DOF;
+            *flags |= HFE_CMD_DCF;
+        } else if (!strcasecmp(c->argv[i]->ptr, "DOF")) {
+            *flags &= ~HFE_CMD_DCF;
+            *flags |= HFE_CMD_DOF;
+        } else {
+            addReplyErrorFormat(c, "unknown argument: %s", (char*) c->argv[i]->ptr);
+            return C_ERR;
+        }
+    }
+
+    /* FVS argument is mandatory. */
+    if (*firstFieldPos < 0) {
+        addReplyError(c, "missing FVS argument");
+        return C_ERR;
+    }
+
+    if (*flags & HFE_CMD_COND_MASK &&
+        (!(*flags & (HFE_CMD_EX | HFE_CMD_EXAT | HFE_CMD_PX | HFE_CMD_PXAT))))
+    {
+        addReplyError(c, "NX, XX, GT, and LT can be specified only when EX, PX, EXAT, or PXAT is specified");
+        return C_ERR;
+    }
+
+    return C_OK;
+}
+
+void hsetfCommand(client *c) {
+    int flags = 0;
+    robj *hashObj, *keyArg = c->argv[1];
+
+    int firstFieldPos = 0;
+    int numFields = 0;
+    uint64_t expireAt = EB_EXPIRE_TIME_INVALID;
+
+    if (parseHsetfArgs(c, &flags, &expireAt, &firstFieldPos, &numFields) != C_OK)
+        return;
+
+    if (flags & HFE_CMD_DC) {
+        if ((hashObj = lookupKeyWriteOrReply(c, c->argv[1], shared.null[c->resp])) == NULL ||
+            checkType(c, hashObj, OBJ_HASH)) return;
+    } else {
+        if ((hashObj = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
+    }
+
+    /* Read the hash object */
+    if ((hashObj = lookupKeyWriteOrReply(c, c->argv[1], shared.null[c->resp])) == NULL ||
+        checkType(c, hashObj, OBJ_HASH)) return;
+
+    if (hashObj->encoding == OBJ_ENCODING_HT) {
+        addReplyError(c, "not supported");
+        return;
+    }
+
+    attachHfeMeta(c->db, hashObj, keyArg);
+    uint64_t minExpire = hashTypeGetMinExpire(hashObj);
+
+    /* Figure out from provided set of fields in command, which one has the minimum
+     * expiration time, before the modification (Will be used for optimization below) */
+    uint64_t minExpireFields = EB_EXPIRE_TIME_INVALID;
+
+    int updated = 0;
+    addReplyArrayLen(c, numFields);
+    for (int i = 0; i < numFields ; i++) {
+        sds field = c->argv[firstFieldPos + (i * 2)]->ptr;
+        sds value = c->argv[firstFieldPos + (i * 2) + 1]->ptr;
+        updated += setHashFieldToReply(c, hashObj, field, value, flags, expireAt, &minExpireFields);
+    }
+
+    /* Notify keyspace event, update dirty count and update global HFE DS */
+    if (updated > 0) {
+        server.dirty += updated;
+        signalModifiedKey(c,c->db,keyArg);
+        notifyKeyspaceEvent(NOTIFY_HASH,"hgetf",keyArg,c->db->id);
+        if (hashTypeLength(hashObj, 0) == 0) {
+            dbDelete(c->db,keyArg);
+            notifyKeyspaceEvent(NOTIFY_GENERIC,"del",keyArg, c->db->id);
+        } else {
+
+            /* If minimum HFE of the hash is smaller than expiration time of the
+             * specified fields in the command as well as it is smaller or equal
+             * than expiration time provided in the command, then the minimum
+             * HFE of the hash won't change following this command. */
+            if ((minExpire < minExpireFields) && (minExpire <= expireAt) )
+                return;
+
+            /* retrieve new expired time. It might have changed. */
+            uint64_t newMinExpire = hashTypeGetNextTimeToExpire(hashObj);
+
+            /* Calculate the diff between old minExpire and newMinExpire. If it is
+             * only few seconds, then don't have to update global HFE DS. At the worst
+             * case fields of hash will be active-expired up to few seconds later.
+             *
+             * In any case, active-expire operation will know to update global
+             * HFE DS more efficiently than here for a single item.
+             */
+            uint64_t diff = (minExpire > newMinExpire) ?
+                            (minExpire - newMinExpire) : (newMinExpire - minExpire);
+            if (diff < HASH_NEW_EXPIRE_DIFF_THRESHOLD) return;
+
+            if (minExpire != EB_EXPIRE_TIME_INVALID)
+                ebRemove(&c->db->hexpires, &hashExpireBucketsType, hashObj);
+            if (newMinExpire != EB_EXPIRE_TIME_INVALID)
+                ebAdd(&c->db->hexpires, &hashExpireBucketsType, hashObj, newMinExpire);
+        }
+    }
+}

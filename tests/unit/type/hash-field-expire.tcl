@@ -17,6 +17,11 @@ set P_NO_FIELD    -2
 set P_NO_EXPIRY   -1
 set P_OK           1
 
+######## HSETF
+set S_FAIL         0
+set S_VAL_SET      1
+set S_VAL_TTL_SET  2
+
 ############################### AUX FUNCS ######################################
 
 proc create_hash {key entries} {
@@ -83,7 +88,7 @@ proc hrandfieldTest {activeExpireConfig} {
 
 ############################### TESTS #########################################
 
-start_server {tags {"external:skip needs:debug"}} {
+start_server {tags {" needs:debug"}} {
     foreach type {listpack ht} {
         if {$type eq "ht"} {
             r config set hash-max-listpack-entries 0
@@ -784,16 +789,95 @@ start_server {tags {"external:skip needs:debug"}} {
             assert_equal [r httl myhash 2 field2 field3] "$T_NO_EXPIRY $T_NO_EXPIRY"
             assert_not_equal [r httl myhash 1 field1] "$T_NO_EXPIRY"
         }
+
+        test "HSETF - input validation ($type)" {
+            assert_error {*wrong number of arguments*} {r hsetf myhash}
+            assert_error {*wrong number of arguments*} {r hsetf myhash fvs}
+            assert_error {*wrong number of arguments*} {r hsetf myhash fvs 1}
+            assert_error {*wrong number of arguments*} {r hsetf myhash fvs 2 a b}
+            assert_error {*wrong number of arguments*} {r hsetf myhash fvs 3 a b c d}
+            assert_error {*wrong number of arguments*} {r hsetf myhash fvs 3 a b}
+            assert_error {*unknown argument*} {r hsetf myhash fvs 1 a b unknown}
+            assert_error {*missing FVS argument*} {r hsetf myhash nx xx lt gt}
+
+            r hset myhash f1 v1 f2 v2 f3 v3
+            # NX, XX, GT, and LT can be specified only when EX, PX, EXAT, or PXAT is specified
+            assert_error {*only when EX, PX, EXAT, or PXAT is specified*} {r hsetf myhash nx fvs 1 a b}
+            assert_error {*only when EX, PX, EXAT, or PXAT is specified*} {r hsetf myhash xx fvs 1 a b}
+            assert_error {*only when EX, PX, EXAT, or PXAT is specified*} {r hsetf myhash gt fvs 1 a b}
+            assert_error {*only when EX, PX, EXAT, or PXAT is specified*} {r hsetf myhash lt fvs 1 a b}
+
+            # missing expire time
+            assert_error {*not an integer or out of range*} {r hsetf myhash ex fvs 1 a b}
+            assert_error {*not an integer or out of range*} {r hsetf myhash px fvs 1 a b}
+            assert_error {*not an integer or out of range*} {r hsetf myhash exat fvs 1 a b}
+            assert_error {*not an integer or out of range*} {r hsetf myhash pxat fvs 1 a b}
+
+            # expire time more than 2 ^ 48
+            assert_error {*invalid expire time*} {r hsetf myhash EXAT [expr (1<<48)] 1 a b}
+            assert_error {*invalid expire time*} {r hsetf myhash PXAT [expr (1<<48)] 1 a b}
+            assert_error {*invalid expire time*} {r hsetf myhash EX [expr (1<<48) - [clock seconds] + 1000 ] 1 a b}
+            assert_error {*invalid expire time*} {r hsetf myhash PX [expr (1<<48) - [clock milliseconds] + 1000 ] 1 a b}
+
+
+            r del myhash
+            assert_equal "" [r hsetf myhash DC fvs 1 a b]
+        }
+
+        test "HSETF - Test DC flag ($type)" {
+            r del myhash
+            # don't create
+            assert_equal "" [r hsetf myhash DC fvs 1 a b]
+        }
+
+        test "HSETF - Test DCF/DOF flag ($type)" {
+            r del myhash
+            r hset myhash f1 v1 f2 v2 f3 v3
+            assert_equal [r hsetf myhash DOF fvs 2 f1 n1 f2 n2] "$S_FAIL $S_FAIL"
+            assert_equal [r hsetf myhash DOF fvs 3 f1 n1 f2 b2 f4 v4] "$S_FAIL $S_FAIL $S_VAL_SET"
+            assert_equal [lsort [r hgetall myhash]] [lsort "f1 v1 f2 v2 f3 v3 f4 v4"]
+
+            assert_equal [r hsetf myhash DCF fvs 3 f1 n1 f2 b2 f5 v5] "$S_VAL_SET $S_VAL_SET $S_FAIL"
+            assert_equal [lsort [r hgetall myhash]] [lsort "f1 n1 f2 b2 f3 v3 f4 v4"]
+        }
+
+        test "HSETF - Test 'NX' flag ($type)" {
+            r del myhash
+            r hset myhash f1 v1 f2 v2 f3 v3
+            assert_equal [r hsetf myhash EX 1000 NX FVS 1 f1 n1] "$S_VAL_TTL_SET"
+            assert_equal [r hsetf myhash EX 10000 NX FVS 2 f1 n1 f2 n2] "$S_VAL_SET $S_VAL_TTL_SET"
+            assert_lessthan_equal [r httl myhash 1 f1] 1000
+            assert_morethan_equal [r httl myhash 1 f2] 5000
+        }
+
+        test "HSETF - Test 'XX' flag ($type)" {
+            r del myhash
+            r hset myhash f1 v1 f2 v2 f3 v3
+            assert_equal [r hsetf myhash EX 1000 NX FVS 1 f1 n1] "$S_VAL_TTL_SET"
+            assert_equal [r hsetf myhash EX 10000 XX FVS 2 f1 n1 f2 n2] "$S_VAL_TTL_SET $S_VAL_SET"
+            assert_morethan_equal [r httl myhash 1 f1] 5000
+            assert_equal [r httl myhash 1 f2] "$T_NO_EXPIRY"
+        }
+
+        test "HGETF - Test 'GT' flag ($type)" {
+            r del myhash
+            r hset myhash f1 v1 f2 v2 f3 v3
+            assert_equal [r hsetf myhash EX 1000 NX FVS 1 f1 n1] "$S_VAL_TTL_SET"
+            assert_equal [r hsetf myhash EX 2000 NX FVS 1 f2 n2] "$S_VAL_TTL_SET"
+            assert_equal [r hsetf myhash EX 1500 GT FVS 2 f1 n1 f2 n2] "$S_VAL_TTL_SET $S_VAL_SET"
+            assert_morethan [r httl myhash 1 f1] 1000
+            assert_morethan [r httl myhash 1 f2] 1500
+        }
     }
 
     r config set hash-max-listpack-entries 512
 }
 
-start_server {tags {"external:skip needs:debug"}} {
+start_server {tags {"needs:debug"}} {
 
     # Tests that only applies to listpack
 
-    test "Test listpack memory usage" {
+    test "Test listpack memory usage" {s
         r hset myhash f1 v1 f2 v2 f3 v3 f4 v4 f5 v5
         r hpexpire myhash 5 2 f2 f4
 
