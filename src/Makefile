@@ -34,6 +34,7 @@ endif
 ifneq ($(OPTIMIZATION),-O0)
 	OPTIMIZATION+=-fno-omit-frame-pointer
 endif
+LDFLAGS+=-L/usr/local/lib
 DEPENDENCY_TARGETS=hiredis linenoise lua hdr_histogram fpconv
 NODEPS:=clean distclean
 
@@ -74,9 +75,9 @@ PYTHON := $(shell which python3 || which python)
 endif
 
 # Default allocator defaults to Jemalloc on Linux and libc otherwise
-MALLOC=libc
+MALLOC=memkind
 ifeq ($(uname_S),Linux)
-	MALLOC=jemalloc
+	MALLOC=memkind
 endif
 
 # To get ARM stack traces if Redis crashes we need a special C flag.
@@ -99,6 +100,10 @@ endif
 
 ifeq ($(USE_JEMALLOC),no)
 	MALLOC=libc
+endif
+
+ifeq ($(USE_MEMKIND),yes)
+	MALLOC=memkind
 endif
 
 ifdef SANITIZER
@@ -127,7 +132,7 @@ endif
 
 FINAL_CFLAGS=$(STD) $(WARN) $(OPT) $(DEBUG) $(CFLAGS) $(REDIS_CFLAGS)
 FINAL_LDFLAGS=$(LDFLAGS) $(OPT) $(REDIS_LDFLAGS) $(DEBUG)
-FINAL_LIBS=-lm
+FINAL_LIBS=-lm -lmemkind
 DEBUG=-g -ggdb
 
 # Linux ARM32 needs -latomic at linking time
@@ -262,6 +267,11 @@ endif
 ifeq ($(BUILD_WITH_SYSTEMD),yes)
 	FINAL_LIBS+=$(LIBSYSTEMD_LIBS)
 	FINAL_CFLAGS+= -DHAVE_LIBSYSTEMD
+endif
+
+ifeq ($(MALLOC),memkind)
+	FINAL_CFLAGS+= -DUSE_MEMKIND
+	FINAL_LIBS+= -lmemkind
 endif
 
 ifeq ($(MALLOC),tcmalloc)

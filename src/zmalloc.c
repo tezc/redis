@@ -45,6 +45,9 @@ void zlibc_free(void *ptr) {
 #endif
 #endif
 
+#include <memkind.h>
+
+struct memkind *pmem_kind;
 /* When using the libc allocator, use a minimum allocation size to match the
  * jemalloc behavior that doesn't return NULL in this case.
  */
@@ -70,7 +73,36 @@ void zlibc_free(void *ptr) {
 #define update_zmalloc_stat_alloc(__n) atomicIncr(used_memory,(__n))
 #define update_zmalloc_stat_free(__n) atomicDecr(used_memory,(__n))
 
+#if defined(USE_MEMKIND)
+#define malloc(size) zmemkind_malloc(pmem_kind, size);
+#define calloc(count, size) zmemkind_calloc(pmem_kind, count, size);
+#define realloc(ptr,size) zmemkind_realloc(pmem_kind, ptr, size);
+#define free(ptr) zmemkind_free(pmem_kind, ptr);
+
+#endif
+
 static redisAtomic size_t used_memory = 0;
+
+void *zmemkind_malloc(memkind_t kind, size_t size) {
+    return memkind_malloc(kind, size);
+}
+
+void *zmemkind_calloc(memkind_t kind, size_t count, size_t size) {
+    return memkind_calloc(kind, count, size);
+}
+
+void *zmemkind_realloc(memkind_t kind, void *ptr, size_t size) {
+    return memkind_realloc(kind, ptr, size);
+}
+
+void zmemkind_free(memkind_t kind, void *ptr) {
+    memkind_free(kind, ptr);
+}
+
+size_t zmemkind_malloc_usable_size(memkind_t kind, void *ptr) {
+    return memkind_malloc_usable_size(kind, ptr);
+}
+
 
 static void zmalloc_default_oom(size_t size) {
     fprintf(stderr, "zmalloc: Out of memory trying to allocate %zu bytes\n",

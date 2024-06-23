@@ -6910,10 +6910,36 @@ redisTestProc *getTestProcByName(const char *name) {
 }
 #endif
 
+static void print_err_message(int err)
+{
+    char error_message[MEMKIND_ERROR_MESSAGE_SIZE];
+    memkind_error_message(err, error_message, MEMKIND_ERROR_MESSAGE_SIZE);
+    fprintf(stderr, "%s\n", error_message);
+}
+
 int main(int argc, char **argv) {
     struct timeval tv;
     int j;
     char config_from_stdin = 0;
+
+    #define FIXED_MAP_SIZE (128ULL * 1024 * 1024 * 1024ULL)
+
+    int fd = open("/home/ozan/Desktop/test.disk", O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    if (fd == -1) {
+        abort();
+    }
+
+    posix_fallocate(fd, 0, FIXED_MAP_SIZE);
+
+    void *addr = mmap(NULL, FIXED_MAP_SIZE, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, fd, 0);
+    serverAssert(addr != MAP_FAILED);
+
+    int err = memkind_create_fixed(addr, FIXED_MAP_SIZE, &pmem_kind);
+    if (err) {
+        print_err_message(err);
+        abort();
+    }
 
 #ifdef REDIS_TEST
     monotonicInit(); /* Required for dict tests, that are relying on monotime during dict rehashing. */
