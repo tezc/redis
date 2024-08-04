@@ -10,25 +10,11 @@
 #ifndef __ZMALLOC_H
 #define __ZMALLOC_H
 
-#include <memkind.h>
-
-
-extern struct memkind *pmem_kind;
-
 /* Double expansion needed for stringification of macro values. */
 #define __xstr(s) __str(s)
 #define __str(s) #s
 
-#ifndef USE_MEMKIND
-#define USE_MEMKIND "dsad"
-#endif
-
-#if defined(USE_MEMKIND)
-#define ZMALLOC_LIB "memkind"
-#define HAVE_MALLOC_SIZE 1
-#define zmalloc_size(ptr) memkind_malloc_usable_size(pmem_kind, ptr)
-
-#elif defined(USE_TCMALLOC)
+#if defined(USE_TCMALLOC)
 #define ZMALLOC_LIB ("tcmalloc-" __xstr(TC_VERSION_MAJOR) "." __xstr(TC_VERSION_MINOR))
 #include <google/tcmalloc.h>
 #if (TC_VERSION_MAJOR == 1 && TC_VERSION_MINOR >= 6) || (TC_VERSION_MAJOR > 1)
@@ -64,7 +50,6 @@ extern struct memkind *pmem_kind;
  */
 #ifndef ZMALLOC_LIB
 #define ZMALLOC_LIB "libc"
-#error "Newer version of jemalloc required"
 
 #if !defined(NO_MALLOC_USABLE_SIZE) && \
     (defined(__GLIBC__) || defined(__FreeBSD__) || \
@@ -162,7 +147,6 @@ __attribute__((alloc_size(2),noinline)) void *extend_to_usable(void *ptr, size_t
 #endif
 
 int get_proc_stat_ll(int i, long long *res);
-
 
 #ifdef REDIS_TEST
 int zmalloc_test(int argc, char **argv, int flags);

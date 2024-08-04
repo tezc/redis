@@ -12,6 +12,7 @@
 #include "script.h"
 #include "fpconv_dtoa.h"
 #include "fmtargs.h"
+#include "memk.h"
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <math.h>
@@ -28,7 +29,7 @@ int ProcessingEventsWhileBlocked = 0; /* See processEventsWhileBlocked(). */
  * the client output buffer size. */
 size_t sdsZmallocSize(sds s) {
     void *sh = sdsAllocPtr(s);
-    return zmalloc_size(sh);
+    return memk_malloc_size(sh);
 }
 
 /* Return the size consumed from the allocator, for the specified hfield with

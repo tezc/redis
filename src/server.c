@@ -21,6 +21,7 @@
 #include "fmtargs.h"
 #include "mstr.h"
 #include "ebuckets.h"
+#include "memk.h"
 
 #include <time.h>
 #include <signal.h>
@@ -320,6 +321,38 @@ void dictSdsDestructor(dict *d, void *val)
 void *dictSdsDup(dict *d, const void *key) {
     UNUSED(d);
     return sdsdup((const sds) key);
+}
+
+void memk_dictObjectDup(dict *d, void *val) {
+
+}
+
+void memk_dictObjectDestructor(dict *d, void *val)
+{
+    robj *o = val;
+    UNUSED(d);
+    if (val == NULL) return; /* Lazy freeing will set value to NULL. */
+
+    if (o->refcount == 1) {
+        switch(o->type) {
+            case OBJ_STRING: {
+                if (o->encoding == OBJ_ENCODING_RAW) {
+                    memk_free(sdsAllocPtr(o->ptr));
+                }
+            } break;
+            default: serverPanic("Unknown object type"); break;
+        }
+        zfree(o);
+    } else {
+        if (o->refcount <= 0) serverPanic("decrRefCount against refcount <= 0");
+        if (o->refcount != OBJ_SHARED_REFCOUNT) o->refcount--;
+    }
+}
+
+void memk_dictSdsDestructor(dict *d, void *val)
+{
+    UNUSED(d);
+    memk_free(sdsAllocPtr(val));
 }
 
 int dictObjKeyCompare(dict *d, const void *key1,
@@ -6910,36 +6943,12 @@ redisTestProc *getTestProcByName(const char *name) {
 }
 #endif
 
-static void print_err_message(int err)
-{
-    char error_message[MEMKIND_ERROR_MESSAGE_SIZE];
-    memkind_error_message(err, error_message, MEMKIND_ERROR_MESSAGE_SIZE);
-    fprintf(stderr, "%s\n", error_message);
-}
-
 int main(int argc, char **argv) {
     struct timeval tv;
     int j;
     char config_from_stdin = 0;
 
-    #define FIXED_MAP_SIZE (128ULL * 1024 * 1024 * 1024ULL)
-
-    int fd = open("/home/ozan/Desktop/test.disk", O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-    if (fd == -1) {
-        abort();
-    }
-
-    posix_fallocate(fd, 0, FIXED_MAP_SIZE);
-
-    void *addr = mmap(NULL, FIXED_MAP_SIZE, PROT_READ | PROT_WRITE,
-                      MAP_SHARED, fd, 0);
-    serverAssert(addr != MAP_FAILED);
-
-    int err = memkind_create_fixed(addr, FIXED_MAP_SIZE, &pmem_kind);
-    if (err) {
-        print_err_message(err);
-        abort();
-    }
+    memk_init();
 
 #ifdef REDIS_TEST
     monotonicInit(); /* Required for dict tests, that are relying on monotime during dict rehashing. */

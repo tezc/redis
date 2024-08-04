@@ -334,7 +334,7 @@ sds sdsResize(sds s, size_t size, int would_regrow) {
              * We aim to avoid calling realloc() when using Jemalloc if there is no
              * change in the allocation size, as it incurs a cost even if the
              * allocation size stays the same. */
-            alloc_already_optimal = (je_nallocx(newlen, 0) == zmalloc_size(sh));
+            alloc_already_optimal = (je_nallocx(newlen, 0) == memk_malloc_size(sh));
         #endif
         if (!alloc_already_optimal) {
             newsh = s_realloc(sh, newlen);

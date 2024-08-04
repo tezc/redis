@@ -10,6 +10,7 @@
 #include "server.h"
 #include "functions.h"
 #include "intset.h"  /* Compact integer set structure */
+#include "memk.h"
 #include <math.h>
 #include <ctype.h>
 
@@ -20,7 +21,7 @@
 /* ===================== Creation and parsing of objects ==================== */
 
 robj *createObject(int type, void *ptr) {
-    robj *o = zmalloc(sizeof(*o));
+    robj *o = memk_malloc(sizeof(*o));
     o->type = type;
     o->encoding = OBJ_ENCODING_RAW;
     o->ptr = ptr;
@@ -69,7 +70,7 @@ robj *createRawStringObject(const char *ptr, size_t len) {
  * an object where the sds string is actually an unmodifiable string
  * allocated in the same chunk as the object itself. */
 robj *createEmbeddedStringObject(const char *ptr, size_t len) {
-    robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr8)+len+1);
+    robj *o = memk_malloc(sizeof(robj)+sizeof(struct sdshdr8)+len+1);
     struct sdshdr8 *sh = (void*)(o+1);
 
     o->type = OBJ_STRING;
@@ -358,6 +359,23 @@ void incrRefCount(robj *o) {
     }
 }
 
+void memk_decrRefCount(robj *o) {
+    if (o->refcount == 1) {
+        switch(o->type) {
+            case OBJ_STRING: {
+                if (o->encoding == OBJ_ENCODING_RAW) {
+                    memk_free(sdsAllocPtr(o->ptr));
+                }
+            } break;
+            default: serverPanic("Unknown object type"); break;
+        }
+        zfree(o);
+    } else {
+        if (o->refcount <= 0) serverPanic("decrRefCount against refcount <= 0");
+        if (o->refcount != OBJ_SHARED_REFCOUNT) o->refcount--;
+    }
+}
+
 void decrRefCount(robj *o) {
     if (o->refcount == 1) {
         switch(o->type) {
@@ -370,7 +388,7 @@ void decrRefCount(robj *o) {
         case OBJ_STREAM: freeStreamObject(o); break;
         default: serverPanic("Unknown object type"); break;
         }
-        zfree(o);
+        memk_free(o);
     } else {
         if (o->refcount <= 0) serverPanic("decrRefCount against refcount <= 0");
         if (o->refcount != OBJ_SHARED_REFCOUNT) o->refcount--;

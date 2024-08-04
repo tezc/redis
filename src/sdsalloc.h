@@ -18,14 +18,15 @@
 #define __SDS_ALLOC_H__
 
 #include "zmalloc.h"
-#define s_malloc zmalloc
-#define s_realloc zrealloc
-#define s_trymalloc ztrymalloc
+#include "memk.h"
+#define s_malloc memk_malloc
+#define s_realloc memk_realloc
+#define s_trymalloc memk_trymalloc
 #define s_tryrealloc ztryrealloc
-#define s_free zfree
-#define s_malloc_usable zmalloc_usable
-#define s_realloc_usable zrealloc_usable
-#define s_trymalloc_usable ztrymalloc_usable
+#define s_free memk_free
+#define s_malloc_usable memk_malloc_usable
+#define s_realloc_usable memk_realloc_usable
+#define s_trymalloc_usable memk_trymalloc_usable
 #define s_tryrealloc_usable ztryrealloc_usable
 #define s_free_usable zfree_usable
 
