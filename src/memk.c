@@ -62,11 +62,11 @@ void *extent_alloc(extent_hooks_t *extent_hooks, void *new_addr, size_t size, si
     memk.addr += size;
     memk.current += size + align_offset;
 
-    memset(memk.addr, 0, size);
+    if (*zero)
+        memset(memk.addr, 0, size);
 
     pthread_mutex_unlock(&mtx);
 
-    *zero = true;
     *commit = true;
     return addr;
 }
