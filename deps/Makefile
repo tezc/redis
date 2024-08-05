@@ -40,7 +40,6 @@ distclean:
 	-(cd linenoise && $(MAKE) clean) > /dev/null || true
 	-(cd lua && $(MAKE) clean) > /dev/null || true
 	-(cd jemalloc && [ -f Makefile ] && $(MAKE) distclean) > /dev/null || true
-	-(cd memkind && [ -f Makefile ] && $(MAKE) distclean) > /dev/null || true
 	-(cd hdr_histogram && $(MAKE) clean) > /dev/null || true
 	-(cd fpconv && $(MAKE) clean) > /dev/null || true
 	-(rm -f .make-*)
@@ -118,14 +117,3 @@ jemalloc: .make-prerequisites
 
 .PHONY: jemalloc
 
-MEMKIND_CFLAGS=$(CFLAGS)
-MEMKIND_CFLAGS += -Wno-error
-MEMKIND_LDFLAGS=$(LDFLAGS) -fPIC
-
-memkind: .make-prerequisites
-	@printf '%b %b\n' $(MAKECOLOR)MAKE$(ENDCOLOR) $(BINCOLOR)$@$(ENDCOLOR)
-	cd memkind && ./autogen.sh
-	cd memkind && ./configure 'CFLAGS= -Wno-error' 'LDFLAGS= -fPIC'
-	cd memkind && $(MAKE) -j 6
-
-.PHONY: memkind

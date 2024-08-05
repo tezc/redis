@@ -5,16 +5,24 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include <string.h>
 
 #include "memk.h"
-#include "memkind.h"
 #include "atomicvar.h"
+#include "jemalloc/jemalloc.h"
 
-struct memkind *pmem_kind;
 extern redisAtomic size_t used_memory;
 
 #define update_zmalloc_stat_alloc(__n) atomicIncr(used_memory,(__n))
 #define update_zmalloc_stat_free(__n) atomicDecr(used_memory,(__n))
+
+struct memk {
+    unsigned char *addr;
+    size_t size;
+    size_t current;
+    int arena;
+    extent_hooks_t hooks;
+} memk;
 
 static void zmalloc_default_oom(size_t size) {
     fprintf(stderr, "zmalloc: Out of memory trying to allocate %zu bytes\n",
@@ -25,10 +33,42 @@ static void zmalloc_default_oom(size_t size) {
 
 static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
 
-static void print_err_message(int err){
-    char error_message[MEMKIND_ERROR_MESSAGE_SIZE];
-    memkind_error_message(err, error_message, MEMKIND_ERROR_MESSAGE_SIZE);
-    fprintf(stderr, "%s\n", error_message);
+pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+
+void *extent_alloc(extent_hooks_t *extent_hooks, void *new_addr, size_t size, size_t alignment, bool *zero, bool *commit, unsigned arena_ind) {
+    void *addr = NULL;
+
+    if (new_addr != NULL) {
+        /* not supported */
+        return NULL;
+    }
+
+    pthread_mutex_lock(&mtx);
+
+    // calculate alignment offset
+    size_t align_offset = 0u;
+    size_t alignment_modulo = ((uintptr_t)memk.addr) % alignment;
+    if (alignment_modulo != 0) {
+        align_offset = alignment - alignment_modulo;
+    }
+
+    if (memk.current + size + align_offset > memk.size) {
+        pthread_mutex_unlock(&mtx);
+        return MAP_FAILED;
+    }
+
+    memk.addr += align_offset;
+    addr = memk.addr;
+    memk.addr += size;
+    memk.current += size + align_offset;
+
+    memset(memk.addr, 0, size);
+
+    pthread_mutex_unlock(&mtx);
+
+    *zero = true;
+    *commit = true;
+    return addr;
 }
 
 
@@ -51,21 +91,49 @@ void memk_init(void) {
         abort();
     }
 
-    int err = memkind_create_fixed(addr, FIXED_MAP_SIZE, &pmem_kind);
-    if (err) {
-        print_err_message(err);
+    unsigned int arena;
+    size_t sz = sizeof(unsigned int);
+    int err = je_mallctl("arenas.create", (void *)&arena, &sz, NULL, 0);
+    if (err != 0) {
         abort();
     }
+
+    char buf[512];
+    snprintf(buf, sizeof(buf), "arena.%d.extent_hooks", arena);
+    extent_hooks_t *hooks, *new;
+    size_t len = sizeof(hooks);
+
+    // Read the existing hooks
+    err = je_mallctl(buf, &hooks, &len, NULL, 0);
+    if (err) {
+        abort();
+    }
+
+    //hooks->alloc = extent_alloc;
+
+    memk.hooks = *hooks;
+    memk.hooks.alloc = extent_alloc;
+
+    new = &memk.hooks;
+
+    err = je_mallctl(buf, NULL, NULL, &new, sizeof(new));
+    if (err) {
+        abort();
+    }
+
+    memk.arena = arena;
+    memk.addr = addr;
+    memk.size = FIXED_MAP_SIZE;
 }
 
 static inline void *memk_trymalloc_usable_internal(size_t size, size_t *usable) {
     /* Possible overflow, return NULL, so that the caller can panic or handle a failed allocation. */
     if (size >= SIZE_MAX/2) return NULL;
-    void *ptr = memkind_malloc(pmem_kind, size);
+    void *ptr = je_mallocx(size, MALLOCX_ARENA(memk.arena) | MALLOCX_TCACHE_NONE);
 
     if (!ptr) return NULL;
 
-    size = memkind_malloc_usable_size(pmem_kind, ptr);
+    size = je_malloc_usable_size(ptr);
     update_zmalloc_stat_alloc(size);
     if (usable) *usable = size;
     return ptr;
@@ -95,10 +163,10 @@ void *memk_trymalloc(size_t size) {
 static inline void *memk_trycalloc_usable_internal(size_t size, size_t *usable) {
     /* Possible overflow, return NULL, so that the caller can panic or handle a failed allocation. */
     if (size >= SIZE_MAX/2) return NULL;
-    void *ptr = memkind_calloc(pmem_kind, 1, size);
+    void *ptr = je_mallocx(size, MALLOCX_ARENA(memk.arena) | MALLOCX_ZERO);
     if (ptr == NULL) return NULL;
 
-    size = memkind_malloc_usable_size(pmem_kind, ptr);
+    size = je_malloc_usable_size(ptr);
     update_zmalloc_stat_alloc(size);
     if (usable) *usable = size;
     return ptr;
@@ -141,15 +209,15 @@ static inline void *memk_tryrealloc_usable_internal(void *ptr, size_t size, size
         return NULL;
     }
 
-    oldsize = memkind_malloc_usable_size(pmem_kind, ptr);
-    newptr = memkind_realloc(pmem_kind,ptr,size);
+    oldsize = je_malloc_usable_size(ptr);
+    newptr = je_rallocx(ptr,size, MALLOCX_ARENA(memk.arena));
     if (newptr == NULL) {
         if (usable) *usable = 0;
         return NULL;
     }
 
     update_zmalloc_stat_free(oldsize);
-    size = memkind_malloc_usable_size(pmem_kind, newptr);
+    size = je_malloc_usable_size(newptr);
     update_zmalloc_stat_alloc(size);
     if (usable) *usable = size;
     return newptr;
@@ -185,10 +253,10 @@ void *memk_tryrealloc(void *ptr, size_t size) {
 void memk_free(void *ptr) {
     if (ptr == NULL) return;
 
-    update_zmalloc_stat_free(memkind_malloc_usable_size(pmem_kind, ptr));
-    memkind_free(pmem_kind, ptr);
+    update_zmalloc_stat_free(je_malloc_usable_size(ptr));
+    je_free(ptr);
 }
 
 size_t memk_malloc_size(void *ptr) {
-    return memkind_malloc_usable_size(pmem_kind, ptr);
+    return je_malloc_usable_size(ptr);
 }
