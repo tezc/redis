@@ -1543,7 +1543,7 @@ foreach disklessload {disabled on-empty-db} {
                 $replica config set repl-diskless-load $disklessload
 
                 # Populate replica with many keys, master with a few keys.
-                $replica debug populate 1000000
+                $replica debug populate 2000000
                 populate 3 master 10
 
                 # Start the replication process...
@@ -1579,3 +1579,35 @@ foreach disklessload {disabled on-empty-db} {
         }
     } {} {repl external:skip}
 }
+
+test "Replica should not reply LOADING while flushing a large db when replica-lazy-flush enabled" {
+    start_server {} {
+        set replica [srv 0 client]
+        start_server {} {
+            set master [srv 0 client]
+            set master_host [srv 0 host]
+            set master_port [srv 0 port]
+
+            $replica config set replica-lazy-flush yes
+
+            # Populate replica with many keys, master with a few keys.
+            $replica debug populate 1000000
+            populate 3 master 10
+
+            # Start the replication process...
+            $replica replicaof $master_host $master_port
+
+            wait_for_condition 100 100 {
+                [s -1 loading] eq 1
+            } else {
+                fail "Replica didn't get into loading mode"
+            }
+
+            wait_for_condition 100 100 {
+                [s -1 loading] eq 0
+            } else {
+                fail "Replica didn't get into loading mode"
+            }
+        }
+    }
+} {} {repl external:skip}
