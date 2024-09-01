@@ -1580,7 +1580,7 @@ foreach disklessload {disabled on-empty-db} {
     } {} {repl external:skip}
 }
 
-test "Replica should not reply LOADING while flushing a large db when replica-lazy-flush enabled" {
+test "Replica async free db when replica-lazy-flush enabled" {
     start_server {} {
         set replica [srv 0 client]
         start_server {} {
@@ -1591,20 +1591,17 @@ test "Replica should not reply LOADING while flushing a large db when replica-la
             $replica config set replica-lazy-flush yes
 
             # Populate replica with many keys, master with a few keys.
-            $replica debug populate 1000000
-            populate 3 master 10
+            $replica debug populate 1000
+            populate 1 master 10
 
             # Start the replication process...
             $replica replicaof $master_host $master_port
 
-            wait_for_condition 100 100 {
-                [s -1 loading] eq 1
-            } else {
-                fail "Replica didn't get into loading mode"
-            }
+            assert_not_equal 1 [s -1 loading]
 
             wait_for_condition 100 100 {
-                [s -1 loading] eq 0
+                [s -1 lazyfreed_objects] >= 1000 &&
+                [s -1 master_link_status] eq {up}
             } else {
                 fail "Replica didn't get into loading mode"
             }
