@@ -38,6 +38,7 @@ test "Allow appendonly config change while loading rdb" {
             $replica1 replicaof no one
             $replica1 set x 100
             $replica1 config rewrite
+            waitForBgrewriteaof $replica1
 
             restart_server 0 true false true sigterm
             set replica1 [srv 0 client]
@@ -69,6 +70,7 @@ test "Allow appendonly config change while loading rdb" {
             $replica1 config set appendonly yes
             $replica1 set x 200
             $replica1 config rewrite
+            waitForBgrewriteaof $replica1
             restart_server 0 true true true sigterm
             set replica1 [srv 0 client]
             assert_equal {10001} [$replica1 dbsize]
