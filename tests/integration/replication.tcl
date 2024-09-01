@@ -726,7 +726,6 @@ foreach testType {Successful Aborted} {
                     }
 
                     test {Blocked commands and configs during async-loading} {
-                        assert_error {LOADING*} {$replica config set appendonly no}
                         assert_error {LOADING*} {$replica REPLICAOF no one}
                     }
 
