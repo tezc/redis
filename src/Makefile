@@ -107,6 +107,15 @@ ifeq ($(SANITIZER),address)
 	CFLAGS+=-fsanitize=address -fno-sanitize-recover=all -fno-omit-frame-pointer
 	LDFLAGS+=-fsanitize=address
 else
+ifeq ($(SANITIZER),memory)
+    ifneq (clang,$(CLANG))
+        $(error "Memory sanitizer is supported with Clang only")
+    endif
+
+	MALLOC=libc
+	CFLAGS+=-fsanitize=memory -fno-sanitize-recover=all -fno-omit-frame-pointer -fsanitize-memory-track-origins -fPIE
+	LDFLAGS+=-fsanitize=memory
+else
 ifeq ($(SANITIZER),undefined)
 	MALLOC=libc
 	CFLAGS+=-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
@@ -117,6 +126,7 @@ ifeq ($(SANITIZER),thread)
 	LDFLAGS+=-fsanitize=thread
 else
     $(error "unknown sanitizer=${SANITIZER}")
+endif
 endif
 endif
 endif
