@@ -171,7 +171,7 @@ sds sdsdup(const sds s) {
 /* Free an sds string. No operation is performed if 's' is NULL. */
 void sdsfree(sds s) {
     if (s == NULL) return;
-    s_free((char*)s-sdsHdrSize(s[-1]));
+    s_free_with_size(sdsAllocPtr(s), sdsAllocSize(s));
 }
 
 /* Set the sds string length to the length as obtained with strlen(), so
@@ -334,7 +334,7 @@ sds sdsResize(sds s, size_t size, int would_regrow) {
              * We aim to avoid calling realloc() when using Jemalloc if there is no
              * change in the allocation size, as it incurs a cost even if the
              * allocation size stays the same. */
-            alloc_already_optimal = (je_nallocx(newlen, 0) == zmalloc_size(sh));
+            alloc_already_optimal = (je_nallocx(newlen, 0) == sdsAllocSize(sh));
         #endif
         if (!alloc_already_optimal) {
             newsh = s_realloc(sh, newlen);
@@ -363,8 +363,13 @@ sds sdsResize(sds s, size_t size, int would_regrow) {
  * 4) The implicit null term.
  */
 size_t sdsAllocSize(sds s) {
-    size_t alloc = sdsalloc(s);
-    return sdsHdrSize(s[-1])+alloc+1;
+    char type = s[-1] & SDS_TYPE_MASK;
+    /* SDS_TYPE_5 header doesn't contain the size of the allocation */
+    if (type == SDS_TYPE_5) {
+        return s_malloc_usable_size(sdsAllocPtr(s));
+    } else {
+        return sdsHdrSize(type) + sdsalloc(s) + 1;
+    }
 }
 
 /* Return the pointer of the actual SDS allocation (normally SDS strings
