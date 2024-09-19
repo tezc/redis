@@ -376,7 +376,6 @@ void decrRefCount(robj *o) {
         default: serverPanic("Unknown object type"); break;
         }
         zfree_with_size(o, more);
-        //zfree(o);
     } else {
         if (o->refcount <= 0) serverPanic("decrRefCount against refcount <= 0");
         if (o->refcount != OBJ_SHARED_REFCOUNT) o->refcount--;
