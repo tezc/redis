@@ -30,10 +30,11 @@
 
 
 #include <sys/epoll.h> //used for define EPOLLIN and EPOLLOUT
+#include <sys/resource.h>
 #include "liburing.h"
 
 #define BACKLOG 8192
-#define MAX_ENTRIES 16384 /* entries should be configured by users */
+#define MAX_ENTRIES 8192 /* entries should be configured by users */
 #define ENABLE_SQPOLL 1
 
 static int register_files = 1;
@@ -50,6 +51,14 @@ typedef struct aeApiState {
 } aeApiState;
 
 static int aeApiCreate(aeEventLoop *eventLoop) {
+
+    struct rlimit l;
+    int r = getrlimit(RLIMIT_NPROC, &l);
+    assert(r ==0 );
+    printf("%d %d ozan \n", l.rlim_cur, l.rlim_max);
+
+
+
     aeApiState *state = zmalloc(sizeof(aeApiState));
     if (!state) return -1;
     
@@ -68,10 +77,14 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
     
     struct io_uring_params params;
     memset(&params, 0, sizeof(params));
+
+    params.flags |= IORING_SETUP_SINGLE_ISSUER;
+
     if (eventLoop->extflags & ENABLE_SQPOLL)
         params.flags |= IORING_SETUP_SQPOLL;
     state->urfd = io_uring_queue_init_params(MAX_ENTRIES, state->ring, &params);
-    if (state->urfd == -1) {
+    if (state->urfd != 0) {
+        printf("error awas %d \n", state->urfd);
         zfree(state->ring);
         zfree(state->events);
         zfree(state);
@@ -101,6 +114,16 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
             register_files = 0;
         }
     }
+
+    unsigned int rr[2] = {8, 4};
+
+    int ret = io_uring_register(state->ring->ring_fd, IORING_REGISTER_IOWQ_MAX_WORKERS, rr, 2);
+    if (ret != 0) {
+        printf("Faield %d \n", ret);
+    }
+
+    printf("Faield %d %d\n", rr[0], rr[1]);
+
     return 0;
 }
 
@@ -125,7 +148,7 @@ static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask,
 
     struct io_uring_sqe *sqe = io_uring_get_sqe(state->ring);
     if (!sqe) return -1;
-    
+
     /* NULL iovec means doing poll_add behavior */
     if (!iovecs) {
         unsigned int poll_mask = 0;
@@ -133,10 +156,16 @@ static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask,
         if (mask == AE_WRITABLE) poll_mask |= EPOLLOUT;
         io_uring_prep_poll_add(sqe, fd, poll_mask);
     } else {
-        if (mask & AE_READABLE)
-            io_uring_prep_readv(sqe, fd, iovecs, 1, 0);
-        if (mask & AE_WRITABLE)
-            io_uring_prep_writev(sqe, fd, iovecs, 1, 0);
+        if (mask & AE_READABLE) {
+            //io_uring_prep_readv(sqe, fd, iovecs, 1, 0);
+            io_uring_prep_read(sqe, fd, iovecs->iov_base, iovecs->iov_len, 0);
+        }
+        if (mask & AE_WRITABLE) {
+            //io_uring_prep_writev(sqe, fd, iovecs, 1, 0);
+            io_uring_prep_write(sqe, fd, iovecs->iov_base, iovecs->iov_len, 0);
+        }
+
+        io_uring_sqe_set_flags(sqe, IOSQE_ASYNC);
     }
     
     uring_event *ev = &state->events[fd];
@@ -168,12 +197,13 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
 
     /* TODO: handle timeout */
     (void)tvp;
-    
+
     retval = io_uring_submit_and_wait(state->ring, 1);
+    //retval = io_uring_submit(state->ring);
     if (retval < 0) {
         return numevents;
     }
-    
+
     struct io_uring_cqe *cqes[BACKLOG];
     int cqe_count = io_uring_peek_batch_cqe(state->ring, cqes, sizeof(cqes) / sizeof(cqes[0]));
     
