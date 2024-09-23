@@ -78,7 +78,7 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
     struct io_uring_params params;
     memset(&params, 0, sizeof(params));
 
-    params.flags |= IORING_SETUP_SINGLE_ISSUER;
+    params.flags |= IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_DEFER_TASKRUN;
 
     if (eventLoop->extflags & ENABLE_SQPOLL)
         params.flags |= IORING_SETUP_SQPOLL;
@@ -115,7 +115,7 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
         }
     }
 
-    unsigned int rr[2] = {8, 4};
+    unsigned int rr[2] = {8, 3};
 
     int ret = io_uring_register(state->ring->ring_fd, IORING_REGISTER_IOWQ_MAX_WORKERS, rr, 2);
     if (ret != 0) {
@@ -191,12 +191,31 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int delmask) {
     io_uring_prep_poll_remove(sqe, (void *)ev);
 }
 
+int skip = 0;
+
+static void aeApiSubmit(aeEventLoop *eventLoop) {
+    aeApiState *state = eventLoop->apidata;
+    if (skip) {
+        io_uring_submit(state->ring);
+    }
+}
+
 static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     aeApiState *state = eventLoop->apidata;
     int retval, numevents = 0;
+    struct io_uring_cqe *cqes[BACKLOG];
+    int cqe_count;
+
+    if (skip) goto skipped;
 
     /* TODO: handle timeout */
     (void)tvp;
+
+    cqe_count = io_uring_peek_batch_cqe(state->ring, cqes, sizeof(cqes) / sizeof(cqes[0]));
+    if (cqe_count) {
+        skip = 1;
+        goto process;
+    }
 
     retval = io_uring_submit_and_wait(state->ring, 1);
     //retval = io_uring_submit(state->ring);
@@ -204,9 +223,11 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
         return numevents;
     }
 
-    struct io_uring_cqe *cqes[BACKLOG];
-    int cqe_count = io_uring_peek_batch_cqe(state->ring, cqes, sizeof(cqes) / sizeof(cqes[0]));
-    
+skipped:
+    skip = 0;
+    cqe_count = io_uring_peek_batch_cqe(state->ring, cqes, sizeof(cqes) / sizeof(cqes[0]));
+
+process:
     /* go through all the cqe's */
     for (int i = 0; i < cqe_count; ++i) {
         int mask = 0;
@@ -237,6 +258,10 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
         
         io_uring_cqe_seen(state->ring, cqe);
         numevents++;
+    }
+
+    if (skip) {
+        io_uring_submit(state->ring);
     }
 
     return numevents;

@@ -404,8 +404,10 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             tvp = &tv;
         }
 
-        if (eventLoop->beforesleep != NULL && flags & AE_CALL_BEFORE_SLEEP)
+        if (eventLoop->beforesleep != NULL && flags & AE_CALL_BEFORE_SLEEP) {
+            aeApiSubmit(eventLoop);
             eventLoop->beforesleep(eventLoop);
+        }
 
         /* Call the multiplexing API, will return only on timeout or when
          * some event fires. */
