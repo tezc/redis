@@ -115,7 +115,7 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
         }
     }
 
-    unsigned int rr[2] = {8, 3};
+    unsigned int rr[2] = {1, 3};
 
     int ret = io_uring_register(state->ring->ring_fd, IORING_REGISTER_IOWQ_MAX_WORKERS, rr, 2);
     if (ret != 0) {
@@ -203,44 +203,36 @@ static void aeApiSubmit(aeEventLoop *eventLoop) {
 static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     aeApiState *state = eventLoop->apidata;
     int retval, numevents = 0;
-    struct io_uring_cqe *cqes[BACKLOG];
-    int cqe_count;
+    struct io_uring_cqe *cqe;
 
-    if (skip) goto skipped;
+    struct __kernel_timespec ts = {
+            .tv_nsec = tvp->tv_usec * 1000,
+            .tv_sec = tvp->tv_sec
+    };
 
-    /* TODO: handle timeout */
-    (void)tvp;
-
-    cqe_count = io_uring_peek_batch_cqe(state->ring, cqes, sizeof(cqes) / sizeof(cqes[0]));
-    if (cqe_count) {
-        skip = 1;
-        goto process;
+    retval = io_uring_submit_and_wait_timeout(state->ring, &cqe, 1, &ts, NULL);
+    if (retval == -ETIME)
+        return 0;
+    else if (retval < 0) {
+        fprintf(stderr, "submit_and_wait: %d\n", retval);
+        return 0;
     }
 
-    retval = io_uring_submit_and_wait(state->ring, 1);
-    //retval = io_uring_submit(state->ring);
-    if (retval < 0) {
-        return numevents;
-    }
+    unsigned int num_completed = 0;
+    unsigned int head;
 
-skipped:
-    skip = 0;
-    cqe_count = io_uring_peek_batch_cqe(state->ring, cqes, sizeof(cqes) / sizeof(cqes[0]));
-
-process:
-    /* go through all the cqe's */
-    for (int i = 0; i < cqe_count; ++i) {
+    io_uring_for_each_cqe(state->ring, head, cqe) {
         int mask = 0;
-        struct io_uring_cqe *cqe = cqes[i];
+
+        ++num_completed;
         uring_event *ev = io_uring_cqe_get_data(cqe);
         if (!ev) {
-            io_uring_cqe_seen(state->ring, cqe);
-            continue;
+            abort();
         }
 
         if (ev->type & AE_POLLABLE) {
             if (cqe->res < 0) {
-                io_uring_cqe_seen(state->ring, cqe);
+                //io_uring_cqe_seen(state->ring, cqe);
                 continue;
             }
 
@@ -255,14 +247,11 @@ process:
 
         eventLoop->fired[numevents].fd = ev->fd;
         eventLoop->fired[numevents].mask = mask;
-        
-        io_uring_cqe_seen(state->ring, cqe);
         numevents++;
     }
 
-    if (skip) {
-        io_uring_submit(state->ring);
-    }
+    if (num_completed)
+        io_uring_cq_advance(state->ring, num_completed);
 
     return numevents;
 }
