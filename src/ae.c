@@ -69,7 +69,7 @@
 #endif
 
 
-aeEventLoop *aeCreateEventLoop(int setsize, int extflags) {
+aeEventLoop *aeCreateEventLoop(int setsize, int extflags, int num_threads) {
     aeEventLoop *eventLoop;
     int i;
 
@@ -88,6 +88,7 @@ aeEventLoop *aeCreateEventLoop(int setsize, int extflags) {
     eventLoop->aftersleep = NULL;
     eventLoop->flags = 0;
     eventLoop->extflags = extflags;
+    eventLoop->num_threads = num_threads;
     if (aeApiCreate(eventLoop) == -1) goto err;
     /* Events with mask == AE_NONE are not set. So let's initialize the
      * vector with it. */
@@ -405,7 +406,6 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
         }
 
         if (eventLoop->beforesleep != NULL && flags & AE_CALL_BEFORE_SLEEP) {
-            aeApiSubmit(eventLoop);
             eventLoop->beforesleep(eventLoop);
         }
 

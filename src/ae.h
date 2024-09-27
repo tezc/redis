@@ -112,10 +112,11 @@ typedef struct aeEventLoop {
     aeBeforeSleepProc *aftersleep;
     int flags;
     int extflags;
+    int num_threads;
 } aeEventLoop;
 
 /* Prototypes */
-aeEventLoop *aeCreateEventLoop(int setsize, int extflags);
+aeEventLoop *aeCreateEventLoop(int setsize, int extflags, int num_threads);
 void aeDeleteEventLoop(aeEventLoop *eventLoop);
 void aeStop(aeEventLoop *eventLoop);
 int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,

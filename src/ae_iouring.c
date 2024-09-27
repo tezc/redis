@@ -33,7 +33,6 @@
 #include <sys/resource.h>
 #include "liburing.h"
 
-#define BACKLOG 8192
 #define MAX_ENTRIES 8192 /* entries should be configured by users */
 #define ENABLE_SQPOLL 1
 
@@ -51,14 +50,6 @@ typedef struct aeApiState {
 } aeApiState;
 
 static int aeApiCreate(aeEventLoop *eventLoop) {
-
-    struct rlimit l;
-    int r = getrlimit(RLIMIT_NPROC, &l);
-    assert(r ==0 );
-    printf("%d %d ozan \n", l.rlim_cur, l.rlim_max);
-
-
-
     aeApiState *state = zmalloc(sizeof(aeApiState));
     if (!state) return -1;
     
@@ -115,14 +106,12 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
         }
     }
 
-    unsigned int rr[2] = {1, 3};
+    unsigned int rr[2] = {1, eventLoop->num_threads};
 
     int ret = io_uring_register(state->ring->ring_fd, IORING_REGISTER_IOWQ_MAX_WORKERS, rr, 2);
     if (ret != 0) {
         printf("Faield %d \n", ret);
     }
-
-    printf("Faield %d %d\n", rr[0], rr[1]);
 
     return 0;
 }
@@ -188,16 +177,7 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int delmask) {
     if (!sqe) exit(1);
     
     uring_event *ev = &state->events[fd];
-    io_uring_prep_poll_remove(sqe, (void *)ev);
-}
-
-int skip = 0;
-
-static void aeApiSubmit(aeEventLoop *eventLoop) {
-    aeApiState *state = eventLoop->apidata;
-    if (skip) {
-        io_uring_submit(state->ring);
-    }
+    io_uring_prep_poll_remove(sqe, (uintptr_t) ev);
 }
 
 static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {

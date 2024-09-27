@@ -1298,6 +1298,8 @@ struct redisServer {
     int io_threads_active;      /* Is IO threads currently active? */
     long long events_processed_while_blocked; /* processEventsWhileBlocked() */
 
+    int iouring_threads_num;
+
     /* RDB / AOF loading information */
     volatile sig_atomic_t loading; /* We are loading data from disk if true */
     off_t loading_total_bytes;
