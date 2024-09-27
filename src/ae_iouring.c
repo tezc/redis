@@ -72,7 +72,8 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
     params.flags |= IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_DEFER_TASKRUN;
 
     if (eventLoop->extflags & ENABLE_SQPOLL)
-        params.flags |= IORING_SETUP_SQPOLL;
+        params.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_SQPOLL;
+
     state->urfd = io_uring_queue_init_params(MAX_ENTRIES, state->ring, &params);
     if (state->urfd != 0) {
         printf("error awas %d \n", state->urfd);
