@@ -36,7 +36,7 @@
 #define MAX_ENTRIES 8192 /* entries should be configured by users */
 #define ENABLE_SQPOLL 1
 
-static int register_files = 1;
+static int register_files = 0;
 
 typedef struct uring_event {
     int fd;
