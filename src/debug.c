@@ -1050,6 +1050,425 @@ NULL
     }
 }
 
+/* =========================== Command parser  ============================== */
+typedef struct cmdParserArg {
+    int num_args;
+    redisCommandArgType type;
+    const char *token;
+    int key_spec_index;
+    int flags;
+
+    struct cmdParserArg *subargs;
+
+    int matched;  /* How many input words have been matched by this argument? */
+    int matched_all;  /* Has the whole argument been matched? */
+} cmdParserArg;
+
+typedef struct cmdParserCtx {
+    struct redisCommand *cmd;
+    robj **argv;
+    int argc;
+
+    int *tokens;
+    int n_token;
+    int n_cap;
+    cmdParserArg *args;
+} cmdParserCtx;
+
+static struct cmdParserArg copyArg(struct redisCommandArg *arg) {
+    struct cmdParserArg parg = {
+            .type = arg->type,
+            .token = arg->token,
+            .key_spec_index = arg->key_spec_index,
+            .flags = arg->flags,
+            .num_args = arg->num_args
+    };
+
+    if (arg->num_args > 0) {
+        parg.subargs = zmalloc(sizeof(*parg.subargs) * arg->num_args);
+        for (int i = 0; i < arg->num_args; i++)
+            parg.subargs[i] = copyArg(&arg->subargs[i]);
+    }
+
+    return parg;
+}
+
+/* Free arg memory recursively. */
+static void freeArgs(struct cmdParserArg *args) {
+    if (!args)
+        return;
+
+    for (int i = 0; i < args->num_args; i++)
+        freeArgs(&args->subargs[i]);
+    zfree(args->subargs);
+}
+
+/* Create cmdParserArgs from command args */
+static struct cmdParserArg *createArgs(struct redisCommand *cmd, int *count) {
+    struct cmdParserArg *args;
+
+    args = zcalloc(sizeof(*args) * cmd->num_args);
+    *count = cmd->num_args;
+
+    for (int i = 0; i < cmd->num_args; i++)
+        args[i] = copyArg(&cmd->args[i]);
+
+    return args;
+}
+
+/* Recursively zeros the matched* fields of all arguments. */
+static void clearMatchedArgs(cmdParserArg *args, int numargs) {
+    for (int i = 0; i != numargs; ++i) {
+        args[i].matched = 0;
+        args[i].matched_all = 0;
+        if (args[i].subargs)
+            clearMatchedArgs(args[i].subargs, args[i].num_args);
+    }
+}
+
+static int matchArg(cmdParserCtx *ctx, int pos, robj **nextword, int numwords, cmdParserArg *arg);
+static int matchArgs(cmdParserCtx *ctx, int pos, robj **words, int numwords, cmdParserArg *args, int numargs);
+
+/* Tries to match the next words of the input against an argument. */
+static int matchNoTokenArg(cmdParserCtx *ctx, int pos,
+                           robj **nextword, int numwords, cmdParserArg *arg)
+{
+    switch (arg->type) {
+        case ARG_TYPE_BLOCK: {
+            arg->matched += matchArgs(ctx, pos, nextword, numwords,
+                                      arg->subargs, arg->num_args);
+
+            /* All the subargs must be matched for the block to match. */
+            arg->matched_all = 1;
+            for (int i = 0; i < arg->num_args; i++) {
+                if (arg->subargs[i].matched_all == 0)
+                    arg->matched_all = 0;
+            }
+        } break;
+
+        case ARG_TYPE_ONEOF: {
+            for (int i = 0; i < arg->num_args; i++) {
+                if (matchArg(ctx, pos, nextword, numwords, &arg->subargs[i])) {
+                    arg->matched += arg->subargs[i].matched;
+                    arg->matched_all = arg->subargs[i].matched_all;
+                    break;
+                }
+            }
+
+        } break;
+
+        case ARG_TYPE_INTEGER:
+        case ARG_TYPE_UNIX_TIME: {
+            long long value;
+            robj *o = nextword[0];
+            if (o->type == OBJ_STRING &&
+                ((o->encoding == OBJ_ENCODING_INT) ||
+                 (sdsEncodedObject(o) && sscanf(o->ptr, "%lld", &value) == 1)))
+            {
+                arg->matched += 1;
+                arg->matched_all = 1;
+            } else {
+                /* Matching failed due to incorrect arg type. */
+                arg->matched = 0;
+            }
+
+        } break;
+
+        case ARG_TYPE_DOUBLE: {
+            double value;
+            robj *o = nextword[0];
+            if ((o->type == OBJ_STRING && sdsEncodedObject(o)) &&
+                sscanf(o->ptr, "%lf", &value) == 1)
+            {
+                arg->matched += 1;
+                arg->matched_all = 1;
+            } else {
+                /* Matching failed due to incorrect arg type. */
+                arg->matched = 0;
+            }
+        } break;
+
+        default:
+            arg->matched += 1;
+            arg->matched_all = 1;
+            break;
+    }
+    return arg->matched;
+}
+
+/* Tries to match the next word of the input against a token literal. */
+static int matchToken(robj *nextword, cmdParserArg *arg) {
+    if (nextword->type != OBJ_STRING || !sdsEncodedObject(nextword))
+        return 0;
+
+    if (strcasecmp(arg->token, nextword->ptr) != 0)
+        return 0;
+
+    arg->matched = 1;
+    return 1;
+}
+
+static void saveTokenPos(cmdParserCtx *ctx, int pos, cmdParserArg *arg) {
+    /* Validation. If we can't pass this check, it means there is something
+     * wrong in the parser. */
+    if (pos >= ctx->argc || ctx->argv[pos]->type != OBJ_STRING ||
+        !sdsEncodedObject(ctx->argv[pos]) || strcasecmp(arg->token, ctx->argv[pos]->ptr) != 0) {
+        return;
+    }
+    if (ctx->n_token == ctx->n_cap) {
+        ctx->n_cap = (ctx->n_cap == 0) ? 16 : ctx->n_cap * 2;
+        ctx->tokens = zrealloc(ctx->tokens, sizeof(*ctx->tokens) * ctx->n_cap);
+    }
+    ctx->tokens[ctx->n_token++] = pos;
+}
+
+/* Tries to match the next words of the input against the next argument.
+ * If the arg is repeated ("multiple"), it will be matched only once.
+ * If the next input word(s) can't be matched, returns 0 for failure.
+ */
+static int matchArgOnce(cmdParserCtx *ctx, int pos, robj **nextword, int numwords,
+                        cmdParserArg *arg)
+{
+    /* First match the token, if present. */
+    if (arg->token != NULL) {
+        if (!matchToken(nextword[0], arg))
+            return 0;
+
+        saveTokenPos(ctx, pos, arg);
+        if (arg->type == ARG_TYPE_PURE_TOKEN) {
+            arg->matched_all = 1;
+            return 1;
+        }
+        if (numwords == 1)
+            return 1;
+
+        nextword++;
+        numwords--;
+        pos++;
+    }
+
+    /* Then match the rest of the argument. */
+    if (!matchNoTokenArg(ctx, pos, nextword, numwords, arg))
+        return 0;
+
+    return arg->matched;
+}
+
+/* Try to match multiple keys if keyspec specifies keynumidx.
+ *
+ * e.g. number of keys is specified in an argument of the command.
+ *      ZUNION <numkeys> key1 key2 key3 WITHSCORES
+ *
+ * If we find the number of keys, we can skip keys and advance.
+ * Returns positive on success. */
+static int matchKeyArgs(cmdParserCtx *ctx, int pos, int numwords, cmdParserArg *arg) {
+    long long count = 0;
+    if (arg->key_spec_index != -1 && arg->key_spec_index < ctx->cmd->key_specs_num) {
+        keySpec *sp = &ctx->cmd->key_specs[arg->key_spec_index];
+        if (sp->begin_search_type == KSPEC_BS_INDEX && sp->find_keys_type == KSPEC_FK_KEYNUM) {
+            int base = sp->bs.index.pos;
+
+            /* Currently, we handle consecutive keys only. */
+            if (pos != base + sp->fk.keynum.firstkey || sp->fk.keynum.keystep != 1)
+                return 0;
+
+            int keynumpos = base + sp->fk.keynum.keynumidx;
+            /* Verify range just in case malformed commands or malformed keyspecs */
+            if (keynumpos >= 0 && keynumpos < ctx->argc) {
+                robj *o = ctx->argv[keynumpos];
+                if (o->type == OBJ_STRING && o->encoding == OBJ_ENCODING_INT) {
+                    count = (long) o->ptr;
+                } else if (o->type == OBJ_STRING && sdsEncodedObject(o)) {
+                    if (!string2ll(o->ptr, sdslen(o->ptr), &count))
+                        count = 0; /* Failed to parse */
+                }
+            }
+        }
+
+        if (count > 0 && count <= numwords) {
+            arg->matched += (int) count;
+            return arg->matched;
+        }
+    }
+
+    return 0;
+}
+
+/* Tries to match the next words of the input against the next argument. If the
+ * arg is repeated ("multiple"), it will be matched as many times as possible.*/
+static int matchArg(cmdParserCtx *ctx, int pos, robj **nextword, int numwords, cmdParserArg *arg) {
+    if (arg->type == ARG_TYPE_KEY && arg->flags & CMD_ARG_MULTIPLE) {
+        if (matchKeyArgs(ctx, pos, numwords, arg) != 0)
+            return arg->matched;
+    }
+
+    int matchedWords = 0;
+    int matchedOnce = matchArgOnce(ctx, pos, nextword, numwords, arg);
+    if (!(arg->flags & CMD_ARG_MULTIPLE))
+        return matchedOnce;
+
+    /* Found one match; now try to match as many times as possible. */
+    matchedWords += matchedOnce;
+    while (arg->matched_all && matchedWords < numwords) {
+        clearMatchedArgs(arg, 1);
+        if (arg->token != NULL && !(arg->flags & CMD_ARG_MULTIPLE_TOKEN))
+            matchedOnce = matchNoTokenArg(ctx, pos + matchedWords,
+                                          &nextword[matchedWords],
+                                          numwords - matchedWords, arg);
+        else
+            matchedOnce = matchArgOnce(ctx, pos + matchedWords,
+                                       &nextword[matchedWords],
+                                       numwords - matchedWords, arg);
+
+        matchedWords += matchedOnce;
+    }
+    arg->matched_all = 0;  /* Because more repetitions are still possible. */
+    return matchedWords;
+}
+
+/* Tries to match the next words of the input against
+ * any one of a consecutive set of optional arguments. */
+static int matchOneOptionalArg(cmdParserCtx *ctx, int pos,
+                               robj **words, int numwords,
+                               struct cmdParserArg *args, int numargs,
+                               int *matchedarg)
+{
+    for (int nextword = 0, nextarg = 0; nextword != numwords && nextarg != numargs; ++nextarg) {
+        if (args[nextarg].matched) {
+            /* Already matched this arg. */
+            continue;
+        }
+
+        int matchedWords = matchArg(ctx, pos, &words[nextword],
+                                    numwords - nextword, &args[nextarg]);
+        if (matchedWords != 0) {
+            *matchedarg = nextarg;
+            return matchedWords;
+        }
+    }
+    return 0;
+}
+
+/* Matches as many input words as possible against a set of consecutive optional
+ * arguments. */
+static int matchOptionalArgs(cmdParserCtx *ctx, int pos, robj **words,
+                             int numwords, cmdParserArg *args, int numargs) {
+    int nextword = 0;
+    int matchedarg = -1, lastmatchedarg = -1;
+    while (nextword != numwords) {
+        int matchedWords = matchOneOptionalArg(ctx, pos, &words[nextword],
+                                               numwords - nextword,
+                                               args, numargs, &matchedarg);
+        if (matchedWords == 0)
+            break;
+
+        /* Successfully matched an arg; mark any previous match completed */
+        if (lastmatchedarg != -1)
+            args[lastmatchedarg].matched_all = 1;
+
+        lastmatchedarg = matchedarg;
+        nextword += matchedWords;
+        pos += matchedWords;
+    }
+    return nextword;
+}
+
+/* Matches as many input words as possible against command arguments. */
+static int matchArgs(cmdParserCtx *ctx, int pos, robj **words, int numwords,
+                     cmdParserArg *args, int numargs)
+{
+    int nextword, nextarg, matchedWords;
+    for (nextword = 0, nextarg = 0; nextword < numwords && nextarg < numargs; ++nextarg) {
+        /* Optional args can occur in any order. Collect a range of consecutive
+         * optional args and try to match them as a group against the next input
+         * words. */
+        if (args[nextarg].flags & CMD_ARG_OPTIONAL) {
+            int lastoptional;
+            for (lastoptional = nextarg; lastoptional < numargs; lastoptional++) {
+                if (!(args[lastoptional].flags & CMD_ARG_OPTIONAL)) break;
+            }
+            matchedWords = matchOptionalArgs(ctx, pos,
+                                             &words[nextword], numwords - nextword,
+                                             &args[nextarg], lastoptional - nextarg);
+            nextarg = lastoptional - 1;
+        } else {
+            matchedWords = matchArg(ctx, pos, &words[nextword],
+                                    numwords - nextword, &args[nextarg]);
+            if (matchedWords == 0) {
+                /* Couldn't match a required word - matching fails! */
+                return 0;
+            }
+        }
+
+        nextword += matchedWords;
+        pos += matchedWords;
+    }
+    return nextword;
+}
+
+/* Parse client argv according to command arg definition.
+ * Returns an array of ints. Each element indicates one token position in argv.
+ * It may return NULL if there is no token or if parsing fails.
+ * 'len' indicates size of returned array. User must free the array. */
+static int *cmdParserGetTokens(const client *c, struct redisCommand *cmd, int *len) {
+    cmdParserCtx ctx = {
+            .argc = c->argc,
+            .argv = c->argv,
+            .cmd = cmd,
+    };
+
+    int pos = cmd->parent ? 2 : 1;
+    int count = 0;
+    *len = 0;
+
+    if (cmd->num_args == 0)
+        return NULL;
+
+    ctx.args = createArgs(cmd, &count);
+    matchArgs(&ctx, pos, &ctx.argv[pos], ctx.argc - pos, ctx.args, count);
+    freeArgs(ctx.args);
+
+    *len = ctx.n_token;
+    return ctx.tokens;
+}
+
+/* Helper function to parse client argv and print command tokens. */
+void cmdParserPrintTokens(client *c) {
+    struct redisCommand *cmd;
+
+    cmd = lookupCommand(c->argv, c->argc);
+    if (!cmd)
+        return;
+
+    int len;
+    int *tokens = cmdParserGetTokens(c, cmd, &len);
+
+    int n_result_pos = 0;
+    for (int i = 0; i < c->argc; i++) {
+        if (i == 0) {
+            printf("argv[%d]: %s\n", i, (char*) c->argv[i]->ptr);
+            continue;
+        }
+
+        if (n_result_pos < len && i == tokens[n_result_pos]) {
+            printf("argv[%d]: %s\n", i, (char*) c->argv[i]->ptr);
+            n_result_pos++;
+        } else {
+            printf("argv[%d]: *redacted*\n", i);
+        }
+    }
+
+    zfree(tokens);
+}
+
+/* Check if position 'i' is a token. */
+int checkToken(int *tokens, int n_token, int i, int token_offset) {
+    if (n_token == 0 || token_offset == n_token)
+        return 0;
+
+    return i == tokens[token_offset];
+}
+
 /* =========================== Crash handling  ============================== */
 
 __attribute__ ((noinline))
@@ -1072,27 +1491,35 @@ void _serverAssert(const char *estr, const char *file, int line) {
     bugReportEnd(0, 0);
 }
 
-/* Returns the amount of client's command arguments we allow logging */
-int clientArgsToLog(const client *c) {
-    return server.hide_user_data_from_log ? 1 : c->argc;
-}
-
 void _serverAssertPrintClientInfo(const client *c) {
     int j;
     char conninfo[CONN_INFO_LEN];
+    struct redisCommand *cmd = NULL;
+    int *tokens = NULL, n_token = 0, token_pos = 0;
 
     bugReportStart();
     serverLog(LL_WARNING,"=== ASSERTION FAILED CLIENT CONTEXT ===");
     serverLog(LL_WARNING,"client->flags = %llu", (unsigned long long) c->flags);
     serverLog(LL_WARNING,"client->conn = %s", connGetInfo(c->conn, conninfo, sizeof(conninfo)));
     serverLog(LL_WARNING,"client->argc = %d", c->argc);
+    if (server.hide_user_data_from_log) {
+        cmd = lookupCommand(c->argv, c->argc);
+        if (cmd)
+            tokens = cmdParserGetTokens(c, cmd, &n_token);
+    }
+
     for (j=0; j < c->argc; j++) {
-        if (j >= clientArgsToLog(c)) {
-            serverLog(LL_WARNING,"client->argv[%d] = *redacted*",j);
-            continue;
-        }
         char buf[128];
         char *arg;
+
+        /* Allow command name, subcommand name and command tokens in the log. */
+        if (server.hide_user_data_from_log && (j != 0 && !(j == 1 && cmd && cmd->parent))) {
+            if (!checkToken(tokens, n_token, j, token_pos)) {
+                serverLog(LL_WARNING, "client->argv[%d] = *redacted*", j);
+                continue;
+            }
+            token_pos++;
+        }
 
         if (c->argv[j]->type == OBJ_STRING && sdsEncodedObject(c->argv[j])) {
             arg = (char*) c->argv[j]->ptr;
@@ -1104,6 +1531,8 @@ void _serverAssertPrintClientInfo(const client *c) {
         serverLog(LL_WARNING,"client->argv[%d] = \"%s\" (refcount: %d)",
             j, arg, c->argv[j]->refcount);
     }
+
+    zfree(tokens);
 }
 
 void serverLogObjectDebugInfo(const robj *o) {
@@ -2061,16 +2490,28 @@ void logCurrentClient(client *cc, const char *title) {
 
     sds client;
     int j;
+    struct redisCommand *cmd = NULL;
+    int *tokens = NULL, n_token = 0, token_offset = 0;
 
     serverLog(LL_WARNING|LL_RAW, "\n------ %s CLIENT INFO ------\n", title);
     client = catClientInfoString(sdsempty(),cc);
     serverLog(LL_WARNING|LL_RAW,"%s\n", client);
     sdsfree(client);
     serverLog(LL_WARNING|LL_RAW,"argc: '%d'\n", cc->argc);
+    if (server.hide_user_data_from_log) {
+        cmd = lookupCommand(cc->argv, cc->argc);
+        if (cmd)
+            tokens = cmdParserGetTokens(cc, cmd, &n_token);
+    }
+
     for (j = 0; j < cc->argc; j++) {
-        if (j >= clientArgsToLog(cc)) {
-            serverLog(LL_WARNING|LL_RAW,"argv[%d]: *redacted*\n",j);
-            continue;
+        /* Allow command name, subcommand name and command tokens in the log. */
+        if (server.hide_user_data_from_log && (j != 0 && !(j == 1 && cmd && cmd->parent))) {
+            if (!checkToken(tokens, n_token, j, token_offset)) {
+                serverLog(LL_WARNING|LL_RAW, "argv[%d]: '*redacted*'\n", j);
+                continue;
+            }
+            token_offset++;
         }
         robj *decoded;
         decoded = getDecodedObject(cc->argv[j]);
@@ -2084,6 +2525,8 @@ void logCurrentClient(client *cc, const char *title) {
         sdsfree(repr);
         decrRefCount(decoded);
     }
+    zfree(tokens);
+
     /* Check if the first argument, usually a key, is found inside the
      * selected DB, and if so print info about the associated object. */
     if (cc->argc > 1) {
