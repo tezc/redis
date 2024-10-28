@@ -1057,6 +1057,7 @@ typedef struct cmdParserArg {
     const char *token;
     int key_spec_index;
     int flags;
+    const char *deprecated_since;
 
     struct cmdParserArg *subargs;
 
@@ -1068,6 +1069,7 @@ typedef struct cmdParserCtx {
     struct redisCommand *cmd;
     robj **argv;
     int argc;
+    int hint_no_token;
 
     int *tokens;
     int n_token;
@@ -1075,19 +1077,23 @@ typedef struct cmdParserCtx {
     cmdParserArg *args;
 } cmdParserCtx;
 
-static struct cmdParserArg copyArg(struct redisCommandArg *arg) {
+static struct cmdParserArg copyArg(cmdParserCtx *ctx, struct redisCommandArg *arg) {
+    if (arg->token)
+        ctx->hint_no_token = 0;
+
     struct cmdParserArg parg = {
             .type = arg->type,
             .token = arg->token,
             .key_spec_index = arg->key_spec_index,
             .flags = arg->flags,
+            .deprecated_since = arg->deprecated_since,
             .num_args = arg->num_args
     };
 
     if (arg->num_args > 0) {
         parg.subargs = zmalloc(sizeof(*parg.subargs) * arg->num_args);
         for (int i = 0; i < arg->num_args; i++)
-            parg.subargs[i] = copyArg(&arg->subargs[i]);
+            parg.subargs[i] = copyArg(ctx, &arg->subargs[i]);
     }
 
     return parg;
@@ -1104,14 +1110,14 @@ static void freeArgs(struct cmdParserArg *args) {
 }
 
 /* Create cmdParserArgs from command args */
-static struct cmdParserArg *createArgs(struct redisCommand *cmd, int *count) {
+static struct cmdParserArg *createArgs(cmdParserCtx *ctx, struct redisCommand *cmd, int *count) {
     struct cmdParserArg *args;
 
     args = zcalloc(sizeof(*args) * cmd->num_args);
     *count = cmd->num_args;
 
     for (int i = 0; i < cmd->num_args; i++)
-        args[i] = copyArg(&cmd->args[i]);
+        args[i] = copyArg(ctx, &cmd->args[i]);
 
     return args;
 }
@@ -1147,11 +1153,36 @@ static int matchNoTokenArg(cmdParserCtx *ctx, int pos,
         } break;
 
         case ARG_TYPE_ONEOF: {
+            int matched = 0;
+            /* Try to match deprecated args as the last. It helps with commands
+             * like CLIENT KILL which has an ambiguous deprecated arg (named as
+             * 'old-format' in client-kill json schema). */
+            int has_deprecated = 0;
             for (int i = 0; i < arg->num_args; i++) {
-                if (matchArg(ctx, pos, nextword, numwords, &arg->subargs[i])) {
+                if (arg->subargs[i].deprecated_since) {
+                    has_deprecated = 1;
+                    continue;
+                }
+
+                matched = matchArg(ctx, pos, nextword, numwords, &arg->subargs[i]);
+                if (matched) {
                     arg->matched += arg->subargs[i].matched;
                     arg->matched_all = arg->subargs[i].matched_all;
                     break;
+                }
+            }
+
+            /* Re-run the loop for deprecated args. */
+            if (!matched && has_deprecated) {
+                for (int i = 0; i < arg->num_args; i++) {
+                    if (!arg->subargs[i].deprecated_since)
+                        continue;
+
+                    if (matchArg(ctx, pos, nextword, numwords, &arg->subargs[i])) {
+                        arg->matched += arg->subargs[i].matched;
+                        arg->matched_all = arg->subargs[i].matched_all;
+                        break;
+                    }
                 }
             }
 
@@ -1415,6 +1446,7 @@ static int *cmdParserGetTokens(const client *c, struct redisCommand *cmd, int *l
             .argc = c->argc,
             .argv = c->argv,
             .cmd = cmd,
+            .hint_no_token = 1,
     };
 
     int pos = cmd->parent ? 2 : 1;
@@ -1424,7 +1456,12 @@ static int *cmdParserGetTokens(const client *c, struct redisCommand *cmd, int *l
     if (cmd->num_args == 0)
         return NULL;
 
-    ctx.args = createArgs(cmd, &count);
+    ctx.args = createArgs(&ctx, cmd, &count);
+    if (ctx.hint_no_token) {
+        freeArgs(ctx.args);
+        return NULL;
+    }
+
     matchArgs(&ctx, pos, &ctx.argv[pos], ctx.argc - pos, ctx.args, count);
     freeArgs(ctx.args);
 
@@ -1434,18 +1471,17 @@ static int *cmdParserGetTokens(const client *c, struct redisCommand *cmd, int *l
 
 /* Helper function to parse client argv and print command tokens. */
 void cmdParserPrintTokens(client *c) {
+    int len = 0;
+    int *tokens = NULL;
     struct redisCommand *cmd;
 
     cmd = lookupCommand(c->argv, c->argc);
-    if (!cmd)
-        return;
-
-    int len;
-    int *tokens = cmdParserGetTokens(c, cmd, &len);
+    if (cmd)
+        tokens = cmdParserGetTokens(c, cmd, &len);
 
     int n_result_pos = 0;
     for (int i = 0; i < c->argc; i++) {
-        if (i == 0) {
+        if (i == 0 || (i == 1 && cmd->parent)) {
             printf("argv[%d]: %s\n", i, (char*) c->argv[i]->ptr);
             continue;
         }
