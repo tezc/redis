@@ -1051,6 +1051,17 @@ NULL
 }
 
 /* =========================== Command parser  ============================== */
+
+/* Command parser uses command's json schema info to find token/keyword
+ * locations in a command. If hide-user-data-from-log is enabled, we don't want
+ * to dump current command and print user info (key name, field name etc.) to
+ * the crashlog. Though, not having command details makes it harder to debug
+ * crashes. So, we run command parser to find token positions and selectively
+ * print command tokens.
+ *
+ * e.g. "set key value EX 10 NX"  it will be printed as  "set * * EX * NX"
+ */
+
 typedef struct cmdParserArg {
     redisCommandArgType type;
     const char *token;
@@ -1140,10 +1151,12 @@ static void cmdParserClearMatchedArgs(cmdParserArg *args, int numargs) {
 }
 
 static void cmdParserSaveToken(cmdParserCtx *ctx, int pos, cmdParserArg *arg) {
-    /* Validation. If we can't pass this check, it means there is something
-     * wrong in the parser. */
+    /* Validate token position. If we can't pass this check, it means there is
+     * something wrong in the parser. */
     if (pos >= ctx->argc || ctx->argv[pos]->type != OBJ_STRING ||
         !sdsEncodedObject(ctx->argv[pos]) || strcasecmp(arg->token, ctx->argv[pos]->ptr) != 0) {
+        serverLog(LL_WARNING|LL_RAW, "Command parser has found token at position=[%d] "
+                                     "but client->argv does not have that token at that position \n", pos);
         return;
     }
     if (ctx->n_token == ctx->n_cap) {
