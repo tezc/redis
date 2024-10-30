@@ -1155,8 +1155,8 @@ static void cmdParserSaveToken(cmdParserCtx *ctx, int pos, cmdParserArg *arg) {
      * something wrong in the parser. */
     if (pos >= ctx->argc || ctx->argv[pos]->type != OBJ_STRING ||
         !sdsEncodedObject(ctx->argv[pos]) || strcasecmp(arg->token, ctx->argv[pos]->ptr) != 0) {
-        serverLog(LL_WARNING|LL_RAW, "Command parser has found token at position=[%d] "
-                                     "but client->argv does not have that token at that position \n", pos);
+        serverLog(LL_WARNING|LL_RAW, "Command parser has found a token at position=[%d] "
+                                     "but client->argv does not have that token at that position. \n", pos);
         return;
     }
     if (ctx->n_token == ctx->n_cap) {
@@ -1353,6 +1353,10 @@ static int cmdParserMatchKeyArgs(cmdParserCtx *ctx, int pos, int numwords,
 static int cmdParserMatchArg(cmdParserCtx *ctx, int pos, robj **nextword,
                              int numwords, cmdParserArg *arg)
 {
+    /* This is a special case, but it is quite common. Number of keys might be
+     * given in an argument. We need to parse that argument to figure out how
+     * many keys to skip.
+     * e.g. BLMPOP timeout numkeys key [key ...] <LEFT | RIGHT> [COUNT count] */
     if (arg->type == ARG_TYPE_KEY && arg->flags & CMD_ARG_MULTIPLE) {
         if (cmdParserMatchKeyArgs(ctx, pos, numwords, arg) != 0)
             return arg->matched;
@@ -1382,8 +1386,8 @@ static int cmdParserMatchArg(cmdParserCtx *ctx, int pos, robj **nextword,
     return matchedWords;
 }
 
-/* Tries to match the next words of the input against
- * any one of a consecutive set of optional arguments. */
+/* Tries to match the next words of the input against  any one of a consecutive
+ * set of optional arguments. */
 static int cmdParserMatchOneOptionalArg(cmdParserCtx *ctx, int pos,
                                         robj **words, int numwords,
                                         struct cmdParserArg *args, int numargs,
@@ -1574,7 +1578,7 @@ void _serverAssertPrintClientInfo(const client *c) {
         char buf[128];
         char *arg;
 
-        /* Allow command name, subcommand name and command tokens in the log. */
+        /* Allow only command - subcommand name and command tokens in the log.*/
         if (server.hide_user_data_from_log && (j != 0 && !(j == 1 && cmd && cmd->parent))) {
             if (token_pos >= n_token || tokens[token_pos] != j) {
                 serverLog(LL_WARNING, "client->argv[%d] = *redacted*", j);
@@ -2567,7 +2571,7 @@ void logCurrentClient(client *cc, const char *title) {
     }
 
     for (j = 0; j < cc->argc; j++) {
-        /* Allow command name, subcommand name and command tokens in the log. */
+        /* Allow only command - subcommand name and command tokens in the log.*/
         if (server.hide_user_data_from_log && (j != 0 && !(j == 1 && cmd && cmd->parent))) {
             if (token_pos >= n_token || tokens[token_pos] != j) {
                 serverLog(LL_WARNING|LL_RAW, "argv[%d]: '*redacted*'\n", j);
