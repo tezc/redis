@@ -1150,6 +1150,7 @@ static void cmdParserClearMatchedArgs(cmdParserArg *args, int numargs) {
     }
 }
 
+/* Save token position. pos indicates offset in client argv[]. */
 static void cmdParserSaveToken(cmdParserCtx *ctx, int pos, cmdParserArg *arg) {
     /* Validate token position. If we can't pass this check, it means there is
      * something wrong in the parser. */
