@@ -64,7 +64,7 @@ if {!$::valgrind} {
     start_server {tags {"modules"}} {
         r module load $testmodule
 
-        test {Test command tokens are printed when hide-user-data-from-log is enabled} {
+        test {Test command tokens are printed when hide-user-data-from-log is enabled (xadd)} {
             r config set hide-user-data-from-log yes
             catch {r 0 modulecrash.xadd key NOMKSTREAM MAXLEN ~ 1000 * a b}
 
@@ -83,23 +83,7 @@ if {!$::valgrind} {
     start_server {tags {"modules"}} {
         r module load $testmodule
 
-        test {Test subcommand name is printed when hide-user-data-from-log is enabled} {
-            r config set hide-user-data-from-log yes
-            catch {r 0 modulecrash.parent subcmd key TOKEN a b}
-
-            wait_for_log_messages 0 {"*argv*0*: *modulecrash.parent*"} 0 10 1000
-            wait_for_log_messages 0 {"*argv*1*: *subcmd*"} 0 10 1000
-            wait_for_log_messages 0 {"*argv*2*: *redacted*"} 0 10 1000
-            wait_for_log_messages 0 {"*argv*3*: *TOKEN*"} 0 10 1000
-            wait_for_log_messages 0 {"*argv*4*: *redacted*"} 0 10 1000
-            wait_for_log_messages 0 {"*argv*5*: *redacted*"} 0 10 1000
-        }
-    }
-
-    start_server {tags {"modules"}} {
-        r module load $testmodule
-
-        test {Test command tokens are printed when hide-user-data-from-log is enabled with zunion command} {
+        test {Test command tokens are printed when hide-user-data-from-log is enabled (zunion)} {
             r config set hide-user-data-from-log yes
             catch {r 0 modulecrash.zunion 2 zset1 zset2 WEIGHTS 1 2 WITHSCORES somedata}
 
@@ -115,6 +99,22 @@ if {!$::valgrind} {
             # We don't expect arguments after WITHSCORE but just in case there
             # is we rather not print it
             wait_for_log_messages 0 {"*argv*8*: *redacted*"} 0 10 1000
+        }
+    }
+
+    start_server {tags {"modules"}} {
+        r module load $testmodule
+
+        test {Test subcommand name is printed when hide-user-data-from-log is enabled} {
+            r config set hide-user-data-from-log yes
+            catch {r 0 modulecrash.parent subcmd key TOKEN a b}
+
+            wait_for_log_messages 0 {"*argv*0*: *modulecrash.parent*"} 0 10 1000
+            wait_for_log_messages 0 {"*argv*1*: *subcmd*"} 0 10 1000
+            wait_for_log_messages 0 {"*argv*2*: *redacted*"} 0 10 1000
+            wait_for_log_messages 0 {"*argv*3*: *TOKEN*"} 0 10 1000
+            wait_for_log_messages 0 {"*argv*4*: *redacted*"} 0 10 1000
+            wait_for_log_messages 0 {"*argv*5*: *redacted*"} 0 10 1000
         }
     }
 }
