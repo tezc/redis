@@ -303,7 +303,7 @@ start_server {tags {"repl external:skip"}} {
     }
 }
 
-foreach mdl {no yes} {
+foreach mdl {no yes} rdbchannel {no yes} {
     foreach sdl {disabled swapdb} {
         start_server {tags {"repl external:skip"} overrides {save {}}} {
             set master [srv 0 client]
@@ -319,7 +319,13 @@ foreach mdl {no yes} {
                     lappend slaves [srv 0 client]
                     start_server {overrides {save {}}} {
                         lappend slaves [srv 0 client]
-                        test "Connect multiple replicas at the same time (issue #141), master diskless=$mdl, replica diskless=$sdl" {
+                        test "Connect multiple replicas at the same time (issue #141), master diskless=$mdl, replica diskless=$sdl, rdbchannel=$rdbchannel" {
+
+                            $master config set repl-rdb-channel $rdbchannel
+                            [lindex $slaves 0] config set repl-rdb-channel $rdbchannel
+                            [lindex $slaves 1] config set repl-rdb-channel $rdbchannel
+                            [lindex $slaves 2] config set repl-rdb-channel $rdbchannel
+
                             # start load handles only inside the test, so that the test can be skipped
                             set load_handle0 [start_bg_complex_data $master_host $master_port 9 100000000]
                             set load_handle1 [start_bg_complex_data $master_host $master_port 11 100000000]
@@ -438,7 +444,7 @@ start_server {tags {"repl external:skip"} overrides {save {}}} {
 }
 
 # Diskless load swapdb when NOT async_loading (different master replid)
-foreach testType {Successful Aborted} {
+foreach testType {Successful Aborted} rdbchannel {yes no} {
     start_server {tags {"repl external:skip"}} {
         set replica [srv 0 client]
         set replica_host [srv 0 host]
@@ -453,6 +459,7 @@ foreach testType {Successful Aborted} {
             $master config set repl-diskless-sync yes
             $master config set repl-diskless-sync-delay 0
             $master config set save ""
+            $master config set repl-rdb-channel $rdbchannel
             $replica config set repl-diskless-load swapdb
             $replica config set save ""
 
@@ -474,7 +481,7 @@ foreach testType {Successful Aborted} {
                     # Start the replication process
                     $replica replicaof $master_host $master_port
 
-                    test {Diskless load swapdb (different replid): replica enter loading} {
+                    test "Diskless load swapdb (different replid): replica enter loading rdbchannel=$rdbchannel" {
                         # Wait for the replica to start reading the rdb
                         wait_for_condition 100 100 {
                             [s -1 loading] eq 1
@@ -498,7 +505,7 @@ foreach testType {Successful Aborted} {
                         fail "Replica didn't disconnect"
                     }
 
-                    test {Diskless load swapdb (different replid): old database is exposed after replication fails} {
+                    test "Diskless load swapdb (different replid): old database is exposed after replication fails rdbchannel=$rdbchannel" {
                         # Ensure we see old values from replica
                         assert_equal [$replica get mykey] "myvalue"
 
@@ -590,8 +597,8 @@ foreach testType {Successful Aborted} {
 
             if {$testType == "Aborted"} {
                 # Set master with a slow rdb generation, so that we can easily intercept loading
-                # 10ms per key, with 2000 keys is 20 seconds
-                $master config set rdb-key-save-delay 10000
+                # 20ms per key, with 2000 keys is 40 seconds
+                $master config set rdb-key-save-delay 20000
             }
 
             # Force the replica to try another full sync (this time it will have matching master replid)
@@ -862,6 +869,7 @@ start_server {tags {"repl external:skip"} overrides {save ""}} {
     # we also need the replica to process requests during transfer (which it does only once in 2mb)
     $master debug populate 20000 test 10000
     $master config set rdbcompression no
+    $master config set repl-rdb-channel no
     # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
     set os [catch {exec uname}]
     set measure_time [expr {$os == "Linux"} ? 1 : 0]
@@ -1009,6 +1017,7 @@ test "diskless replication child being killed is collected" {
         set master_pid [srv 0 pid]
         $master config set repl-diskless-sync yes
         $master config set repl-diskless-sync-delay 0
+        $master config set repl-rdb-channel no
         # put enough data in the db that the rdb file will be bigger than the socket buffers
         $master debug populate 20000 test 10000
         $master config set rdbcompression no
@@ -1298,8 +1307,10 @@ start_server {tags {"repl external:skip"}} {
                     assert_equal [s master_replid] [s -1 master_replid]
                     assert ![log_file_matches [srv -1 stdout] "*Connection with master lost*"]
                     # Sub replica just has one full sync, no partial resync.
+                    # Though, full sync will include a single partial sync as
+                    # there will be two connections in parallel.
                     assert_equal 1 [s sync_full]
-                    assert_equal 0 [s sync_partial_ok]
+                    assert_equal 1 [s sync_partial_ok]
                 }
             }
         }

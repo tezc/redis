@@ -2180,6 +2180,10 @@ void initServerConfig(void) {
     server.cached_master = NULL;
     server.master_initial_offset = -1;
     server.repl_state = REPL_STATE_NONE;
+    server.repl_rdb_ch_state = REPL_RDB_CH_STATE_NONE;
+    server.repl_rdbchannel_client_id = 0;
+    server.repl_loaded_rdb_dbid = -1;
+    server.repl_pending_data = (struct replDataBuf) {0};
     server.repl_transfer_tmpfile = NULL;
     server.repl_transfer_fd = -1;
     server.repl_transfer_s = NULL;
@@ -2676,6 +2680,8 @@ void initServer(void) {
     server.hz = server.config_hz;
     server.pid = getpid();
     server.in_fork_child = CHILD_TYPE_NONE;
+    server.rdb_pipe_read = -1;
+    server.rdb_child_exit_pipe = -1;
     server.main_thread_id = pthread_self();
     server.current_client = NULL;
     server.errors = raxNew();
@@ -2686,6 +2692,8 @@ void initServer(void) {
     server.clients_to_close = listCreate();
     server.slaves = listCreate();
     server.monitors = listCreate();
+    server.replicas_waiting_psync = raxNew();
+    server.repl_delay_rdb_client_free = REPL_DELAY_RDB_CLIENT_FREE;
     server.clients_pending_write = listCreate();
     server.clients_pending_read = listCreate();
     server.clients_timeout_table = raxNew();
@@ -5456,6 +5464,8 @@ const char *replstateToString(int replstate) {
     case SLAVE_STATE_WAIT_BGSAVE_START:
     case SLAVE_STATE_WAIT_BGSAVE_END:
         return "wait_bgsave";
+    case SLAVE_STATE_BG_RDB_TRANSFER:
+        return "bg_rdb_transfer";
     case SLAVE_STATE_SEND_BULK:
         return "send_bulk";
     case SLAVE_STATE_ONLINE:
@@ -6053,7 +6063,9 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
                 "master_last_io_seconds_ago:%d\r\n", server.master ? ((int)(server.unixtime-server.master->lastinteraction)) : -1,
                 "master_sync_in_progress:%d\r\n", server.repl_state == REPL_STATE_TRANSFER,
                 "slave_read_repl_offset:%lld\r\n", slave_read_repl_offset,
-                "slave_repl_offset:%lld\r\n", slave_repl_offset));
+                "slave_repl_offset:%lld\r\n", slave_repl_offset,
+                "replica_repl_pending_data_size:%zu\r\n", server.repl_pending_data.size,
+                "replica_repl_pending_data_peak:%zu\r\n", server.repl_pending_data.peak));
 
             if (server.repl_state == REPL_STATE_TRANSFER) {
                 double perc = 0;
@@ -6117,13 +6129,17 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
 
                 info = sdscatprintf(info,
                     "slave%d:ip=%s,port=%d,state=%s,"
-                    "offset=%lld,lag=%ld\r\n",
+                    "offset=%lld,lag=%ld,type=%s\r\n",
                     slaveid,slaveip,slave->slave_listening_port,state,
-                    slave->repl_ack_off, lag);
+                                    slave->repl_ack_off, lag,
+                                    slave->flags & CLIENT_REPL_RDB_CHANNEL
+                                        ? "rdb-channel" : slave->replstate == SLAVE_STATE_BG_RDB_TRANSFER
+                                                                                ? "main-channel" : "replica");
                 slaveid++;
             }
         }
         info = sdscatprintf(info, FMTARGS(
+            "replicas_waiting_psync:%"PRIu64"\r\n", raxSize(server.replicas_waiting_psync),
             "master_failover_state:%s\r\n", getFailoverStateString(),
             "master_replid:%s\r\n", server.replid,
             "master_replid2:%s\r\n", server.replid2,

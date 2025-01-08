@@ -92,6 +92,7 @@ struct hdr_histogram;
 /* Error codes */
 #define C_OK                    0
 #define C_ERR                   -1
+#define C_RETRY                 -2
 
 /* Static server configuration */
 #define CONFIG_DEFAULT_HZ        10             /* Time interrupt calls/sec. */
@@ -394,6 +395,16 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_MODULE_PREVENT_AOF_PROP (1ULL<<48) /* Module client do not want to propagate to AOF */
 #define CLIENT_MODULE_PREVENT_REPL_PROP (1ULL<<49) /* Module client do not want to propagate to replica */
 #define CLIENT_REPROCESSING_COMMAND (1ULL<<50) /* The client is re-processing the command. */
+#define CLIENT_REPL_RDB_CHANNEL (1ULL<<51)      /* Rdb channel replication sync: track a connection which is used for rdb delivery */
+#define CLIENT_PROTECTED_RDB_CHANNEL (1ULL<<52) /* Rdb channel replication sync: Protects the RDB client from premature
+                                                 * release during full sync. This flag is used to ensure that the RDB client, which
+                                                 * references the first replication data block required by the replica, is not
+                                                 * released prematurely. Protecting the client is crucial for prevention of
+                                                 * synchronization failures. If the RDB client is released before the replica initiates
+                                                 * PSYNC, the master will reduce the reference count (o->refcount) of the block needed
+                                                 * by the replica. This could potentially lead to the removal of the required data block,
+                                                 * resulting in synchronization failures.By using this flag, we ensure that the RDB client
+                                                 * remains intact until the replica has successfully initiated PSYNC. */
 
 /* Any flag that does not let optimize FLUSH SYNC to run it in bg as blocking client ASYNC */
 #define CLIENT_AVOID_BLOCKING_ASYNC_FLUSH (CLIENT_DENY_BLOCKING|CLIENT_MULTI|CLIENT_LUA_DEBUG|CLIENT_LUA_DEBUG_SYNC|CLIENT_MODULE)
@@ -473,6 +484,26 @@ typedef enum {
     REPL_STATE_CONNECTED,       /* Connected to master */
 } repl_state;
 
+/* Replica rdb channel replication state. Used in server.repl_rdb_ch_state for
+ * replicas to remember what to do next. */
+typedef enum {
+    REPL_RDB_CH_STATE_CLOSE_ASAP = -1,  /* Async error state */
+    REPL_RDB_CH_STATE_NONE = 0,         /* No active rdb channel sync */
+    REPL_RDB_CH_SEND_HANDSHAKE,         /* Send handshake sequence to master */
+    REPL_RDB_CH_RECEIVE_AUTH_REPLY,     /* Wait for AUTH reply */
+    REPL_RDB_CH_RECEIVE_REPLCONF_REPLY, /* Wait for REPLCONF reply */
+    REPL_RDB_CH_RECEIVE_FULLRESYNC,     /* Wait for +FULLRESYNC reply */
+    REPL_RDB_CH_RDB_LOADING,            /* Loading rdb using rdb channel */
+    REPL_RDB_CH_RDB_LOADED,             /* RDB is loaded */
+} repl_rdb_channel_state;
+
+/* Replication debug flags for testing. */
+#define REPL_DEBUG_PAUSE_NONE             (1 << 0)
+#define REPL_DEBUG_AFTER_FORK             (1 << 1)
+#define REPL_DEBUG_BEFORE_MAIN_CONN_PSYNC (1 << 2)
+#define REPL_DEBUG_ON_STREAMING_REPL_BUF  (1 << 3)
+
+
 /* The state of an in progress coordinated failover */
 typedef enum {
     NO_FAILOVER = 0,        /* No failover in progress */
@@ -491,16 +522,21 @@ typedef enum {
 #define SLAVE_STATE_ONLINE 9 /* RDB file transmitted, sending just updates. */
 #define SLAVE_STATE_RDB_TRANSMITTED 10 /* RDB file transmitted - This state is used only for
                                         * a replica that only wants RDB without replication buffer  */
+#define SLAVE_STATE_BG_RDB_TRANSFER 11 /* Main channel of a replica which uses rdb channel replication.
+                                        * Sending RDB file and replication stream in parallel. */
 
 /* Slave capabilities. */
-#define SLAVE_CAPA_NONE 0
-#define SLAVE_CAPA_EOF (1<<0)    /* Can parse the RDB EOF streaming format. */
-#define SLAVE_CAPA_PSYNC2 (1<<1) /* Supports PSYNC2 protocol. */
+#define SLAVE_CAPA_NONE             0
+#define SLAVE_CAPA_EOF              (1<<0) /* Can parse the RDB EOF streaming format. */
+#define SLAVE_CAPA_PSYNC2           (1<<1) /* Supports PSYNC2 protocol. */
+#define SLAVE_CAPA_RDB_CHANNEL_REPL (1<<2) /* Supports rdb channel replication during full sync */
+
 
 /* Slave requirements */
-#define SLAVE_REQ_NONE 0
-#define SLAVE_REQ_RDB_EXCLUDE_DATA (1 << 0)      /* Exclude data from RDB */
+#define SLAVE_REQ_NONE                  0
+#define SLAVE_REQ_RDB_EXCLUDE_DATA      (1 << 0) /* Exclude data from RDB */
 #define SLAVE_REQ_RDB_EXCLUDE_FUNCTIONS (1 << 1) /* Exclude functions from RDB */
+#define SLAVE_REQ_RDB_CHANNEL           (1 << 2) /* Use rdb channel replication */
 /* Mask of all bits in the slave requirements bitfield that represent non-standard (filtered) RDB requirements */
 #define SLAVE_REQ_RDB_MASK (SLAVE_REQ_RDB_EXCLUDE_DATA | SLAVE_REQ_RDB_EXCLUDE_FUNCTIONS)
 
@@ -513,6 +549,9 @@ typedef enum {
 /* In order to quickly find the requested offset for PSYNC requests,
  * we index some nodes in the replication buffer linked list into a rax. */
 #define REPL_BACKLOG_INDEX_PER_BLOCKS 64
+
+/* Grace period in seconds for replica main channel to establish psync. */
+#define REPL_DELAY_RDB_CLIENT_FREE 60
 
 /* List related stuff */
 #define LIST_HEAD 0
@@ -1162,6 +1201,23 @@ typedef struct replBacklog {
                                   * byte in the replication backlog buffer.*/
 } replBacklog;
 
+/* Used by replDataBuf during rdb channel replication to accumulate replication
+ * stream on replica side. */
+typedef struct replDataBufBlock {
+    size_t used; /* Used bytes in the buf */
+    size_t size; /* Size of the buf */
+    char buf[];  /* Replication data */
+} replDataBufBlock;
+
+/* Linked list of replDataBufBlock structs, holds replication stream during
+ * rdb channel replication on replica side. */
+typedef struct replDataBuf {
+    list *blocks; /* List of replDataBufBlock */
+    size_t size;  /* Total number of bytes available in all blocks. */
+    size_t used;  /* Total number of bytes actually used in all blocks. */
+    size_t peak;  /* Peak number of bytes stored in all blocks. */
+} replDataBuf;
+
 typedef struct {
     list *clients;
     size_t mem_usage_sum;
@@ -1258,6 +1314,8 @@ typedef struct client {
     char *slave_addr;       /* Optionally given by REPLCONF ip-address */
     int slave_capa;         /* Slave capabilities: SLAVE_CAPA_* bitwise OR. */
     int slave_req;          /* Slave requirements: SLAVE_REQ_* */
+    uint64_t rdb_client_id; /* The client id of this replica's rdb connection */
+    time_t rdb_client_disconnect_time; /* Time of the first freeClient call on this client. Used for delaying free. */
     multiState mstate;      /* MULTI/EXEC state */
     blockingState bstate;     /* blocking state */
     long long woff;         /* Last write global replication offset. */
@@ -1671,6 +1729,7 @@ struct redisServer {
     list *clients_pending_write; /* There is to write or install handler. */
     list *clients_pending_read;  /* Client has pending read socket buffers. */
     list *slaves, *monitors;    /* List of slaves and MONITORs */
+    rax *replicas_waiting_psync;/* List of rdb channel clients until their main channel establishes pysnc. */
     client *current_client;     /* The client that triggered the command execution (External or AOF). */
     client *executing_client;   /* The client executing the current command (possibly script or module). */
 
@@ -1936,6 +1995,7 @@ struct redisServer {
     int repl_ping_slave_period;     /* Master pings the slave every N seconds */
     replBacklog *repl_backlog;      /* Replication backlog for partial syncs */
     long long repl_backlog_size;    /* Backlog circular buffer size */
+    replDataBuf repl_pending_data;  /* Accumulated replication data for rdb channel replication */
     time_t repl_backlog_time_limit; /* Time without slaves after the backlog
                                        gets released. */
     time_t repl_no_slaves_since;    /* We have no slaves since that time.
@@ -1949,6 +2009,11 @@ struct redisServer {
     int repl_diskless_sync_delay;   /* Delay to start a diskless repl BGSAVE. */
     int repl_diskless_sync_max_replicas;/* Max replicas for diskless repl BGSAVE
                                          * delay (start sooner if they all connect). */
+    int repl_rdb_channel;           /* Config used to determine if the replica should
+                                     * use rdb channel replication for full syncs. */
+    int repl_delay_rdb_client_free; /* Grace period in seconds for replica main channel
+                                      * to establish psync. */
+    int repl_debug_pause;           /* Debug config to force the main process to pause. */
     size_t repl_buffer_mem;         /* The memory of replication buffer. */
     list *repl_buffer_blocks;       /* Replication buffers blocks list
                                      * (serving replica clients and repl backlog) */
@@ -1962,10 +2027,14 @@ struct redisServer {
     client *cached_master; /* Cached master to be reused for PSYNC. */
     int repl_syncio_timeout; /* Timeout for synchronous I/O calls */
     int repl_state;          /* Replication status if the instance is a slave */
+    int repl_rdb_ch_state; /* State of the replica's rdb channel during rdb channel replication */
+    int repl_loaded_rdb_dbid; /* dbid in the loaded rdb */
+    uint64_t repl_rdbchannel_client_id; /* rdbchannel client id as defined on master side */
     off_t repl_transfer_size; /* Size of RDB to read from master during sync. */
     off_t repl_transfer_read; /* Amount of RDB read from master during sync. */
     off_t repl_transfer_last_fsync_off; /* Offset when we fsync-ed last time. */
     connection *repl_transfer_s;     /* Slave -> Master SYNC connection */
+    connection *repl_rdb_transfer_s; /* Slave -> Master FULL SYNC connection (RDB download) */
     int repl_transfer_fd;    /* Slave -> Master SYNC temp file descriptor */
     char *repl_transfer_tmpfile; /* Slave-> master SYNC temp file name */
     time_t repl_transfer_lastio; /* Unix time of the latest read, for timeout */
@@ -3972,6 +4041,7 @@ void killThreads(void);
 void makeThreadKillable(void);
 void swapMainDbWithTempDb(redisDb *tempDb);
 sds getVersion(void);
+void debugPauseProcess(void);
 
 /* Use macro for checking log level to avoid evaluating arguments in cases log
  * should be ignored due to low level. */

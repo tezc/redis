@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2009-2012, Pieter Noordhuis <pcnoordhuis at gmail dot com>
  * Copyright (c) 2009-current, Redis Ltd.
+ * Copyright (c) 2024-present, Valkey contributors.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -39,6 +40,7 @@
 
 #define RIO_FLAG_READ_ERROR (1<<0)
 #define RIO_FLAG_WRITE_ERROR (1<<1)
+#define RIO_FLAG_ABORT (1<<2)
 
 #define RIO_TYPE_FILE (1<<0)
 #define RIO_TYPE_BUFFER (1<<1)
@@ -97,6 +99,17 @@ struct _rio {
             off_t pos;
             sds buf;
         } fd;
+        /* Multiple connections target (used to write to N sockets). */
+        struct {
+            struct {
+                connection *conn; /* Connection */
+                int failed;       /* If write failed on this connection. */
+            } *dst;
+
+            size_t n_dst;        /* Number of connections */
+            off_t pos;           /* Number of sent bytes */
+            sds buf;
+        } connset;
     } io;
 };
 
@@ -107,7 +120,7 @@ typedef struct _rio rio;
  * if needed. */
 
 static inline size_t rioWrite(rio *r, const void *buf, size_t len) {
-    if (r->flags & RIO_FLAG_WRITE_ERROR) return 0;
+    if (r->flags & (RIO_FLAG_WRITE_ERROR | RIO_FLAG_ABORT)) return 0;
     while (len) {
         size_t bytes_to_write = (r->max_processing_chunk && r->max_processing_chunk < len) ? r->max_processing_chunk : len;
         if (r->update_cksum) r->update_cksum(r,buf,bytes_to_write);
@@ -123,7 +136,7 @@ static inline size_t rioWrite(rio *r, const void *buf, size_t len) {
 }
 
 static inline size_t rioRead(rio *r, void *buf, size_t len) {
-    if (r->flags & RIO_FLAG_READ_ERROR) return 0;
+    if (r->flags & (RIO_FLAG_READ_ERROR | RIO_FLAG_ABORT)) return 0;
     while (len) {
         size_t bytes_to_read = (r->max_processing_chunk && r->max_processing_chunk < len) ? r->max_processing_chunk : len;
         if (r->read(r,buf,bytes_to_read) == 0) {
@@ -146,6 +159,10 @@ static inline int rioFlush(rio *r) {
     return r->flush(r);
 }
 
+static inline void rioAbort(rio *r) {
+    r->flags |= RIO_FLAG_ABORT;
+}
+
 /* This function allows to know if there was a read error in any past
  * operation, since the rio stream was created or since the last call
  * to rioClearError(). */
@@ -159,16 +176,18 @@ static inline int rioGetWriteError(rio *r) {
 }
 
 static inline void rioClearErrors(rio *r) {
-    r->flags &= ~(RIO_FLAG_READ_ERROR|RIO_FLAG_WRITE_ERROR);
+    r->flags &= ~(RIO_FLAG_READ_ERROR|RIO_FLAG_WRITE_ERROR|RIO_FLAG_ABORT);
 }
 
 void rioInitWithFile(rio *r, FILE *fp);
 void rioInitWithBuffer(rio *r, sds s);
 void rioInitWithConn(rio *r, connection *conn, size_t read_limit);
 void rioInitWithFd(rio *r, int fd);
+void rioInitWithConnset(rio *r, connection **conns, size_t n_conns);
 
 void rioFreeFd(rio *r);
 void rioFreeConn(rio *r, sds* out_remainingBufferedData);
+void rioFreeConnset(rio *r);
 
 size_t rioWriteBulkCount(rio *r, char prefix, long count);
 size_t rioWriteBulkString(rio *r, const char *buf, size_t len);
