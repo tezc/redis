@@ -1204,7 +1204,7 @@ void syncCommand(client *c) {
  * the master can accurately lists replicas and their listening ports in the
  * INFO output.
  *
- * - capa <eof|psync2>
+ * - capa <eof|psync2|rdb-channel-repl>
  * What is the capabilities of this instance.
  * eof: supports EOF-style RDB transfer for diskless replication.
  * psync2: supports PSYNC v2, so understands +CONTINUE <new repl ID>.
