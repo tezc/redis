@@ -3086,6 +3086,7 @@ sds catClientInfoString(sds s, client *client) {
     if (client->flags & CLIENT_READONLY) *p++ = 'r';
     if (client->flags & CLIENT_NO_EVICT) *p++ = 'e';
     if (client->flags & CLIENT_NO_TOUCH) *p++ = 'T';
+    if (client->flags & CLIENT_REPL_RDB_CHANNEL) *p++ = 'C';
     if (p == flags) *p++ = 'N';
     *p++ = '\0';
 

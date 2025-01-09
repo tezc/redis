@@ -1,19 +1,22 @@
-# Returns list of replica client ids
-proc get_replica_client_ids {master} {
-    set ids {}
+# Returns either main or rdbchannel client id
+# Assumes there is one replica with two channels
+proc get_replica_client_id {master rdbchannel} {
     set input [$master client list type replica]
 
     foreach line [split $input "\n"] {
-        if {[regexp {id=(\d+)} $line match id]} {
-            # Add the extracted id to the list
-            lappend ids $id
+        if {[regexp {id=(\d+).*flags=(\S+)} $line match id flags]} {
+            if {$rdbchannel == "yes"} {
+                # rdbchannel will have C flag
+                if {[string match *C* $flags]} {
+                    return $id
+                }
+            } else {
+                return $id
+            }
         }
     }
-    if {[llength $ids] != 2} {
-        # We expect two replicas: main channel and rdb channel
-        error "Found [llength $ids] replicas: $ids"
-    }
-    return $ids
+
+    error "Replica not found"
 }
 
 start_server {tags {"repl external:skip"}} {
@@ -844,7 +847,7 @@ start_server {tags {"repl external:skip"}} {
             # rdbchannel connection is established later. We kill the other id
             # in the next test. So, even if the order changes later, we'll be
             # killing both channels.
-            set id [lindex [get_replica_client_ids $master] 1]
+            set id [get_replica_client_id $master yes]
             $master client kill id $id
 
             # Wait for master to abort the sync
@@ -876,7 +879,7 @@ start_server {tags {"repl external:skip"}} {
             # rdbchannel connection is established later. We kill the other id
             # in the previous test. So, even if the order changes later, we'll
             # be killing both channels.
-            set id [lindex [get_replica_client_ids $master] 0]
+            set id [get_replica_client_id $master yes]
             $master client kill id $id
 
             # Wait for master to abort the sync
