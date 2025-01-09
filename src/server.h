@@ -3017,6 +3017,8 @@ void clearFailoverState(void);
 void updateFailoverStatus(void);
 void abortFailover(const char *err);
 const char *getFailoverStateString(void);
+int replicationCheckHasMainChannel(client *slave);
+unsigned long replicationLogicalReplicaCount(void);
 
 /* Generic persistence functions */
 void startLoadingFile(size_t size, char* filename, int rdbflags);

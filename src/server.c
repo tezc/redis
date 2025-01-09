@@ -1441,7 +1441,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
             serverLog(LL_DEBUG,
                 "%lu clients connected (%lu replicas), %zu bytes in use",
                 listLength(server.clients)-listLength(server.slaves),
-                listLength(server.slaves),
+                replicationLogicalReplicaCount(),
                 zmalloc_used_memory());
         }
     }
@@ -6094,7 +6094,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
 
         info = sdscatprintf(info,
             "connected_slaves:%lu\r\n",
-            listLength(server.slaves));
+            replicationLogicalReplicaCount());
 
         /* If min-slaves-to-write is active, write the number of slaves
          * currently considered 'good'. */
@@ -6117,6 +6117,14 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
                 int port;
                 long lag = 0;
 
+                /* During rdbchannel replication, replica opens two connections.
+                 * These are distinct slaves in server.slaves list from master
+                 * POV. We don't want to list these separately. If a rdbchannel
+                 * replica has an associated main-channel replica in
+                 * server.slaves list, we'll list main channel replica only. */
+                if (replicationCheckHasMainChannel(slave))
+                    continue;
+
                 if (!slaveip) {
                     if (connAddrPeerName(slave->conn,ip,sizeof(ip),&port) == -1)
                         continue;
@@ -6129,12 +6137,9 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
 
                 info = sdscatprintf(info,
                     "slave%d:ip=%s,port=%d,state=%s,"
-                    "offset=%lld,lag=%ld,type=%s\r\n",
+                    "offset=%lld,lag=%ld\r\n",
                     slaveid,slaveip,slave->slave_listening_port,state,
-                                    slave->repl_ack_off, lag,
-                                    slave->flags & CLIENT_REPL_RDB_CHANNEL
-                                        ? "rdb-channel" : slave->replstate == SLAVE_STATE_BG_RDB_TRANSFER
-                                                                                ? "main-channel" : "replica");
+                                    slave->repl_ack_off, lag);
                 slaveid++;
             }
         }

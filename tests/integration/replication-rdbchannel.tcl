@@ -260,7 +260,7 @@ start_server {tags {"repl external:skip"}} {
 
             # Wait for replica to establish psync using main channel
             wait_for_condition 500 1000 {
-                [string match "*state=bg_rdb_transfer*type=main-channel*" [s 0 slave1]]
+                [string match "*state=bg_rdb_transfer*" [s 0 slave0]]
             } else {
                 fail "replica didn't start sync"
             }
@@ -833,8 +833,7 @@ start_server {tags {"repl external:skip"}} {
 
             # Wait for sync session to start
             wait_for_condition 500 200 {
-                [string match "*state=wait_bgsave*type=rdb-channel*" [s -1 slave0]] &&
-                [string match "*state=bg_rdb_transfer*type=main-channel*" [s -1 slave1]] &&
+                [string match "*state=bg_rdb_transfer*" [s -1 slave0]] &&
                 [s -1 rdb_bgsave_in_progress] eq 1
             } else {
                 fail "replica didn't start sync session in time"
@@ -863,8 +862,7 @@ start_server {tags {"repl external:skip"}} {
 
             # Replica should retry
             wait_for_condition 500 200 {
-                [string match "*state=wait_bgsave*type=rdb-channel*" [s -1 slave0]] &&
-                [string match "*state=bg_rdb_transfer*type=main-channel*" [s -1 slave1]] &&
+                [string match "*state=bg_rdb_transfer*" [s -1 slave0]] &&
                 [s -1 rdb_bgsave_in_progress] eq 1
             } else {
                 fail "replica didn't retry after connection close"
@@ -893,8 +891,7 @@ start_server {tags {"repl external:skip"}} {
 
             # Replica should retry
             wait_for_condition 500 2000 {
-                [string match "*state=wait_bgsave*type=rdb-channel*" [s -1 slave0]] &&
-                [string match "*state=bg_rdb_transfer*type=main-channel*" [s -1 slave1]] &&
+                [string match "*state=bg_rdb_transfer*" [s -1 slave0]] &&
                 [s -1 rdb_bgsave_in_progress] eq 1
             } else {
                 fail "replica didn't retry after connection close"

@@ -63,14 +63,8 @@ start_server {} {
 
         # Kill replica1, replication_buffer will not become smaller
         catch {$replica1 shutdown nosave}
-        set replica_count 2
-        if {$rdbchannel == "yes"} {
-            # replica3 is connected, replica2 is syncing (has two connections)
-            set replica_count 3
-        }
-
         wait_for_condition 50 100 {
-            [s connected_slaves] eq $replica_count
+            [s connected_slaves] eq {2}
         } else {
             fail "replica doesn't disconnect with master"
         }
@@ -193,13 +187,7 @@ start_server {} {
 
     test "Replication backlog memory will become smaller if disconnecting with replica rdbchannel=$rdbchannel" {
         assert {[s repl_backlog_histlen] > [expr 2*10000*10000]}
-        if {$rdbchannel == "yes"} {
-            # replica1 has one connection
-            # replica2 is syncing (has two connections)
-            assert_equal [s connected_slaves] {3}
-        } else {
-            assert_equal [s connected_slaves] {2}
-        }
+        assert_equal [s connected_slaves] {2}
 
         pause_process $replica2_pid
         r config set client-output-buffer-limit "replica 128k 0 0"
@@ -207,10 +195,11 @@ start_server {} {
         r set key [string repeat A [expr 64*1024]]
         # master will close replica2's connection since replica2's output
         # buffer limit is reached, so there only is replica1.
+        # In case of rdbchannel=yes, main channel will be disconnected only.
         wait_for_condition 100 100 {
             [s connected_slaves] eq {1} ||
             ([s connected_slaves] eq {2} &&
-            [string match {*slave*state=wait_bgsave*type=rdb-channel*} [$master info]])
+            [string match {*slave*state=wait_bgsave*} [$master info]])
         } else {
             fail "master didn't disconnect with replica2"
         }

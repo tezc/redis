@@ -66,6 +66,42 @@ int RDBGeneratedByReplication = 0;
 static rio *diskless_loading_rio = NULL;
 
 /* --------------------------- Utility functions ---------------------------- */
+
+/* Returns 1 if the replica is rdbchannel and there is an associated main
+ * channel slave with that. */
+int replicationCheckHasMainChannel(client *replica) {
+    listNode *ln;
+    listIter li;
+
+    if (!(replica->flags & CLIENT_REPL_RDB_CHANNEL))
+        return 0;
+
+    listRewind(server.slaves,&li);
+    while((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+        if (c->rdb_client_id != 0 && c->rdb_client_id == replica->id)
+            return 1;
+    }
+    return 0;
+}
+
+/* During rdb channel replication, replica opens two connections. From master
+ * POV, these connections are distinct replicas in server.slaves. This function
+ * counts associated replicas as one and returns logical replica count. */
+unsigned long replicationLogicalReplicaCount(void) {
+    unsigned long count = 0;
+    listNode *ln;
+    listIter li;
+
+    listRewind(server.slaves,&li);
+    while ((ln = listNext(&li))) {
+        client *replica = listNodeValue(ln);
+        if (!replicationCheckHasMainChannel(replica))
+            count++;
+    }
+    return count;
+}
+
 static ConnectionType *connTypeOfReplication(void) {
     if (server.tls_replication) {
         return connectionTypeTls();
