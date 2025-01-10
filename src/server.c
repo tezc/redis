@@ -6139,7 +6139,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
                     "slave%d:ip=%s,port=%d,state=%s,"
                     "offset=%lld,lag=%ld\r\n",
                     slaveid,slaveip,slave->slave_listening_port,state,
-                                    slave->repl_ack_off, lag);
+                    slave->repl_ack_off, lag);
                 slaveid++;
             }
         }

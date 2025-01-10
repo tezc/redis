@@ -138,8 +138,9 @@ start_server {tags {"repl external:skip"}} {
         # Reuse this test to verify large key delivery
         $master config set rdbcompression no
         populate 1000 prefix1 10
-        populate 10 prefix2 2000000
-        populate 10 prefix3 1000000
+        populate 5 prefix2 3000000
+        populate 5 prefix3 2000000
+        populate 5 prefix4 1000000
 
         # On master info output, we should see state transition in this order:
         # 1. Replica opens rdbchannel: wait_bgsave
@@ -929,11 +930,7 @@ start_server {tags {"repl external:skip"}} {
 
             set loglines [count_log_lines -1]
 
-            # There will be two client ids for the two channels. We expect first
-            # one to be main-channel and the second one to be rdbchannel as
-            # rdbchannel connection is established later. We kill the other id
-            # in the next test. So, even if the order changes later, we'll be
-            # killing both channels.
+            # Kill rdb channel client
             set id [get_replica_client_id $master yes]
             $master client kill id $id
 
@@ -960,11 +957,7 @@ start_server {tags {"repl external:skip"}} {
         test "Test replica recovers when main channel connection is killed" {
             set loglines [count_log_lines -1]
 
-            # There will be two client ids for the two channels. We expect first
-            # one to be main-channel and the second one to be rdbchannel as
-            # rdbchannel connection is established later. We kill the other id
-            # in the previous test. So, even if the order changes later, we'll
-            # be killing both channels.
+            # Kill main channel client
             set id [get_replica_client_id $master yes]
             $master client kill id $id
 
@@ -1013,7 +1006,6 @@ start_server {tags {"repl external:skip"}} {
             # Just after replica loads RDB, it will stream repl buffer into the
             # db. During streaming, we kill the master connection. Replica
             # will abort streaming and then try another psync with master.
-
             $master config set rdb-key-save-delay 1000
             $master config set repl-rdb-channel yes
             $master config set repl-diskless-sync yes

@@ -3606,7 +3606,7 @@ static int rdbChannelHandleReplconfReply(connection *conn, sds *err) {
 /* Replication: Replica side. */
 static int rdbChannelHandleFullresyncReply(connection *conn, sds *err) {
     long long reploff = 0;
-    uint64_t rdb_client_id = 0;
+    unsigned long long rdb_client_id = 0;
     char replid[CONFIG_RUN_ID_SIZE + 1] = {0};
 
     *err = receiveSynchronousResponse(conn);
@@ -3620,7 +3620,7 @@ static int rdbChannelHandleFullresyncReply(connection *conn, sds *err) {
     }
 
     /* Parse +FULLRESYNC reply */
-    if (sscanf(*err, "+FULLRESYNC %40s %lld %"PRIu64"",
+    if (sscanf(*err, "+FULLRESYNC %40s %lld %llu",
                replid, &reploff, &rdb_client_id) != 3)
     {
         serverLog(LL_WARNING, "Received unexpected psync reply: %s", *err);

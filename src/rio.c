@@ -442,6 +442,7 @@ void rioFreeFd(rio *r) {
  * there is some pending buffer, so this function is also used in order to
  * implement rioConnsetFlush(). */
 static size_t rioConnsetWrite(rio *r, const void *buf, size_t len) {
+    const size_t pre_flush_size = 256 * 1024;
     unsigned char *p = (unsigned char*) buf;
     size_t buflen = len;
     size_t failed = 0; /* number of connections that write() returned error. */
@@ -450,7 +451,7 @@ static size_t rioConnsetWrite(rio *r, const void *buf, size_t len) {
      * it only when it grows. however for larger writes, we prefer to flush
      * any pre-existing buffer, and write the new one directly without reallocs
      * and memory copying. */
-    if (len > PROTO_IOBUF_LEN) {
+    if (len > pre_flush_size) {
         rioConnsetWrite(r, NULL, 0);
     } else {
         if (buf && len) {
@@ -464,13 +465,19 @@ static size_t rioConnsetWrite(rio *r, const void *buf, size_t len) {
     }
 
     while (buflen > 0) {
-        size_t count = buflen < PROTO_IOBUF_LEN ? buflen : PROTO_IOBUF_LEN;
+        /* Write in little chunks so that when there are big writes we
+         * parallelize while the kernel is sending data in background to the
+         * TCP socket. */
+        size_t limit = PROTO_IOBUF_LEN * 2;
+        size_t count = buflen < limit ? buflen : limit;
 
         for (size_t i = 0; i < r->io.connset.n_dst; i++) {
             size_t n_written = 0;
 
-            if (r->io.connset.dst[i].failed != 0)
+            if (r->io.connset.dst[i].failed != 0) {
+                failed++;
                 continue; /* Skip failed connections. */
+            }
 
             do {
                 ssize_t ret;
@@ -488,14 +495,13 @@ static size_t rioConnsetWrite(rio *r, const void *buf, size_t len) {
                         errno = ETIMEDOUT;
 
                     r->io.connset.dst[i].failed = 1;
-                    if (++failed == r->io.connset.n_dst)
-                        return 0; /* All the connections have failed. */
-
                     break;
                 }
                 n_written += ret;
             } while (n_written != count);
         }
+        if (failed == r->io.connset.n_dst)
+            return 0; /* All the connections have failed. */
 
         p += count;
         buflen -= count;
