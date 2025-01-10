@@ -63,7 +63,7 @@ int RDBGeneratedByReplication = 0;
  * yield back to eventloop. If main channel connection detects a network problem
  * we want to abort loading. It calls rioAbort() in this case, so next rioRead()
  * from rdbchannel connection will return error to cancel loading safely. */
-static rio *diskless_loading_rio = NULL;
+static rio *disklessLoadingRio = NULL;
 
 /* --------------------------- Utility functions ---------------------------- */
 
@@ -2266,7 +2266,7 @@ void readSyncBulkPayload(connection *conn) {
             functionsLibCtxClear(functions_lib_ctx);
         }
 
-        diskless_loading_rio = &rdb;
+        disklessLoadingRio = &rdb;
         loadingSetFlags(NULL, server.repl_transfer_size, asyncLoading);
         if (server.repl_diskless_load != REPL_DISKLESS_LOAD_SWAPDB) {
             serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Flushing old data");
@@ -2301,7 +2301,7 @@ void readSyncBulkPayload(connection *conn) {
                 loadingFailed = 1;
             }
         }
-        diskless_loading_rio = NULL;
+        disklessLoadingRio = NULL;
 
         if (loadingFailed) {
             rioFreeConn(&rdb, NULL);
@@ -3411,23 +3411,23 @@ void replicationHandleMasterDisconnection(void) {
  *
  * * Replica state machine *
  * ┌───────────────────┐             Rdb channel sync
- * │RECEIVE_PING_REPLY │          ┌──────────────────────────────────────────────────────────────┐
+ * │REPL_STATE_CONNECT │          ┌──────────────────────────────────────────────────────────────┐
  * └────────┬──────────┘          │     RDB channel state                Main channel state      │
- *          │+PONG                │     ┌────────────────────────────┐   ┌───────────────────┐   │
- * ┌────────▼──────────┐        ┌─┼─────►RDB_CH_SEND_HANDSHAKE       │ ┌─►SEND_HANDSHAKE     │   │
- * │SEND_HANDSHAKE     │        │ │     └────┬───────────────────────┘ │ └──┬────────────────┘   │
+ *          │                     │     ┌────────────────────────────┐   ┌───────────────────┐   │
+ * ┌───────────────────┐        ┌─┼─────►RDB_CH_SEND_HANDSHAKE       │ ┌─►SEND_HANDSHAKE     │   │
+ * │RECEIVE_PING_REPLY │        │ │     └────┬───────────────────────┘ │ └──┬────────────────┘   │
  * └────────┬──────────┘        │ │          │                         │    │REPLCONF set-rdb-client-id <clientid>
- *          │                   │ │  ┌───────▼───────────────────────┐ │ ┌──▼────────────────┐   │
+ *          │ +PONG             │ │  ┌───────▼───────────────────────┐ │ ┌──▼────────────────┐   │
  * ┌────────▼──────────┐        │ │  │ RDB_CH_RECEIVE_AUTH_REPLY     │ │ │RECEIVE_CAPA_REPLY │   │
- * │RECEIVE_AUTH_REPLY │        │ │  └───────┬───────────────────────┘ │ └──┬────────────────┘   │
+ * │SEND_HANDSHAKE     │        │ │  └───────┬───────────────────────┘ │ └──┬────────────────┘   │
  * └────────┬──────────┘        │ │          │+OK                      │    │+OK                 │
  *          │+OK                │ │  ┌───────▼───────────────────────┐ │ ┌──▼────────────────┐   │
  * ┌────────▼──────────┐        │ │  │ RDB_CH_RECEIVE_REPLCONF_REPLY │ │ │SEND_PSYNC         │   │
- * │RECEIVE_PORT_REPLY │        │ │  └───────┬───────────────────────┘ │ └──┬────────────────┘   │
+ * │RECEIVE_AUTH_REPLY │        │ │  └───────┬───────────────────────┘ │ └──┬────────────────┘   │
  * └────────┬──────────┘        │ │          │+OK                      │    │PSYNC use snapshot  │
  *          │+OK                │ │  ┌───────▼───────────────────────┐ │    │end-offset provided │
  * ┌────────▼──────────┐        │ │  │ RDB_CH_RECEIVE_FULLRESYNC     │ │    │by the master       │
- * │RECEIVE_IP_REPLY   │        │ │  └───────┬───────────────────────┘ │ ┌──▼────────────────┐   │
+ * │RECEIVE_PORT_REPLY │        │ │  └───────┬───────────────────────┘ │ ┌──▼────────────────┐   │
  * └────────┬──────────┘        │ │          │FULLRESYNC .. <clientid> │ │RECEIVE_PSYNC_REPLY│   │
  *          │+OK                │ │          ├─────────────────────────┘ └──┬────────────────┘   │
  * ┌────────▼──────────┐        │ │          │                              │+CONTINUE           │
@@ -3894,9 +3894,9 @@ static int rdbChannelAbortRdbTransfer(void) {
              * outside loading loop.*/
             serverLog(LL_NOTICE, "Aborting rdb channel sync while loading the RDB.");
 
-            if (diskless_loading_rio)
+            if (disklessLoadingRio)
                 /* Mark rio with abort flag, next rioRead() will return error.*/
-                rioAbort(diskless_loading_rio);
+                rioAbort(disklessLoadingRio);
             else {
                 /* For disk based loading, we can wait until loading is done.
                  * This way, replica will have a chance for a successful psync

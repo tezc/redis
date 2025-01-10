@@ -520,7 +520,7 @@ static size_t rioConnsetRead(rio *r, void *buf, size_t len) {
     return 0; /* Error, this target does not support reading. */
 }
 
-/* Returns read/write position in file. */
+/* Returns the number of sent bytes. */
 static off_t rioConnsetTell(rio *r) {
     return r->io.connset.pos;
 }

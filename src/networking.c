@@ -1543,8 +1543,8 @@ void unlinkClient(client *c) {
         if (server.child_type) {
             /* connShutdown() may access TLS state. If this is a rdbchannel
              * client, bgsave fork is writing to the connection and TLS state in
-             * the main process is stale. To avoid accessing TLS state, calling
-             * shutdown() directly.*/
+             * the main process is stale. SSL_shutdown() involves a handshake,
+             * and it may block the caller when used with stale TLS state.*/
             if (c->flags & CLIENT_REPL_RDB_CHANNEL)
                 shutdown(c->conn->fd, SHUT_RDWR);
             else
