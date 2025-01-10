@@ -123,93 +123,102 @@ start_server {tags {"repl external:skip"}} {
     }
 }
 
-#start_server {tags {"repl external:skip"}} {
-#    set replica [srv 0 client]
-#    set replica_pid [srv 0 pid]
-#
-#    start_server {} {
-#        set master [srv 0 client]
-#        set master_host [srv 0 host]
-#        set master_port [srv 0 port]
-#
-#        $master config set repl-rdb-channel yes
-#        $replica config set repl-rdb-channel yes
-#
-#        # Reuse this test to verify large key delivery
-#        $master config set rdbcompression no
-#        $master config set rdb-key-save-delay 3000
-#        populate 1000 prefix1 10
-#        populate 5 prefix2 3000000
-#        populate 5 prefix3 2000000
-#        populate 5 prefix4 1000000
-#
-#        # On master info output, we should see state transition in this order:
-#        # 1. Replica opens rdbchannel: wait_bgsave
-#        # 2. Replica establishes psync: bg_rdb_transfer
-#        # 3. Sync is completed: online
-#        test "Test replica state should start with wait_bgsave" {
-#            $replica config set key-load-delay 100000
-#            # Pause replica before psync
-#            $replica debug repl-pause before-main-conn-psync
-#            $replica replicaof $master_host $master_port
-#
-#            wait_for_condition 50 200 {
-#                [s 0 rdb_bgsave_in_progress] == 1 &&
-#                [s 0 connected_slaves] == 1 &&
-#                [string match "*wait_bgsave*" [s 0 slave0]]
-#            } else {
-#                fail "replica failed"
-#            }
-#        }
-#
-#        test "Test replica rdbchannel client has SC flag on client list output" {
-#            set input [$master client list type replica]
-#
-#            set trimmed_input [string trimright $input]
-#            if {[string first "\n" $trimmed_input] >= 0} {
-#                error "there are more than one replicas"
-#            }
-#
-#            if {![regexp {flags=SC} $input]} {
-#                error "Flags are not 'SC': $input"
-#            }
-#        }
-#
-#        test "Test replica state advances to bg_rdb_transfer on main channel psync" {
-#            $master set x 1
-#            resume_process $replica_pid
-#
-#            wait_for_condition 50 200 {
-#                [s 0 connected_slaves] == 1 &&
-#                [string match "*bg_rdb_transfer*" [s 0 slave0]]
-#            } else {
-#                fail "replica failed"
-#            }
-#        }
-#
-#        test "Test replica state advances to online when fullsync is completed" {
-#            $replica config set key-load-delay 0
-#
-#            wait_replica_online $master 0 100 1000
-#            wait_for_ofs_sync $master $replica
-#
-#            wait_for_condition 50 200 {
-#                [s 0 rdb_bgsave_in_progress] == 0 &&
-#                [s 0 connected_slaves] == 1 &&
-#                [string match "*online*" [s 0 slave0]]
-#            } else {
-#                fail "replica failed"
-#            }
-#
-#            wait_replica_online $master 0 100 1000
-#            wait_for_ofs_sync $master $replica
-#
-#            # Verify db's are identical
-#            assert_morethan [$master dbsize] 0
-#            assert_equal [$master debug digest] [$replica debug digest]
-#        }
-#    }
-#}
+start_server {tags {"repl external:skip"}} {
+    set replica [srv 0 client]
+    set replica_pid [srv 0 pid]
+
+    start_server {} {
+        set master [srv 0 client]
+        set master_host [srv 0 host]
+        set master_port [srv 0 port]
+
+        $master config set repl-rdb-channel yes
+        $replica config set repl-rdb-channel yes
+
+        # Reuse this test to verify large key delivery
+        $master config set rdbcompression no
+        $master config set rdb-key-save-delay 3000
+        populate 1000 prefix1 10
+        populate 5 prefix2 3000000
+        populate 5 prefix3 2000000
+        populate 5 prefix4 1000000
+
+        # On master info output, we should see state transition in this order:
+        # 1. Replica opens rdbchannel: wait_bgsave
+        # 2. Replica establishes psync: bg_rdb_transfer
+        # 3. Sync is completed: online
+        test "Test replica state should start with wait_rdb_channel" {
+            $replica config set key-load-delay 100000
+            # Pause replica before psync
+            $replica debug repl-pause before-rdb-channel
+            $replica replicaof $master_host $master_port
+
+            wait_for_condition 50 200 {
+                [s 0 connected_slaves] == 1 &&
+                [string match "*wait_rdb_channel*" [s 0 slave0]]
+            } else {
+                fail "replica failed x[s 0 slave0]x"
+            }
+        }
+
+        test "Test replica state advances to bg_rdb_transfer when rdbchannel connects" {
+            $master set x 1
+            resume_process $replica_pid
+
+            wait_for_condition 50 200 {
+                [s 0 connected_slaves] == 1 &&
+                [s 0 rdb_bgsave_in_progress] == 1 &&
+                [string match "*bg_rdb_transfer*" [s 0 slave0]]
+            } else {
+                fail "replica failed"
+            }
+        }
+
+        test "Test replica rdbchannel client has SC flag on client list output" {
+            set input [$master client list type replica]
+
+            # Trim right whitespaces if any
+            set trimmed_input [string trimright $input]
+
+            # Split the input into lines
+            set lines [split $trimmed_input "\n"]
+
+            # Check if there is more than one line, and take the second line
+            if {[llength $lines] < 2} {
+                error "There is no second line in the input: $input"
+            }
+
+            set second_line [lindex $lines 1]
+
+            # Check if 'flags=SC' exists in the second line
+            if {![regexp {flags=SC} $second_line]} {
+                error "Flags are not 'SC' in the second line: $second_line"
+            }
+        }
+
+        test "Test replica state advances to online when fullsync is completed" {
+            $replica config set key-load-delay 0
+
+            wait_replica_online $master 0 100 1000
+            wait_for_ofs_sync $master $replica
+
+            wait_for_condition 50 200 {
+                [s 0 rdb_bgsave_in_progress] == 0 &&
+                [s 0 connected_slaves] == 1 &&
+                [string match "*online*" [s 0 slave0]]
+            } else {
+                fail "replica failed"
+            }
+
+            wait_replica_online $master 0 100 1000
+            wait_for_ofs_sync $master $replica
+
+            # Verify db's are identical
+            assert_morethan [$master dbsize] 0
+            assert_equal [$master debug digest] [$replica debug digest]
+        }
+    }
+}
 
 start_server {tags {"repl external:skip"}} {
     set replica [srv 0 client]
@@ -261,267 +270,131 @@ start_server {tags {"repl external:skip"}} {
     }
 }
 
-#start_server {tags {"repl external:skip"}} {
-#    set replica [srv 0 client]
-#    set replica_pid [srv 0 pid]
-#
-#    start_server {} {
-#        set master [srv 0 client]
-#        set master_host [srv 0 host]
-#        set master_port [srv 0 port]
-#        set backlog_size [expr {10 ** 5}]
-#
-#        $master config set repl-diskless-sync yes
-#        $master config set repl-rdb-channel yes
-#        $master config set repl-backlog-size $backlog_size
-#        $master config set loglevel debug
-#        $master config set rdb-key-save-delay 200
-#
-#        $replica config set repl-rdb-channel yes
-#        $replica config set loglevel debug
-#
-#        test "Test master backlog can grow beyond its configured limit" {
-#            # Simulate slow consumer. If replica does not consume fast enough,
-#            # master's backlog will grow.
-#
-#            # Populate db with some keys, delivery will take some time.
-#            populate 10000 master 10000
-#
-#            # Pause replica before psync, so replica will not consume backlog
-#            $replica debug repl-pause before-main-conn-psync
-#
-#            # Start write traffic
-#            set load_handle [start_write_load $master_host $master_port 100 "key"]
-#            $replica replicaof $master_host $master_port
-#
-#            # Verify repl backlog can grow
-#            wait_for_condition 1000 20 {
-#                [s 0 mem_total_replication_buffers] > [expr {3 * $backlog_size}]
-#            } else {
-#                fail "Master should allow backlog to grow beyond its limits during replication"
-#            }
-#
-#            # resume replica
-#            resume_process $replica_pid
-#
-#            stop_write_load $load_handle
-#
-#            # Verify recovery. Wait until replica catches up
-#            wait_replica_online $master 0 100 1000
-#            wait_for_ofs_sync $master $replica
-#
-#            # Verify db's are identical
-#            assert_morethan [$master dbsize] 0
-#            assert_equal [$master debug digest] [$replica debug digest]
-#        }
-#   }
-#}
+start_server {tags {"repl external:skip"}} {
+    set replica [srv 0 client]
 
-#start_server {tags {"repl external:skip"}} {
-#    set replica [srv 0 client]
-#
-#    start_server {} {
-#        set master [srv 0 client]
-#        set master_host [srv 0 host]
-#        set master_port [srv 0 port]
-#
-#        $master config set repl-rdb-channel yes
-#        $replica config set repl-rdb-channel yes
-#
-#        test "Test replication stream buffer becomes full on replica" {
-#            # For replication stream accumulation, replica inherits slave output
-#            # buffer limit as the size limit. In this test, we create traffic to
-#            # fill the buffer fully. Once the limit is reached, accumulation
-#            # will stop. This is not a failure scenario though. From that point,
-#            # further accumulation may occur on master side. Replication should
-#            # be completed successfully.
-#
-#            # Create some artificial delay for rdb delivery and load. We'll
-#            # generate some traffic meanwhile to fill replication buffer.
-#            $master config set rdb-key-save-delay 1000
-#            $replica config set key-load-delay 1000
-#            $replica config set client-output-buffer-limit "replica 64kb 64kb 0"
-#            populate 2000 master 1
-#
-#            set prev_sync_full [s 0 sync_full]
-#            $replica replicaof $master_host $master_port
-#
-#            # Wait for replica to establish psync using main channel
-#            wait_for_condition 500 1000 {
-#                [string match "*state=bg_rdb_transfer*" [s 0 slave0]]
-#            } else {
-#                fail "replica didn't start sync"
-#            }
-#
-#            # Create some traffic on replication stream
-#            populate 100 master 100000
-#
-#            # Wait for replica's buffer limit reached
-#            wait_for_log_messages -1 {"*Replication buffer limit has been reached*"} 0 1000 10
-#
-#            # Speed up loading
-#            $replica config set key-load-delay 0
-#
-#            # Wait until sync is successful
-#            wait_for_condition 200 200 {
-#                [status $master master_repl_offset] eq [status $replica master_repl_offset] &&
-#                [status $master master_repl_offset] eq [status $replica slave_repl_offset]
-#            } else {
-#                fail "replica offsets didn't match in time"
-#            }
-#
-#            # Verify sync was not interrupted.
-#            assert_equal [s 0 sync_full] [expr $prev_sync_full + 1]
-#
-#            # Verify db's are identical
-#            assert_morethan [$master dbsize] 0
-#            assert_equal [$master debug digest] [$replica debug digest]
-#        }
-#    }
-#}
+    start_server {} {
+        set master [srv 0 client]
+        set master_host [srv 0 host]
+        set master_port [srv 0 port]
+
+        $master config set repl-rdb-channel yes
+        $replica config set repl-rdb-channel yes
+
+        test "Test replication stream buffer becomes full on replica" {
+            # For replication stream accumulation, replica inherits slave output
+            # buffer limit as the size limit. In this test, we create traffic to
+            # fill the buffer fully. Once the limit is reached, accumulation
+            # will stop. This is not a failure scenario though. From that point,
+            # further accumulation may occur on master side. Replication should
+            # be completed successfully.
+
+            # Create some artificial delay for rdb delivery and load. We'll
+            # generate some traffic meanwhile to fill replication buffer.
+            $master config set rdb-key-save-delay 1000
+            $replica config set key-load-delay 1000
+            $replica config set client-output-buffer-limit "replica 64kb 64kb 0"
+            populate 2000 master 1
+
+            set prev_sync_full [s 0 sync_full]
+            $replica replicaof $master_host $master_port
+
+            # Wait for replica to establish psync using main channel
+            wait_for_condition 500 1000 {
+                [string match "*state=bg_rdb_transfer*" [s 0 slave0]]
+            } else {
+                fail "replica didn't start sync"
+            }
+
+            # Create some traffic on replication stream
+            populate 100 master 100000
+
+            # Wait for replica's buffer limit reached
+            wait_for_log_messages -1 {"*Replication buffer limit has been reached*"} 0 1000 10
+
+            # Speed up loading
+            $replica config set key-load-delay 0
+
+            # Wait until sync is successful
+            wait_for_condition 200 200 {
+                [status $master master_repl_offset] eq [status $replica master_repl_offset] &&
+                [status $master master_repl_offset] eq [status $replica slave_repl_offset]
+            } else {
+                fail "replica offsets didn't match in time"
+            }
+
+            # Verify sync was not interrupted.
+            assert_equal [s 0 sync_full] [expr $prev_sync_full + 1]
+
+            # Verify db's are identical
+            assert_morethan [$master dbsize] 0
+            assert_equal [$master debug digest] [$replica debug digest]
+        }
+    }
+}
 
 
-#start_server {tags {"repl external:skip"}} {
-#    set master [srv 0 client]
-#    set master_host [srv 0 host]
-#    set master_port [srv 0 port]
-#    set master_pid  [srv 0 pid]
-#    set loglines [count_log_lines 0]
-#
-#    $master config set repl-diskless-sync yes
-#    $master config set repl-rdb-channel yes
-#    $master config set repl-backlog-size 1mb
-#    $master config set client-output-buffer-limit "replica 100k 0 0"
-#    $master config set loglevel debug
-#    $master config set repl-diskless-sync-delay 3
-#
-#    start_server {} {
-#        set replica [srv 0 client]
-#        set replica_pid [srv 0 pid]
-#
-#        $replica config set repl-rdb-channel yes
-#        $replica config set loglevel debug
-#        $replica config set repl-timeout 10
-#
-#        test "Test master disconnects replica when output buffer limit is reached (after rdb delivery)" {
-#            # Steps:
-#            #  1. Replica initiates synchronization via RDB channel.
-#            #  2. Master's main process is suspended. RDB is delivered by the fork.
-#            #  3. Replica completes RDB loading, closes RDB channel.
-#            #  4. Replica pauses before establishing psync.
-#            #  5. Master resumes operation.
-#            #  6. As replica hasn't established psync yet, master will accumulate backlog.
-#            #  7. When client output buffer limit is reached, master will disconnect replica.
-#
-#            # Pause master main process after fork
-#            $master debug repl-pause after-fork
-#
-#            $replica replicaof $master_host $master_port
-#            # Wait until replica loads RDB
-#            wait_for_log_messages 0 {"*Done loading RDB*"} 0 1000 10
-#
-#            # At this point rdb is loaded but psync hasn't been established yet.
-#            # Pause the replica so the master main process will wake up while
-#            # the replica is unresponsive. We expect the main process to fill
-#            # the client output buffer and disconnect the replica.
-#            pause_process $replica_pid
-#            resume_process $master_pid
-#
-#            # Disable pause flag
-#            $master debug repl-pause clear
-#
-#            # Generate some traffic for backlog ~2mb
-#            populate 200 master 10000 -1
-#
-#            set res [wait_for_log_messages -1 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 1000 10]
-#            set loglines [lindex $res 1]
-#
-#            # Verify master deletes replica from psync waiting list.
-#            wait_for_condition 50 100 {
-#                [s -1 replicas_waiting_psync] == 0
-#            } else {
-#                fail "Master did not delete replica from psync waiting list"
-#            }
-#
-#            # Resume replica and verify it fails to establish psync.
-#            resume_process $replica_pid
-#            set res [wait_for_log_messages -1 {"*Unable to partial resync with replica * for lack of backlog*"} $loglines 2000 100]
-#            set loglines [lindex $res 1]
-#
-#            # Wait until replica catches up
-#            wait_replica_online $master 0 1000 100
-#        }
-#
-#        test "Test master disconnects replica when output buffer limit is reached (during rdb delivery)" {
-#            # Steps:
-#            #  1. Replica initiates synchronization via RDB channel.
-#            #  2. Master starts delivering RDB.
-#            #  3. Replica pauses before establishing psync.
-#            #  4. Backlog grows on master as replica does not consume it.
-#            #  5. When client output buffer limit is reached, master will disconnect replica.
-#
-#            $replica replicaof no one
-#            $replica debug repl-pause before-main-conn-psync
-#
-#            # Set master with a slow rdb generation, so that we can easily
-#            # intercept loading 10ms per key, with 20000 keys is 200 seconds
-#            $master config set rdb-key-save-delay 10000
-#            populate 20000 master 100
-#
-#            set client_disconnected [s -1 client_output_buffer_limit_disconnections]
-#            $replica replicaof $master_host $master_port
-#
-#            # RDB delivery starts
-#            wait_for_condition 50 100 {
-#                [s -1 rdb_bgsave_in_progress] == 1
-#            } else {
-#                fail "Sync did not start"
-#            }
-#
-#            # Create some traffic on backlog ~2mb
-#            populate 200 master 10000 -1
-#
-#            # Verify master kills replica connection.
-#            wait_for_condition 50 10 {
-#                [s -1 client_output_buffer_limit_disconnections] == $client_disconnected + 1
-#            } else {
-#                fail "Master should disconnect replica"
-#            }
-#            set res [wait_for_log_messages -1 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 1000 10]
-#            set loglines [lindex $res 1]
-#
-#            wait_for_condition 50 100 {
-#                [s -1 replicas_waiting_psync] == 0
-#            } else {
-#                fail "Master did not delete replica from psync waiting list"
-#            }
-#
-#            # Resume replica
-#            resume_process $replica_pid
-#
-#            wait_for_log_messages -1 {"*Unable to partial resync with replica * for lack of backlog*"} $loglines 2000 10
-#
-#            # Speed up replication
-#            $replica debug repl-pause clear
-#            $master config set repl-diskless-sync-delay 0
-#            $master config set rdb-key-save-delay 0
-#        }
-#
-#        test "Test replication recovers after output buffer failures" {
-#            # Verify system is operational
-#            $master set x 1
-#
-#            # Wait until replica catches up
-#            wait_replica_online $master 0 1000 100
-#            wait_for_ofs_sync $master $replica
-#
-#            # Verify db's are identical
-#            assert_morethan [$master dbsize] 0
-#            assert_equal [$replica get x] 1
-#            assert_equal [$master debug digest] [$replica debug digest]
-#        }
-#    }
-#}
+start_server {tags {"repl external:skip"}} {
+    set master [srv 0 client]
+    set master_host [srv 0 host]
+    set master_port [srv 0 port]
+    set master_pid  [srv 0 pid]
+    set loglines [count_log_lines 0]
+
+    $master config set repl-diskless-sync yes
+    $master config set repl-rdb-channel yes
+    $master config set repl-backlog-size 1mb
+    $master config set client-output-buffer-limit "replica 100k 0 0"
+    $master config set loglevel debug
+    $master config set repl-diskless-sync-delay 3
+
+    start_server {} {
+        set replica [srv 0 client]
+        set replica_pid [srv 0 pid]
+
+        $replica config set repl-rdb-channel yes
+        $replica config set loglevel debug
+        $replica config set repl-timeout 10
+        $replica config set key-load-delay 10000
+        $replica config set loading-process-events-interval-bytes 1024
+
+        test "Test master disconnects replica when output buffer limit is reached" {
+            # Pause master main process after fork
+            populate 20000 master 100 -1
+
+            $replica replicaof $master_host $master_port
+            wait_for_condition 50 200 {
+                [s 0 loading] == 1
+            } else {
+                fail "[s 0 loading] sdsdad"
+            }
+
+            # Generate some traffic for backlog ~2mb
+            populate 20 master 1000000 -1
+
+            set res [wait_for_log_messages -1 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 1000 10]
+            set loglines [lindex $res 1]
+            $replica config set key-load-delay 0
+
+            # Wait until replica loads RDB
+            wait_for_log_messages 0 {"*Done loading RDB*"} 0 1000 10
+        }
+
+        test "Test replication recovers after output buffer failures" {
+            # Verify system is operational
+            $master set x 1
+
+            # Wait until replica catches up
+            wait_replica_online $master 0 1000 100
+            wait_for_ofs_sync $master $replica
+
+            # Verify db's are identical
+            assert_morethan [$master dbsize] 0
+            assert_equal [$replica get x] 1
+            assert_equal [$master debug digest] [$replica debug digest]
+        }
+    }
+}
 
 start_server {tags {"repl external:skip"}} {
     set master [srv 0 client]
@@ -627,104 +500,91 @@ start_server {tags {"repl external:skip"}} {
     }
 }
 
-# start_server {tags {"repl external:skip"}} {
-#     set master [srv 0 client]
-#     set master_host [srv 0 host]
-#     set master_port [srv 0 port]
-#
-#     $master config set repl-diskless-sync yes
-#     $master config set repl-rdb-channel yes
-#     $master config set loglevel debug
-#     $master config set rdb-key-save-delay 1000
-#
-#     populate 3000 prefix1 1
-#     populate 100 prefix2 100000
-#
-#     start_server {} {
-#         set replica [srv 0 client]
-#         set replica_pid [srv 0 pid]
-#
-#         $replica config set repl-rdb-channel yes
-#         $replica config set loglevel debug
-#         $replica config set repl-timeout 10
-#
-#         set load_handle [start_write_load $master_host $master_port 100 "key"]
-#
-#         test "Test replica recovers when rdb channel connection is killed" {
-#             $replica replicaof $master_host $master_port
-#
-#             # Wait for sync session to start
-#             wait_for_condition 500 200 {
-#                 [string match "*state=bg_rdb_transfer*" [s -1 slave0]] &&
-#                 [s -1 rdb_bgsave_in_progress] eq 1
-#             } else {
-#                 fail "replica didn't start sync session in time"
-#             }
-#
-#             set loglines [count_log_lines -1]
-#
-#             # Kill rdb channel client
-#             set id [get_replica_client_id $master yes]
-#             $master client kill id $id
-#
-#             # Wait for master to abort the sync
-#             wait_for_condition 500 100 {
-#                 [s -1 replicas_waiting_psync] == 0
-#             } else {
-#                 fail "Master did not delete replica from psync waiting list"
-#             }
-#             wait_for_log_messages -1 {"*Background RDB transfer error*"} $loglines 1000 10
-#
-#             # Verify master rejects set-rdb-client-id after connection is killed
-#             assert_error {*Unrecognized*} {$master replconf set-rdb-client-id $id}
-#
-#             # Replica should retry
-#             wait_for_condition 500 200 {
-#                 [string match "*state=bg_rdb_transfer*" [s -1 slave0]] &&
-#                 [s -1 rdb_bgsave_in_progress] eq 1
-#             } else {
-#                 fail "replica didn't retry after connection close"
-#             }
-#         }
-#
-#         test "Test replica recovers when main channel connection is killed" {
-#             set loglines [count_log_lines -1]
-#
-#             # Kill main channel client
-#             set id [get_replica_client_id $master yes]
-#             $master client kill id $id
-#
-#             # Wait for master to abort the sync
-#             wait_for_condition 50 1000 {
-#                 [s -1 replicas_waiting_psync] == 0
-#             } else {
-#                 fail "replicas_waiting_psync did not become zero"
-#             }
-#
-#             wait_for_log_messages -1 {"*Background RDB transfer error*"} $loglines 1000 20
-#
-#             # Replica should retry
-#             wait_for_condition 500 2000 {
-#                 [string match "*state=bg_rdb_transfer*" [s -1 slave0]] &&
-#                 [s -1 rdb_bgsave_in_progress] eq 1
-#             } else {
-#                 fail "replica didn't retry after connection close"
-#             }
-#         }
-#
-#         stop_write_load $load_handle
-#
-#         test "Test replica recovers connection failures" {
-#             # Wait until replica catches up
-#             wait_replica_online $master 0 1000 100
-#             wait_for_ofs_sync $master $replica
-#
-#             # Verify db's are identical
-#             assert_morethan [$master dbsize] 0
-#             assert_equal [$master debug digest] [$replica debug digest]
-#         }
-#     }
-# }
+start_server {tags {"repl external:skip"}} {
+    set master [srv 0 client]
+    set master_host [srv 0 host]
+    set master_port [srv 0 port]
+
+    $master config set repl-diskless-sync yes
+    $master config set repl-rdb-channel yes
+    $master config set loglevel debug
+    $master config set rdb-key-save-delay 1000
+
+    populate 3000 prefix1 1
+    populate 100 prefix2 100000
+
+    start_server {} {
+        set replica [srv 0 client]
+        set replica_pid [srv 0 pid]
+
+        $replica config set repl-rdb-channel yes
+        $replica config set loglevel debug
+        $replica config set repl-timeout 10
+
+        set load_handle [start_write_load $master_host $master_port 100 "key"]
+
+        test "Test replica recovers when rdb channel connection is killed" {
+            $replica replicaof $master_host $master_port
+
+            # Wait for sync session to start
+            wait_for_condition 500 200 {
+                [string match "*state=bg_rdb_transfer*" [s -1 slave0]] &&
+                [s -1 rdb_bgsave_in_progress] eq 1
+            } else {
+                fail "replica didn't start sync session in time"
+            }
+
+            set loglines [count_log_lines -1]
+
+            # Kill rdb channel client
+            set id [get_replica_client_id $master yes]
+            $master client kill id $id
+
+            wait_for_log_messages -1 {"*Background RDB transfer error*"} $loglines 1000 10
+
+            # Verify master rejects set-rdb-client-id after connection is killed
+            assert_error {*Unrecognized*} {$master replconf set-rdb-client-id $id}
+
+            # Replica should retry
+            wait_for_condition 500 200 {
+                [string match "*state=bg_rdb_transfer*" [s -1 slave0]] &&
+                [s -1 rdb_bgsave_in_progress] eq 1
+            } else {
+                fail "replica didn't retry after connection close"
+            }
+        }
+
+        test "Test replica recovers when main channel connection is killed" {
+            set loglines [count_log_lines -1]
+
+            # Kill main channel client
+            set id [get_replica_client_id $master yes]
+            $master client kill id $id
+
+            wait_for_log_messages -1 {"*Background RDB transfer error*"} $loglines 1000 20
+
+            # Replica should retry
+            wait_for_condition 500 2000 {
+                [string match "*state=bg_rdb_transfer*" [s -1 slave0]] &&
+                [s -1 rdb_bgsave_in_progress] eq 1
+            } else {
+                fail "replica didn't retry after connection close"
+            }
+        }
+
+        stop_write_load $load_handle
+
+        test "Test replica recovers connection failures" {
+            # Wait until replica catches up
+            wait_replica_online $master 0 1000 100
+            wait_for_ofs_sync $master $replica
+
+            # Verify db's are identical
+            assert_morethan [$master dbsize] 0
+            assert_equal [$master debug digest] [$replica debug digest]
+        }
+    }
+}
 
 start_server {tags {"repl external:skip"}} {
     set replica [srv 0 client]

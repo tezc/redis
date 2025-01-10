@@ -491,7 +491,8 @@ typedef enum {
 /* Replication debug flags for testing. */
 #define REPL_DEBUG_PAUSE_NONE             (1 << 0)
 #define REPL_DEBUG_AFTER_FORK             (1 << 1)
-#define REPL_DEBUG_ON_STREAMING_REPL_BUF  (1 << 2)
+#define REPL_DEBUG_BEFORE_RDB_CHANNEL      (1 << 2)
+#define REPL_DEBUG_ON_STREAMING_REPL_BUF  (1 << 3)
 
 
 /* The state of an in progress coordinated failover */
@@ -512,7 +513,7 @@ typedef enum {
 #define SLAVE_STATE_ONLINE 9 /* RDB file transmitted, sending just updates. */
 #define SLAVE_STATE_RDB_TRANSMITTED 10 /* RDB file transmitted - This state is used only for
                                         * a replica that only wants RDB without replication buffer  */
-#define SLAVE_STATE_WAITING_RDB_CHANNEL 11
+#define SLAVE_STATE_WAIT_RDB_CHANNEL 11
 #define SLAVE_STATE_BG_RDB_TRANSFER 12 /* Main channel of a replica which uses rdb channel replication.
                                         * Sending RDB file and replication stream in parallel. */
 
@@ -540,9 +541,6 @@ typedef enum {
 /* In order to quickly find the requested offset for PSYNC requests,
  * we index some nodes in the replication buffer linked list into a rax. */
 #define REPL_BACKLOG_INDEX_PER_BLOCKS 64
-
-/* Grace period in seconds for replica main channel to establish psync. */
-#define REPL_DELAY_RDB_CLIENT_FREE 60
 
 /* List related stuff */
 #define LIST_HEAD 0
@@ -1306,7 +1304,6 @@ typedef struct client {
     int slave_capa;         /* Slave capabilities: SLAVE_CAPA_* bitwise OR. */
     int slave_req;          /* Slave requirements: SLAVE_REQ_* */
     uint64_t main_channel_client_id; /* The client id of this replica's rdb connection */
-    time_t rdb_client_disconnect_time; /* Time of the first freeClient call on this client. Used for delaying free. */
     multiState mstate;      /* MULTI/EXEC state */
     blockingState bstate;     /* blocking state */
     long long woff;         /* Last write global replication offset. */
@@ -2002,8 +1999,6 @@ struct redisServer {
                                          * delay (start sooner if they all connect). */
     int repl_rdb_channel;           /* Config used to determine if the replica should
                                      * use rdb channel replication for full syncs. */
-    int repl_delay_rdb_client_free; /* Grace period in seconds for replica main channel
-                                      * to establish psync. */
     int repl_debug_pause;           /* Debug config to force the main process to pause. */
     size_t repl_buffer_mem;         /* The memory of replication buffer. */
     list *repl_buffer_blocks;       /* Replication buffers blocks list
@@ -2019,7 +2014,6 @@ struct redisServer {
     int repl_syncio_timeout; /* Timeout for synchronous I/O calls */
     int repl_state;          /* Replication status if the instance is a slave */
     int repl_rdb_ch_state; /* State of the replica's rdb channel during rdb channel replication */
-    int repl_loaded_rdb_dbid; /* dbid in the loaded rdb */
     uint64_t repl_loaded_main_ch_client_id; /* dbid in the loaded rdb */
     off_t repl_transfer_size; /* Size of RDB to read from master during sync. */
     off_t repl_transfer_read; /* Amount of RDB read from master during sync. */

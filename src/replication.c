@@ -44,12 +44,12 @@ void replicationSendAck(void);
 int replicaPutOnline(client *slave);
 void replicaStartCommandStream(client *slave);
 int cancelReplicationHandshake(int reconnect);
-static void rdbChannelHandleRdbLoadCompletion(void);
 static void rdbChannelFullSyncWithMaster(connection *conn);
 static client *rdbChannelLookupRdbClient(uint64_t id);
 static int rdbChannelAbortRdbTransfer(void);
 void rdbChannelBufferReplData(connection *conn);
 static void rdbChannelReplDataBufInit(void);
+void rdbChannelSuccess(void);
 
 /* We take a global flag to remember if this instance generated an RDB
  * because of replication, so that we can remove the RDB file in case
@@ -254,7 +254,8 @@ int canFeedReplicaReplBuffer(client *replica) {
     if (replica->flags & CLIENT_REPL_RDBONLY) return 0;
 
     /* Don't feed replicas that are still waiting for BGSAVE to start. */
-    if (replica->replstate == SLAVE_STATE_WAIT_BGSAVE_START) return 0;
+    if (replica->replstate == SLAVE_STATE_WAIT_BGSAVE_START ||
+        replica->replstate == SLAVE_STATE_WAIT_RDB_CHANNEL) return 0;
 
     /* Don't feed replicas that are going to be closed ASAP. */
     if (replica->flags & CLIENT_CLOSE_ASAP) return 0;
@@ -361,6 +362,7 @@ void incrementalTrimReplicationBacklog(size_t max_blocks) {
 
 /* Free replication buffer blocks that are referenced by this client. */
 void freeReplicaReferencedReplBuffer(client *replica) {
+    //raxRemove(server.replicas_waiting_psync, (unsigned char*) &replica->id, sizeof(replica->id), NULL);
     if (replica->ref_repl_buf_node != NULL) {
         /* Decrease the start buffer node reference count. */
         replBufBlock *o = listNodeValue(replica->ref_repl_buf_node);
@@ -769,10 +771,10 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
             client *c = rdbChannelLookupRdbClient(slave->main_channel_client_id);
             if (c) {
                 c->replstate = SLAVE_STATE_BG_RDB_TRANSFER;
-                listAddNodeTail(server.slaves, c);
-                c->flags |= CLIENT_SLAVE;
-                c->repl_ack_time = server.unixtime;
-                c->repl_start_cmd_stream_on_ack = 0;
+                //listAddNodeTail(server.slaves, c);
+                //c->flags |= CLIENT_SLAVE;
+                //c->repl_ack_time = server.unixtime;
+                //c->repl_start_cmd_stream_on_ack = 0;
                 addReplyReplicationBacklog(c, offset + 1);
             }
         }
@@ -1087,7 +1089,27 @@ void syncCommand(client *c) {
             if (master_replid[0] != '?') server.stat_sync_partial_err++;
             if (c->slave_capa & SLAVE_CAPA_RDB_CHANNEL_REPL) {
                 char buf[128];
-                c->replstate = SLAVE_STATE_WAITING_RDB_CHANNEL;
+                c->flags |= CLIENT_SLAVE;
+                c->replstate = SLAVE_STATE_WAIT_RDB_CHANNEL;
+                c->repl_ack_time = server.unixtime;
+                c->repl_start_cmd_stream_on_ack = 0;
+
+                listAddNodeTail(server.slaves, c);
+
+                /* Create the replication backlog if needed. */
+                if (listLength(server.slaves) == 1 && server.repl_backlog == NULL) {
+                    /* When we create the backlog from scratch, we always use a new
+                     * replication ID and clear the ID2, since there is no valid
+                     * past history. */
+                    changeReplicationId();
+                    clearReplicationId2();
+                    createReplicationBacklog();
+                    serverLog(LL_NOTICE,"Replication backlog created, my new "
+                                        "replication IDs are '%s' and '%s'",
+                              server.replid, server.replid2);
+                }
+
+
                 raxInsert(server.replicas_waiting_psync, (unsigned char*)&c->id, sizeof(c->id), c, NULL);
 
                 snprintf(buf,sizeof(buf),"+RDBCHANNELSYNC %llu\r\n", (unsigned long long) c->id);
@@ -1970,26 +1992,6 @@ void disklessLoadDiscardTempDb(redisDb *tempDb) {
     discardTempDb(tempDb);
 }
 
-static void replicationFullSyncCompleted(void) {
-    replicationCreateMasterClient(server.repl_transfer_s,
-                                  server.repl_loaded_rdb_dbid);
-    server.repl_state = REPL_STATE_CONNECTED;
-    server.repl_down_since = 0;
-
-    /* Fire the master link modules event. */
-    moduleFireServerEvent(REDISMODULE_EVENT_MASTER_LINK_CHANGE,
-                          REDISMODULE_SUBEVENT_MASTER_LINK_UP,
-                          NULL);
-
-    serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Finished with success");
-    if (server.supervised_mode == SUPERVISED_SYSTEMD)
-        redisCommunicateSystemd("STATUS=MASTER <-> REPLICA sync: Finished with success. Ready to accept connections in read-write mode.\n");
-
-    /* Send the initial ACK immediately to put this replica in online state. */
-    if (!(server.master->flags & CLIENT_PRE_PSYNC))
-        replicationSendAck();
-}
-
 /* If we know we got an entirely different data set from our master
  * we have no way to incrementally feed our replicas after that.
  * We want our replicas to resync with us as well, if we have any sub-replicas.
@@ -2416,25 +2418,57 @@ void readSyncBulkPayload(connection *conn) {
         server.repl_transfer_tmpfile = NULL;
     }
 
+    /* Final setup of the connected slave <- master link */
+    replicationCreateMasterClient(server.repl_transfer_s,rsi.repl_stream_db);
+    server.repl_state = REPL_STATE_CONNECTED;
+    server.repl_down_since = 0;
+
+    /* Fire the master link modules event. */
+    moduleFireServerEvent(REDISMODULE_EVENT_MASTER_LINK_CHANGE,
+                          REDISMODULE_SUBEVENT_MASTER_LINK_UP,
+                          NULL);
+
     /* After a full resynchronization we use the replication ID and
      * offset of the master. The secondary ID / offset are cleared since
      * we are starting a new history. */
-    memcpy(server.replid, server.master_replid, sizeof(server.replid));
-    server.master_repl_offset = server.master_initial_offset;
+    memcpy(server.replid,server.master->replid,sizeof(server.replid));
+    server.master_repl_offset = server.master->reploff;
     clearReplicationId2();
-    /* Save dbid of the rdb, we'll use it while creating master client. */
-    server.repl_loaded_rdb_dbid = rsi.repl_stream_db;
 
     /* Let's create the replication backlog if needed. Slaves need to
      * accumulate the backlog regardless of the fact they have sub-slaves
      * or not, in order to behave correctly if they are promoted to
      * masters after a failover. */
     if (server.repl_backlog == NULL) createReplicationBacklog();
+    serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Finished with success");
 
-    if (!rdbchannel)
-        replicationFullSyncCompleted();
-    else
-        rdbChannelHandleRdbLoadCompletion();
+    if (server.supervised_mode == SUPERVISED_SYSTEMD) {
+        redisCommunicateSystemd("STATUS=MASTER <-> REPLICA sync: Finished with success. Ready to accept connections in read-write mode.\n");
+    }
+
+    /* Send the initial ACK immediately to put this replica in online state. */
+    if (usemark) replicationSendAck();
+
+    if (rdbchannel) {
+        int close_asap;
+
+        if (server.repl_rdb_transfer_s) {
+            connClose(server.repl_rdb_transfer_s);
+            server.repl_rdb_transfer_s = NULL;
+        }
+        /* At this point, RDB is loaded. If state is REPL_RDB_CH_STATE_CLOSE_ASAP,
+         * it means main channel faced a problem while RDB is being loaded. It
+         * stopped replication stream buffering. It's okay though. We'll stream
+         * whatever we have into the db, then replica will try psync from the
+         * index that it has. */
+        close_asap = (server.repl_rdb_ch_state == REPL_RDB_CH_STATE_CLOSE_ASAP);
+        /* Finalize fullsync */
+        rdbChannelSuccess();
+
+        /* Main channel connection was broken. Let's trigger a psync with master. */
+        if (close_asap && server.master)
+            freeClientAsync(server.master);
+    }
 
     /* Restart the AOF subsystem now that we finished the sync. This
      * will trigger an AOF rewrite, and when done will start appending
@@ -3497,6 +3531,9 @@ static int rdbChannelHandleReplconfReply(connection *conn, sds *err) {
     }
     sdsfree(*err);
 
+    if (server.repl_debug_pause & REPL_DEBUG_BEFORE_RDB_CHANNEL)
+        debugPauseProcess();
+
     /* Request rdb from master */
     *err = sendCommand(conn, "PSYNC", "?", "-1", NULL);
     if (*err) {
@@ -3832,8 +3869,6 @@ static int rdbChannelAbortRdbTransfer(void) {
 /* Replication: Replica side. After loading the rdb, create a master client and
  * stream replication buffer to the db. */
 void rdbChannelSuccess(void) {
-    replicationFullSyncCompleted();
-
     serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Starting to stream replication buffer into the db"
                          " (%zu bytes).", server.repl_pending_data.used);
     if (rdbChannelStreamReplDataToDb(server.master) == C_ERR) {
@@ -3848,31 +3883,6 @@ void rdbChannelSuccess(void) {
 
     rdbChannelReplDataBufFree();
     server.repl_rdb_ch_state = REPL_RDB_CH_STATE_NONE;
-}
-
-/* Replication: Replica side.
- * RDB channel done loading the RDB. Check whether the main channel has
- * completed its part and act accordingly. */
-void rdbChannelHandleRdbLoadCompletion(void) {
-    int close_asap;
-
-    if (server.repl_rdb_transfer_s) {
-        connClose(server.repl_rdb_transfer_s);
-        server.repl_rdb_transfer_s = NULL;
-    }
-
-    /* At this point, RDB is loaded. If state is REPL_RDB_CH_STATE_CLOSE_ASAP,
-     * it means main channel faced a problem while RDB is being loaded. It
-     * stopped replication stream buffering. It's okay though. We'll stream
-     * whatever we have into the db, then replica will try psync from the index
-     * that it has. */
-    close_asap = (server.repl_rdb_ch_state == REPL_RDB_CH_STATE_CLOSE_ASAP);
-    /* Finalize fullsync */
-    rdbChannelSuccess();
-
-    /* Main channel connection was broken. Let's trigger a psync with master. */
-    if (close_asap && server.master)
-        freeClientAsync(server.master);
 }
 
 void replicaofCommand(client *c) {

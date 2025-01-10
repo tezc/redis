@@ -185,7 +185,6 @@ client *createClient(connection *conn) {
     c->slave_capa = SLAVE_CAPA_NONE;
     c->slave_req = SLAVE_REQ_NONE;
     c->main_channel_client_id = 0;
-    c->rdb_client_disconnect_time = 0;
     c->reply = listCreate();
     c->deferred_reply_errors = NULL;
     c->reply_bytes = 0;
@@ -1661,7 +1660,7 @@ void freeClient(client *c) {
 
     /* If a client is protected, yet we need to free it right now, make sure
      * to at least use asynchronous freeing. */
-    if (c->flags & (CLIENT_PROTECTED)) {
+    if (c->flags & CLIENT_PROTECTED) {
         freeClientAsync(c);
         return;
     }
@@ -1853,8 +1852,7 @@ void freeClientAsync(client *c) {
     c->flags |= CLIENT_CLOSE_ASAP;
     /* Replicas that was marked as CLIENT_CLOSE_ASAP should not keep the
      * replication backlog from been trimmed. */
-    if (c->flags & CLIENT_SLAVE)
-        freeReplicaReferencedReplBuffer(c);
+    if (c->flags & CLIENT_SLAVE) freeReplicaReferencedReplBuffer(c);
     listAddNodeTail(server.clients_to_close,c);
 }
 
@@ -4232,8 +4230,7 @@ int closeClientOnOutputBufferLimitReached(client *c, int async) {
     /* Note that c->reply_bytes is irrelevant for replica clients
      * (they use the global repl buffers). */
     if ((c->reply_bytes == 0 && !clientTypeIsSlave(c)) ||
-        c->flags & CLIENT_CLOSE_ASAP)
-           return 0;
+        c->flags & CLIENT_CLOSE_ASAP) return 0;
     if (checkClientOutputBufferLimits(c)) {
         sds client = catClientInfoString(sdsempty(),c);
 
