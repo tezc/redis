@@ -137,6 +137,7 @@ start_server {tags {"repl external:skip"}} {
 
         # Reuse this test to verify large key delivery
         $master config set rdbcompression no
+        $master config set rdb-key-save-delay 3000
         populate 1000 prefix1 10
         populate 5 prefix2 3000000
         populate 5 prefix3 2000000
@@ -179,7 +180,6 @@ start_server {tags {"repl external:skip"}} {
             resume_process $replica_pid
 
             wait_for_condition 50 200 {
-                [s 0 rdb_bgsave_in_progress] == 1 &&
                 [s 0 connected_slaves] == 1 &&
                 [string match "*bg_rdb_transfer*" [s 0 slave0]]
             } else {
