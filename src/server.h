@@ -491,8 +491,7 @@ typedef enum {
 /* Replication debug flags for testing. */
 #define REPL_DEBUG_PAUSE_NONE             (1 << 0)
 #define REPL_DEBUG_AFTER_FORK             (1 << 1)
-#define REPL_DEBUG_BEFORE_MAIN_CONN_PSYNC (1 << 2)
-#define REPL_DEBUG_ON_STREAMING_REPL_BUF  (1 << 3)
+#define REPL_DEBUG_ON_STREAMING_REPL_BUF  (1 << 2)
 
 
 /* The state of an in progress coordinated failover */

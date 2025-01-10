@@ -44,7 +44,6 @@ void replicationSendAck(void);
 int replicaPutOnline(client *slave);
 void replicaStartCommandStream(client *slave);
 int cancelReplicationHandshake(int reconnect);
-static void rdbChannelAttachToBacklog(client *slave);
 static void rdbChannelHandleRdbLoadCompletion(void);
 static void rdbChannelFullSyncWithMaster(connection *conn);
 static client *rdbChannelLookupRdbClient(uint64_t id);
@@ -1087,12 +1086,11 @@ void syncCommand(client *c) {
              * resync. */
             if (master_replid[0] != '?') server.stat_sync_partial_err++;
             if (c->slave_capa & SLAVE_CAPA_RDB_CHANNEL_REPL) {
-                int len;
                 char buf[128];
                 c->replstate = SLAVE_STATE_WAITING_RDB_CHANNEL;
-                raxInsert(server.replicas_waiting_psync, &c->id, sizeof(c->id), c, NULL);
+                raxInsert(server.replicas_waiting_psync, (unsigned char*)&c->id, sizeof(c->id), c, NULL);
 
-                len = snprintf(buf,sizeof(buf),"+RDBCHANNELSYNC %llu\r\n", c->id);
+                snprintf(buf,sizeof(buf),"+RDBCHANNELSYNC %llu\r\n", (unsigned long long) c->id);
 
                 serverLog(LL_NOTICE,
                           "Replica %s is capable of rdb channel synchronization, and partial sync isn't possible. "
