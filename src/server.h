@@ -396,15 +396,6 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_MODULE_PREVENT_REPL_PROP (1ULL<<49) /* Module client do not want to propagate to replica */
 #define CLIENT_REPROCESSING_COMMAND (1ULL<<50) /* The client is re-processing the command. */
 #define CLIENT_REPL_RDB_CHANNEL (1ULL<<51)      /* Rdb channel replication sync: track a connection which is used for rdb delivery */
-#define CLIENT_PROTECTED_RDB_CHANNEL (1ULL<<52) /* Rdb channel replication sync: Protects the RDB client from premature
-                                                 * release during full sync. This flag is used to ensure that the RDB client, which
-                                                 * references the first replication data block required by the replica, is not
-                                                 * released prematurely. Protecting the client is crucial for prevention of
-                                                 * synchronization failures. If the RDB client is released before the replica initiates
-                                                 * PSYNC, the master will reduce the reference count (o->refcount) of the block needed
-                                                 * by the replica. This could potentially lead to the removal of the required data block,
-                                                 * resulting in synchronization failures.By using this flag, we ensure that the RDB client
-                                                 * remains intact until the replica has successfully initiated PSYNC. */
 
 /* Any flag that does not let optimize FLUSH SYNC to run it in bg as blocking client ASYNC */
 #define CLIENT_AVOID_BLOCKING_ASYNC_FLUSH (CLIENT_DENY_BLOCKING|CLIENT_MULTI|CLIENT_LUA_DEBUG|CLIENT_LUA_DEBUG_SYNC|CLIENT_MODULE)
@@ -522,7 +513,8 @@ typedef enum {
 #define SLAVE_STATE_ONLINE 9 /* RDB file transmitted, sending just updates. */
 #define SLAVE_STATE_RDB_TRANSMITTED 10 /* RDB file transmitted - This state is used only for
                                         * a replica that only wants RDB without replication buffer  */
-#define SLAVE_STATE_BG_RDB_TRANSFER 11 /* Main channel of a replica which uses rdb channel replication.
+#define SLAVE_STATE_WAITING_RDB_CHANNEL 11
+#define SLAVE_STATE_BG_RDB_TRANSFER 12 /* Main channel of a replica which uses rdb channel replication.
                                         * Sending RDB file and replication stream in parallel. */
 
 /* Slave capabilities. */
@@ -1314,7 +1306,7 @@ typedef struct client {
     char *slave_addr;       /* Optionally given by REPLCONF ip-address */
     int slave_capa;         /* Slave capabilities: SLAVE_CAPA_* bitwise OR. */
     int slave_req;          /* Slave requirements: SLAVE_REQ_* */
-    uint64_t rdb_client_id; /* The client id of this replica's rdb connection */
+    uint64_t main_channel_client_id; /* The client id of this replica's rdb connection */
     time_t rdb_client_disconnect_time; /* Time of the first freeClient call on this client. Used for delaying free. */
     multiState mstate;      /* MULTI/EXEC state */
     blockingState bstate;     /* blocking state */
@@ -2029,7 +2021,7 @@ struct redisServer {
     int repl_state;          /* Replication status if the instance is a slave */
     int repl_rdb_ch_state; /* State of the replica's rdb channel during rdb channel replication */
     int repl_loaded_rdb_dbid; /* dbid in the loaded rdb */
-    uint64_t repl_rdbchannel_client_id; /* rdbchannel client id as defined on master side */
+    uint64_t repl_loaded_main_ch_client_id; /* dbid in the loaded rdb */
     off_t repl_transfer_size; /* Size of RDB to read from master during sync. */
     off_t repl_transfer_read; /* Amount of RDB read from master during sync. */
     off_t repl_transfer_last_fsync_off; /* Offset when we fsync-ed last time. */

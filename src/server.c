@@ -2181,7 +2181,6 @@ void initServerConfig(void) {
     server.master_initial_offset = -1;
     server.repl_state = REPL_STATE_NONE;
     server.repl_rdb_ch_state = REPL_RDB_CH_STATE_NONE;
-    server.repl_rdbchannel_client_id = 0;
     server.repl_loaded_rdb_dbid = -1;
     server.repl_pending_data = (struct replDataBuf) {0};
     server.repl_transfer_tmpfile = NULL;
@@ -5466,6 +5465,8 @@ const char *replstateToString(int replstate) {
         return "wait_bgsave";
     case SLAVE_STATE_BG_RDB_TRANSFER:
         return "bg_rdb_transfer";
+    case SLAVE_STATE_WAITING_RDB_CHANNEL:
+        return "waiting_rdb_channel";
     case SLAVE_STATE_SEND_BULK:
         return "send_bulk";
     case SLAVE_STATE_ONLINE:

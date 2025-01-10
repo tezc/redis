@@ -184,7 +184,7 @@ client *createClient(connection *conn) {
     c->slave_addr = NULL;
     c->slave_capa = SLAVE_CAPA_NONE;
     c->slave_req = SLAVE_REQ_NONE;
-    c->rdb_client_id = 0;
+    c->main_channel_client_id = 0;
     c->rdb_client_disconnect_time = 0;
     c->reply = listCreate();
     c->deferred_reply_errors = NULL;
@@ -1661,7 +1661,7 @@ void freeClient(client *c) {
 
     /* If a client is protected, yet we need to free it right now, make sure
      * to at least use asynchronous freeing. */
-    if (c->flags & (CLIENT_PROTECTED | CLIENT_PROTECTED_RDB_CHANNEL)) {
+    if (c->flags & (CLIENT_PROTECTED)) {
         freeClientAsync(c);
         return;
     }
@@ -1853,7 +1853,7 @@ void freeClientAsync(client *c) {
     c->flags |= CLIENT_CLOSE_ASAP;
     /* Replicas that was marked as CLIENT_CLOSE_ASAP should not keep the
      * replication backlog from been trimmed. */
-    if (c->flags & CLIENT_SLAVE && !(c->flags & CLIENT_PROTECTED_RDB_CHANNEL))
+    if (c->flags & CLIENT_SLAVE)
         freeReplicaReferencedReplBuffer(c);
     listAddNodeTail(server.clients_to_close,c);
 }
@@ -1912,32 +1912,6 @@ int freeClientsInAsyncFreeQueue(void) {
     listRewind(server.clients_to_close,&li);
     while ((ln = listNext(&li)) != NULL) {
         client *c = listNodeValue(ln);
-
-        if (c->flags & CLIENT_PROTECTED_RDB_CHANNEL) {
-            /* Check if it's safe to remove RDB connection protection during
-             * synchronization. The master gives a grace period before freeing
-             * this client because it serves as a reference to the first
-             * required replication data block for this replica */
-            if (!c->rdb_client_disconnect_time) {
-                if (c->conn)
-                    connSetReadHandler(c->conn, NULL);
-                c->rdb_client_disconnect_time = server.unixtime;
-                serverLog(LL_VERBOSE, "Postponed RDB client id=%"PRIu64" (%s) free for %d seconds",
-                          c->id, replicationGetSlaveName(c),
-                          server.repl_delay_rdb_client_free);
-            }
-
-            time_t time_passed = server.unixtime - c->rdb_client_disconnect_time;
-            if (time_passed <= server.repl_delay_rdb_client_free)
-                continue;
-
-            serverLog(LL_NOTICE,
-                      "Replica main channel failed to establish PSYNC within the grace period (%lld seconds). "
-                      "Freeing RDB client: %"PRIu64".",
-                      (long long int) time_passed, c->id);
-            c->flags &= ~CLIENT_PROTECTED_RDB_CHANNEL;
-        }
-
         if (c->flags & CLIENT_PROTECTED) continue;
 
         c->flags &= ~CLIENT_CLOSE_ASAP;
@@ -4258,13 +4232,12 @@ int closeClientOnOutputBufferLimitReached(client *c, int async) {
     /* Note that c->reply_bytes is irrelevant for replica clients
      * (they use the global repl buffers). */
     if ((c->reply_bytes == 0 && !clientTypeIsSlave(c)) ||
-        (c->flags & CLIENT_CLOSE_ASAP && !(c->flags & CLIENT_PROTECTED_RDB_CHANNEL)))
+        c->flags & CLIENT_CLOSE_ASAP)
            return 0;
     if (checkClientOutputBufferLimits(c)) {
         sds client = catClientInfoString(sdsempty(),c);
 
-        if (async || c->flags & CLIENT_PROTECTED_RDB_CHANNEL) {
-            c->flags &= ~CLIENT_PROTECTED_RDB_CHANNEL;
+        if (async) {
             freeClientAsync(c);
             serverLog(LL_WARNING,
                       "Client %s scheduled to be closed ASAP for overcoming of output buffer limits.",

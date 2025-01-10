@@ -45,12 +45,12 @@ int replicaPutOnline(client *slave);
 void replicaStartCommandStream(client *slave);
 int cancelReplicationHandshake(int reconnect);
 static void rdbChannelAttachToBacklog(client *slave);
-static void rdbChannelAttachReplicasToBacklog(void);
-static void rdbChannelSetupMainConnForPsync(connection *conn);
 static void rdbChannelHandleRdbLoadCompletion(void);
 static void rdbChannelFullSyncWithMaster(connection *conn);
 static client *rdbChannelLookupRdbClient(uint64_t id);
 static int rdbChannelAbortRdbTransfer(void);
+void rdbChannelBufferReplData(connection *conn);
+static void rdbChannelReplDataBufInit(void);
 
 /* We take a global flag to remember if this instance generated an RDB
  * because of replication, so that we can remove the RDB file in case
@@ -79,7 +79,7 @@ int replicationCheckHasMainChannel(client *replica) {
     listRewind(server.slaves,&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
-        if (c->rdb_client_id != 0 && c->rdb_client_id == replica->id)
+        if (replica->main_channel_client_id && replica->main_channel_client_id == c->id)
             return 1;
     }
     return 0;
@@ -371,17 +371,6 @@ void freeReplicaReferencedReplBuffer(client *replica) {
     }
     replica->ref_repl_buf_node = NULL;
     replica->ref_block_pos = 0;
-
-    if (replica->flags & CLIENT_REPL_RDB_CHANNEL) {
-        if (raxRemove(server.replicas_waiting_psync,
-                      (unsigned char *)&replica->id, sizeof(replica->id), NULL))
-        {
-            serverLog(LL_DEBUG, "Removed replica %s with client_id=%"PRIu64""
-                                " from psync waiting list.",
-                                replicationGetSlaveName(replica), replica->id);
-        }
-        replica->flags &= ~CLIENT_PROTECTED_RDB_CHANNEL;
-    }
 }
 
 /* Append bytes into the global replication buffer list, replication backlog and
@@ -400,7 +389,6 @@ void feedReplicationBuffer(char *s, size_t len) {
         int add_new_block = 0; /* Create new block if current block is total used. */
         listNode *ln = listLast(server.repl_buffer_blocks);
         replBufBlock *tail = ln ? listNodeValue(ln) : NULL;
-        int empty_backlog = (tail == NULL);
 
         /* Append to tail string when possible. */
         if (tail && tail->size > tail->used) {
@@ -448,18 +436,13 @@ void feedReplicationBuffer(char *s, size_t len) {
             server.master_repl_offset += copy;
             server.repl_backlog->histlen += copy;
         }
-        if (empty_backlog && raxSize(server.replicas_waiting_psync) > 0) {
-            /* This is the first block. Attach replicas to it. */
-            rdbChannelAttachReplicasToBacklog();
-        }
 
         /* For output buffer of replicas. */
         listIter li;
         listRewind(server.slaves,&li);
         while((ln = listNext(&li))) {
             client *slave = ln->value;
-            if (!canFeedReplicaReplBuffer(slave) && !(slave->flags & CLIENT_PROTECTED_RDB_CHANNEL))
-                continue;
+            if (!canFeedReplicaReplBuffer(slave)) continue;
 
             /* Update shared replication buffer start position. */
             if (slave->ref_repl_buf_node == NULL) {
@@ -770,7 +753,7 @@ long long getPsyncInitialOffset(void) {
  * BGSAVE for replication was started, or when there is one already in
  * progress that we attached our slave to. */
 int replicationSetupSlaveForFullResync(client *slave, long long offset) {
-    char buf[256];
+    char buf[128];
     int buflen;
 
     slave->psync_initial_offset = offset;
@@ -784,15 +767,18 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
      * the old SYNC command. */
     if (!(slave->flags & CLIENT_PRE_PSYNC)) {
         if (slave->slave_req & SLAVE_REQ_RDB_CHANNEL) {
-            rdbChannelAttachToBacklog(slave);
-            buflen = snprintf(buf,sizeof(buf),"+FULLRESYNC %s %lld %llu\r\n",
-                              server.replid,offset,
-                              (unsigned long long) slave->id);
-        } else {
-            buflen = snprintf(buf,sizeof(buf),"+FULLRESYNC %s %lld\r\n",
-                              server.replid,offset);
+            client *c = rdbChannelLookupRdbClient(slave->main_channel_client_id);
+            if (c) {
+                c->replstate = SLAVE_STATE_BG_RDB_TRANSFER;
+                listAddNodeTail(server.slaves, c);
+                c->flags |= CLIENT_SLAVE;
+                c->repl_ack_time = server.unixtime;
+                c->repl_start_cmd_stream_on_ack = 0;
+                addReplyReplicationBacklog(c, offset + 1);
+            }
         }
-
+        buflen = snprintf(buf,sizeof(buf),"+FULLRESYNC %s %lld\r\n",
+                          server.replid,offset);
         if (connWrite(slave->conn,buf,buflen) != buflen) {
             freeClientAsync(slave);
             return C_ERR;
@@ -863,15 +849,9 @@ int masterTryPartialResynchronization(client *c, long long psync_offset) {
      * 2) Inform the client we can continue with +CONTINUE
      * 3) Send the backlog data (from the offset to the end) to the slave. */
     c->flags |= CLIENT_SLAVE;
+    c->replstate = SLAVE_STATE_ONLINE;
     c->repl_ack_time = server.unixtime;
     c->repl_start_cmd_stream_on_ack = 0;
-    /* Rdb channel holds a reference to the backlog to prevent it being freed
-     * until main channel establishes psync. Check if there is an associated
-     * rdb channel with this replica. If so, it means psync from main channel
-     * has been established. After attaching main channel to the backlog, we can
-     * remove the rdb channel reference.*/
-    client *rdb_client = rdbChannelLookupRdbClient(c->rdb_client_id);
-    c->replstate = rdb_client ? SLAVE_STATE_BG_RDB_TRANSFER: SLAVE_STATE_ONLINE;
     listAddNodeTail(server.slaves,c);
     /* We can't use the connection buffers since they are used to accumulate
      * new commands at this stage. But we are sure the socket send buffer is
@@ -894,16 +874,12 @@ int masterTryPartialResynchronization(client *c, long long psync_offset) {
      * to -1 to force the master to emit SELECT, since the slave already
      * has this state from the previous connection with the master. */
 
-    if (c->replstate == SLAVE_STATE_BG_RDB_TRANSFER) {
-        freeReplicaReferencedReplBuffer(rdb_client);
-    } else {
-        refreshGoodSlavesCount();
+    refreshGoodSlavesCount();
 
-        /* Fire the replica change modules event. */
-        moduleFireServerEvent(REDISMODULE_EVENT_REPLICA_CHANGE,
-                              REDISMODULE_SUBEVENT_REPLICA_CHANGE_ONLINE,
-                              NULL);
-    }
+    /* Fire the replica change modules event. */
+    moduleFireServerEvent(REDISMODULE_EVENT_REPLICA_CHANGE,
+                          REDISMODULE_SUBEVENT_REPLICA_CHANGE_ONLINE,
+                          NULL);
 
     return C_OK; /* The caller can return, no full resync needed. */
 
@@ -1111,11 +1087,18 @@ void syncCommand(client *c) {
              * resync. */
             if (master_replid[0] != '?') server.stat_sync_partial_err++;
             if (c->slave_capa & SLAVE_CAPA_RDB_CHANNEL_REPL) {
+                int len;
+                char buf[128];
+                c->replstate = SLAVE_STATE_WAITING_RDB_CHANNEL;
+                raxInsert(server.replicas_waiting_psync, &c->id, sizeof(c->id), c, NULL);
+
+                len = snprintf(buf,sizeof(buf),"+RDBCHANNELSYNC %llu\r\n", c->id);
+
                 serverLog(LL_NOTICE,
                           "Replica %s is capable of rdb channel synchronization, and partial sync isn't possible. "
                           "Full sync will continue with dedicated RDB channel.",
                           replicationGetSlaveName(c));
-                const char *buf = "+RDBCHANNELSYNC\r\n";
+
                 if (connWrite(c->conn, buf, strlen(buf)) != (int)strlen(buf))
                     freeClientAsync(c);
 
@@ -1390,17 +1373,17 @@ void replconfCommand(client *c) {
                 c->flags &= ~CLIENT_REPL_RDB_CHANNEL;
                 c->slave_req &= ~SLAVE_REQ_RDB_CHANNEL;
             }
-        } else if (!strcasecmp(c->argv[j]->ptr, "set-rdb-client-id")) {
+        } else if (!strcasecmp(c->argv[j]->ptr, "client-id")) {
             /* REPLCONF set-rdb-client-id <client-id> is used to identify the
              * current replica main channel with existing rdb-connection. */
             long long client_id = 0;
             if (getLongLongFromObjectOrReply(c, c->argv[j + 1], &client_id, NULL) != C_OK)
                 return;
-            if (!rdbChannelLookupRdbClient(client_id)) {
-                addReplyErrorFormat(c, "Unrecognized RDB client id: %lld", client_id);
-                return;
-            }
-            c->rdb_client_id = (uint64_t)client_id;
+            //if (!rdbChannelLookupRdbClient(client_id)) {
+            //    addReplyErrorFormat(c, "Unrecognized RDB client id: %lld", client_id);
+            //    return;
+            //}
+            c->main_channel_client_id = (uint64_t)client_id;
         } else {
             addReplyErrorFormat(c,"Unrecognized REPLCONF option: %s",
                 (char*)c->argv[j]->ptr);
@@ -2627,16 +2610,9 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
          * a FULL resync using the PSYNC command we'll set the offset at the
          * right value, so that this information will be propagated to the
          * client structure representing the master into server.master. */
-        if (server.repl_rdb_ch_state == REPL_RDB_CH_STATE_NONE)
-            server.master_initial_offset = -1;
+        server.master_initial_offset = -1;
 
-        if (server.repl_rdb_ch_state != REPL_RDB_CH_STATE_NONE) {
-            /* Use replid and offset from +FULLRESYNC reply of rdb channel. */
-            psync_replid = server.master_replid;
-            snprintf(psync_offset, sizeof(psync_offset), "%lld", server.master_initial_offset + 1);
-            serverLog(LL_NOTICE, "Trying a partial resynchronization using main channel (request %s:%s).",
-                      psync_replid, psync_offset);
-        } else if (server.cached_master) {
+        if (server.cached_master) {
             psync_replid = server.cached_master->replid;
             snprintf(psync_offset,sizeof(psync_offset),"%lld", server.cached_master->reploff+1);
             serverLog(LL_NOTICE,"Trying a partial resynchronization (request %s:%s).", psync_replid, psync_offset);
@@ -2714,6 +2690,12 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
     }
 
     if (!strncmp(reply, "+RDBCHANNELSYNC", strlen("+RDBCHANNELSYNC"))) {
+        char *client_id = strchr(reply,' ');
+        unsigned long long cid;
+
+        sscanf(client_id, "%llu", &cid);
+        server.repl_loaded_main_ch_client_id = cid;
+
         /* A response of +RDBCHANNELSYNC from the master implies that partial
          * synchronization is not possible and that the master supports full
          * sync using dedicated RDB channel. Full sync will continue that way.*/
@@ -2723,12 +2705,6 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
     }
 
     if (!strncmp(reply,"+CONTINUE",9)) {
-        if (server.repl_rdb_ch_state != REPL_RDB_CH_STATE_NONE) {
-            /* master_replid and master_initial_offset is already set
-             * in rdbChannelHandleFullresyncReply() */
-            sdsfree(reply);
-            return PSYNC_CONTINUE;
-        }
         /* Partial resync was accepted. */
         serverLog(LL_NOTICE,
             "Successful partial resynchronization with master.");
@@ -2804,19 +2780,6 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
     }
     sdsfree(reply);
     return PSYNC_NOT_SUPPORTED;
-}
-
-sds getTryPsyncString(int result) {
-    switch (result) {
-        case PSYNC_WRITE_ERROR: return sdsnew("PSYNC_WRITE_ERROR");
-        case PSYNC_WAIT_REPLY: return sdsnew("PSYNC_WAIT_REPLY");
-        case PSYNC_CONTINUE: return sdsnew("PSYNC_CONTINUE");
-        case PSYNC_FULLRESYNC: return sdsnew("PSYNC_FULLRESYNC");
-        case PSYNC_NOT_SUPPORTED: return sdsnew("PSYNC_NOT_SUPPORTED");
-        case PSYNC_TRY_LATER: return sdsnew("PSYNC_TRY_LATER");
-        case PSYNC_FULLRESYNC_RDBCHANNEL: return sdsnew("PSYNC_FULLRESYNC_RDBCHANNEL");
-        default: return sdsnew("Unknown result");
-    }
 }
 
 /* This handler fires when the non blocking connect was able to
@@ -3455,73 +3418,12 @@ void replicationHandleMasterDisconnection(void) {
  *   └─────────────────────────────────────────────────┘
  */
 
-/* On the master side, this function is called for rdb channel replica just
- * before forking for rdb delivery. It attaches rdbchannel client to the backlog
- * to prevent it being freed until main channel establishes psync for the
- * current offset.
- *
- * Association occurs in two forms:
- * 1. If there's an existing buffer block at fork time, the replica is
- *    attached to the tail.
- * 2. If there's no tail, the replica is attached when a new buffer block is
- *    created (see rdbChannelAttachReplicasToBacklog())
- * The replica RDB client ID is used as a unique key for this association.
- * If a client output buffer overrun occurs, the association is deleted and the
- * RDB connection is dropped. Otherwise, on a successful run, rdbchannel replica
- * association will be deleted in masterTryPartialResynchronization() once
- * main channel establishes psync. */
-static void rdbChannelAttachToBacklog(client *slave) {
-    listNode *ln = listLast(server.repl_buffer_blocks);
-    replBufBlock *tail = ln ? listNodeValue(ln) : NULL;
-
-    if (tail)
-        tail->refcount++;
-
-    /* Prevent rdb client from being freed before psync is established. */
-    slave->flags |= CLIENT_PROTECTED_RDB_CHANNEL;
-    slave->ref_repl_buf_node = tail ? ln : NULL;
-    raxInsert(server.replicas_waiting_psync,
-              (unsigned char *)&slave->id, sizeof(slave->id), slave, NULL);
-
-    serverLog(LL_DEBUG, "Added rdb replica %s to the psync waiting list. "
-                        "(cid = %"PRIu64") (tail = %d)",
-                        replicationGetSlaveName(slave),
-                        slave->id, tail != NULL);
-}
-
-/* Replication: master side. Returns a client by ID, or NULL if the client ID
- * is not in psync waiting clients list. */
 static client *rdbChannelLookupRdbClient(uint64_t id) {
     void *c = NULL;
     if (id == 0)
         return NULL;
     raxFind(server.replicas_waiting_psync, (unsigned char *)&id, sizeof(id), &c);
     return c;
-}
-
-/* Replication: master side.
- * Attach psync waiting replicas to the new replication backlog head. */
-static void rdbChannelAttachReplicasToBacklog(void) {
-    raxIterator iter;
-    listNode *ln = listFirst(server.repl_buffer_blocks);
-    replBufBlock *head = ln ? listNodeValue(ln) : NULL;
-
-    if (head == NULL)
-        return;
-
-    raxStart(&iter, server.replicas_waiting_psync);
-    raxSeek(&iter, "^", NULL, 0);
-    while (raxNext(&iter)) {
-        client *rdb_client = iter.data;
-        if (rdb_client->ref_repl_buf_node)
-            continue;
-
-        rdb_client->ref_repl_buf_node = ln;
-        head->refcount++;
-        serverLog(LL_DEBUG, "Attached replica rdb client %"PRIu64
-                            " to repl buf block", rdb_client->id);
-    }
-    raxStop(&iter);
 }
 
 /* Replication: Replica side. */
@@ -3549,8 +3451,12 @@ static int rdbChannelSendHandshake(connection *conn, sds *err) {
     char buf[LONG_STR_SIZE];
     slaveGetPortStr(buf, sizeof(buf));
 
+    char cid[LONG_STR_SIZE];
+    ll2string(cid, sizeof(cid), server.repl_loaded_main_ch_client_id);
+
     *err = sendCommand(conn, "REPLCONF", "capa", "eof", "rdb-only", "1",
-                       "rdb-channel", "1", "listening-port", buf, NULL);
+                       "rdb-channel", "1", "client-id", cid,
+                       "listening-port", buf, NULL);
     if (*err) {
         serverLog(LL_WARNING, "Error sending REPLCONF command to master in rdb channel handshake: %s", *err);
         return C_ERR;
@@ -3606,7 +3512,6 @@ static int rdbChannelHandleReplconfReply(connection *conn, sds *err) {
 /* Replication: Replica side. */
 static int rdbChannelHandleFullresyncReply(connection *conn, sds *err) {
     long long reploff = 0;
-    unsigned long long rdb_client_id = 0;
     char replid[CONFIG_RUN_ID_SIZE + 1] = {0};
 
     *err = receiveSynchronousResponse(conn);
@@ -3620,8 +3525,7 @@ static int rdbChannelHandleFullresyncReply(connection *conn, sds *err) {
     }
 
     /* Parse +FULLRESYNC reply */
-    if (sscanf(*err, "+FULLRESYNC %40s %lld %llu",
-               replid, &reploff, &rdb_client_id) != 3)
+    if (sscanf(*err, "+FULLRESYNC %40s %lld", replid, &reploff) != 2)
     {
         serverLog(LL_WARNING, "Received unexpected psync reply: %s", *err);
         return C_ERR;
@@ -3630,19 +3534,17 @@ static int rdbChannelHandleFullresyncReply(connection *conn, sds *err) {
     /* Save replid, reploff and rdb_client id */
     memcpy(server.master_replid, replid, sizeof(replid));
     server.master_initial_offset = reploff;
-    server.repl_rdbchannel_client_id = rdb_client_id;
 
     /* Now that we have the snapshot end-offset, we can ask for psync from that
      * offset. Prepare the main and rdb channels accordingly.*/
-    server.repl_state = REPL_STATE_SEND_HANDSHAKE;
-
+    server.repl_state = REPL_STATE_TRANSFER;
+    rdbChannelReplDataBufInit();
+    /* RDB is still loading. Setup connection to accumulate repl data.  */
     if (connSetReadHandler(server.repl_transfer_s,
-                           rdbChannelSetupMainConnForPsync) != C_OK)
+                           rdbChannelBufferReplData) != C_OK)
     {
-        char inf[CONN_INFO_LEN];
-        serverLog(LL_WARNING,
-                  "Can't create readable event for main channel connection: %s (%s)",
-                  strerror(errno), connGetInfo(conn, inf, sizeof(inf)));
+        serverLog(LL_WARNING, "Can't set read handler for main channel: %s",
+                  strerror(errno));
         return C_ERR;
     }
 
@@ -3658,7 +3560,6 @@ static int rdbChannelHandleFullresyncReply(connection *conn, sds *err) {
         return C_ERR;
     }
 
-    rdbChannelSetupMainConnForPsync(server.repl_transfer_s);
     return C_OK;
 }
 
@@ -3968,134 +3869,12 @@ void rdbChannelHandleRdbLoadCompletion(void) {
      * whatever we have into the db, then replica will try psync from the index
      * that it has. */
     close_asap = (server.repl_rdb_ch_state == REPL_RDB_CH_STATE_CLOSE_ASAP);
-    if (!close_asap && server.repl_state != REPL_STATE_TRANSFER) {
-        /* Main channel isn't done yet. We'll finalize fullsync once main
-         * channel establishes psync. See rdbChannelMainConnRecvPsyncReply()*/
-        server.repl_rdb_ch_state = REPL_RDB_CH_RDB_LOADED;
-        return;
-    }
     /* Finalize fullsync */
     rdbChannelSuccess();
 
     /* Main channel connection was broken. Let's trigger a psync with master. */
     if (close_asap && server.master)
         freeClientAsync(server.master);
-}
-
-/* Replication: Replica side. */
-int rdbChannelMainConnSendHandshake(connection *conn, sds *err) {
-    char llstr[LONG_STR_SIZE];
-    ull2string(llstr, sizeof(llstr), server.repl_rdbchannel_client_id);
-    *err = sendCommand(conn, "REPLCONF", "set-rdb-client-id", llstr, NULL);
-    return *err ? C_ERR : C_OK;
-}
-
-/* Replication: Replica side. */
-int rdbChannelMainConnRecvCapaReply(connection *conn, sds *err) {
-    *err = receiveSynchronousResponse(conn);
-    if (*err == NULL)
-        return C_ERR;
-
-    if ((*err)[0] == '-') {
-        serverLog(LL_WARNING, "Master does not understand REPLCONF set-rdb-client-id: %s", *err);
-        return C_ERR;
-    }
-    return C_OK;
-}
-
-/* Replication: Replica side. */
-int rdbChannelMainConnSendPsync(connection *conn, sds *err) {
-    if (server.repl_debug_pause & REPL_DEBUG_BEFORE_MAIN_CONN_PSYNC)
-        debugPauseProcess();
-
-    if (slaveTryPartialResynchronization(conn, 0) == PSYNC_WRITE_ERROR) {
-        serverLog(LL_WARNING, "Aborting rdb channel sync. Write error.");
-        *err = sdsnew(connGetLastError(conn));
-        return C_ERR;
-    }
-    return C_OK;
-}
-
-/* Replication: Replica side. */
-int rdbChannelMainConnRecvPsyncReply(connection *conn, sds *err) {
-    int psync_result = slaveTryPartialResynchronization(conn, 1);
-    if (psync_result == PSYNC_WAIT_REPLY)
-        return C_OK; /* Try again later... */
-
-    if (psync_result != PSYNC_CONTINUE) {
-        *err = getTryPsyncString(psync_result);
-        return C_ERR;
-    }
-
-    serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Master accepted a Partial Resynchronization%s",
-              server.repl_rdb_transfer_s != NULL ? ", RDB load in background." : ".");
-
-    if (server.repl_rdb_ch_state < REPL_RDB_CH_RDB_LOADED) {
-        /* RDB is still loading. Setup connection to accumulate repl data.  */
-        if (connSetReadHandler(server.repl_transfer_s,
-                               rdbChannelBufferReplData) != C_OK)
-        {
-            serverLog(LL_WARNING, "Can't set read handler for main channel: %s",
-                      strerror(errno));
-            return C_ERR;
-        }
-        rdbChannelReplDataBufInit();
-        return C_OK;
-    }
-    serverLog(LL_DEBUG, "Main channel established psync after rdb load.");
-
-    /* RDB is already loaded. Time to finalize fullsync. */
-    rdbChannelSuccess();
-    return C_OK;
-}
-
-/* Replication: Replica side.
- * This connection handler fires after rdb-connection was initialized. We use it
- * to adjust the replica main connection for accumulating replication stream
- * into the local buffer. */
-void rdbChannelSetupMainConnForPsync(connection *conn) {
-    int ret;
-    char *err = NULL;
-
-    switch (server.repl_state) {
-        case REPL_STATE_SEND_HANDSHAKE:
-            ret = rdbChannelMainConnSendHandshake(conn, &err);
-            if (ret == C_OK)
-                server.repl_state = REPL_STATE_RECEIVE_CAPA_REPLY;
-            break;
-        case REPL_STATE_RECEIVE_CAPA_REPLY:
-            ret = rdbChannelMainConnRecvCapaReply(conn, &err);
-            if (ret == C_ERR)
-                break;
-
-            if (ret == C_OK)
-                server.repl_state = REPL_STATE_SEND_PSYNC;
-            sdsfree(err);
-            err = NULL;
-            /* fall through */
-        case REPL_STATE_SEND_PSYNC:
-            ret = rdbChannelMainConnSendPsync(conn, &err);
-            if (ret == C_OK)
-                server.repl_state = REPL_STATE_RECEIVE_PSYNC_REPLY;
-            break;
-        case REPL_STATE_RECEIVE_PSYNC_REPLY:
-            ret = rdbChannelMainConnRecvPsyncReply(conn, &err);
-            if (ret == C_OK && server.repl_rdb_ch_state != REPL_RDB_CH_STATE_NONE)
-                server.repl_state = REPL_STATE_TRANSFER;
-            /* In case the RDB is already loaded, the repl_state will be set
-             * during rdbChannelSuccess(). */
-            break;
-        default:
-            serverPanic("Unexpected replication state: %d", server.repl_state);
-    }
-
-    if (ret == C_ERR) {
-        serverLog(LL_WARNING, "Aborting rdb channel sync. "
-                              "Main channel psync result = %d, errmsg = %s",
-                              ret, err ? err : "none");
-        cancelReplicationHandshake(1);
-    }
-    sdsfree(err);
 }
 
 void replicaofCommand(client *c) {

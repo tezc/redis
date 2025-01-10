@@ -175,13 +175,7 @@ start_server {} {
         # replica2 still waits for bgsave ending
         assert {[s rdb_bgsave_in_progress] eq {1} && [lindex [$replica2 role] 3] eq {sync}}
         # master accepted replica1 partial resync
-        if {$rdbchannel == "yes"} {
-            # 2 psync as part of 2 full syncs
-            # 1 psync as part of partial resync
-            assert_equal [s sync_partial_ok] {3}
-        } else {
-            assert_equal [s sync_partial_ok] {1}
-        }
+        assert_equal [s sync_partial_ok] {1}
         assert_equal [$master debug digest] [$replica1 debug digest]
     }
 
@@ -248,12 +242,7 @@ test "Partial resynchronization is successful even client-output-buffer-limit is
             wait_for_ofs_sync r $replica
             # master accepted replica partial resync
             assert_equal [s sync_full] {1}
-            set psync_count 1
-            if {$rdbchannel == "yes"} {
-                # One on full sync, another on reconnect.
-                set psync_count 2
-            }
-            assert_equal [s sync_partial_ok] $psync_count
+            assert_equal [s sync_partial_ok] {1}
 
             r multi
             r set key $big_str
@@ -267,7 +256,7 @@ test "Partial resynchronization is successful even client-output-buffer-limit is
                 fail "Replica offset didn't catch up with the master after too long time"
             }
             assert_equal [s sync_full] {1}
-            assert_equal [s sync_partial_ok] $psync_count
+            assert_equal [s sync_partial_ok] {1}
         }
     }
 }
@@ -334,11 +323,7 @@ test "Replica client-output-buffer size is limited to backlog_limit/16 when no r
 
             # now we expect the replica to re-connect but fail partial sync (it doesn't have large
             # enough COB limit and must result in a full-sync)
-            if {$rdbchannel == "yes"} {
-                assert {[status $master sync_partial_ok] == [status $master sync_full]}
-            } else {
-                assert {[status $master sync_partial_ok] == 0}
-            }
+            assert {[status $master sync_partial_ok] == 0}
 
             # Before this fix (#11905), the test would trigger an assertion in 'o->used >= c->ref_block_pos'
             test {The update of replBufBlock's repl_offset is ok - Regression test for #11666} {

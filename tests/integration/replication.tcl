@@ -1311,7 +1311,7 @@ start_server {tags {"repl external:skip"}} {
                     # Though, full sync will include a single partial sync as
                     # there will be two connections in parallel.
                     assert_equal 1 [s sync_full]
-                    assert_equal 1 [s sync_partial_ok]
+                    assert_equal 0 [s sync_partial_ok]
                 }
             }
         }
