@@ -125,6 +125,93 @@ start_server {tags {"repl external:skip"}} {
 
 start_server {tags {"repl external:skip"}} {
     set replica [srv 0 client]
+    set replica_pid [srv 0 pid]
+
+    start_server {} {
+        set master [srv 0 client]
+        set master_host [srv 0 host]
+        set master_port [srv 0 port]
+
+        $master config set repl-rdb-channel yes
+        $replica config set repl-rdb-channel yes
+
+        # Reuse this test to verify large key delivery
+        $master config set rdbcompression no
+        populate 1000 prefix1 10
+        populate 10 prefix2 2000000
+        populate 10 prefix3 1000000
+
+        # On master info output, we should see state transition in this order:
+        # 1. Replica opens rdbchannel: wait_bgsave
+        # 2. Replica establishes psync: bg_rdb_transfer
+        # 3. Sync is completed: online
+        test "Test replica state should start with wait_bgsave" {
+            $replica config set key-load-delay 100000
+            # Pause replica before psync
+            $replica debug repl-pause before-main-conn-psync
+            $replica replicaof $master_host $master_port
+
+            wait_for_condition 50 200 {
+                [s 0 rdb_bgsave_in_progress] == 1 &&
+                [s 0 connected_slaves] == 1 &&
+                [string match "*wait_bgsave*" [s 0 slave0]]
+            } else {
+                fail "replica failed"
+            }
+        }
+
+        test "Test replica rdbchannel client has SC flag on client list output" {
+            set input [$master client list type replica]
+
+            set trimmed_input [string trimright $input]
+            if {[string first "\n" $trimmed_input] >= 0} {
+                error "there are more than one replicas"
+            }
+
+            if {![regexp {flags=SC} $input]} {
+                error "Flags are not 'SC': $input"
+            }
+        }
+
+        test "Test replica state advances to bg_rdb_transfer on main channel psync" {
+            $master set x 1
+            resume_process $replica_pid
+
+            wait_for_condition 50 200 {
+                [s 0 rdb_bgsave_in_progress] == 1 &&
+                [s 0 connected_slaves] == 1 &&
+                [string match "*bg_rdb_transfer*" [s 0 slave0]]
+            } else {
+                fail "replica failed"
+            }
+        }
+
+        test "Test replica state advances to online when fullsync is completed" {
+            $replica config set key-load-delay 0
+
+            wait_replica_online $master 0 100 1000
+            wait_for_ofs_sync $master $replica
+
+            wait_for_condition 50 200 {
+                [s 0 rdb_bgsave_in_progress] == 0 &&
+                [s 0 connected_slaves] == 1 &&
+                [string match "*online*" [s 0 slave0]]
+            } else {
+                fail "replica failed"
+            }
+
+            wait_replica_online $master 0 100 1000
+            wait_for_ofs_sync $master $replica
+
+            # Verify db's are identical
+            assert_morethan [$master dbsize] 0
+            assert_equal [$master debug digest] [$replica debug digest]
+        }
+    }
+}
+
+start_server {tags {"repl external:skip"}} {
+    set replica [srv 0 client]
 
     start_server {} {
         set master [srv 0 client]
@@ -708,7 +795,7 @@ start_server {tags {"repl external:skip"}} {
     $master config set repl-rdb-channel yes
     $master config set rdb-key-save-delay 300
     $master config set client-output-buffer-limit "replica 0 0 0"
-    $master config set repl-diskless-sync-delay 4
+    $master config set repl-diskless-sync-delay 5
     $master config set loglevel debug
 
     populate 10000 master 1
@@ -729,7 +816,7 @@ start_server {tags {"repl external:skip"}} {
                 $replica1 replicaof $master_host $master_port
                 $replica2 replicaof $master_host $master_port
 
-                wait_for_condition 50 100 {
+                wait_for_condition 50 200 {
                     [s -2 rdb_bgsave_in_progress] == 1
                 } else {
                     fail "Sync did not start"
@@ -737,7 +824,8 @@ start_server {tags {"repl external:skip"}} {
 
                 # Wait for both replicas main conns to establish psync
                 wait_for_condition 500 100 {
-                    [s -2 sync_partial_ok] == 2
+                    [s -2 sync_partial_ok] == 2 &&
+                    [s -2 connected_slaves] == 2
                 } else {
                     fail "Replicas didn't establish psync:
                           sync_partial_ok: [s -2 sync_partial_ok]"
