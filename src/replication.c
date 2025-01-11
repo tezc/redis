@@ -274,7 +274,7 @@ void createBacklogIfNeeded(void) {
         createReplicationBacklog();
         serverLog(LL_NOTICE,"Replication backlog created, my new "
                             "replication IDs are '%s' and '%s'",
-                  server.replid, server.replid2);
+                            server.replid, server.replid2);
     }
 }
 /* Similar with 'prepareClientToWrite', note that we must call this function
@@ -797,7 +797,7 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
                 serverLog(LL_NOTICE, "Starting to deliver RDB and replication stream to replica: %s",
                           replicationGetSlaveName(c));
             } else {
-                serverLog(LL_WARNING, "Starting to deliver RDB stream to replica %s"
+                serverLog(LL_WARNING, "Starting to deliver RDB to replica %s"
                                       " but it has no associated main channel",
                                       replicationGetSlaveName(slave));
             }
@@ -1273,7 +1273,7 @@ void syncCommand(client *c) {
  * a single include filter: "functions". Passing an empty string "" will
  * result in an empty RDB.
  *
- * - set-main-ch-client-id <client-id>
+ * - main-ch-client-id <client-id>
  * Replica's main channel informs master that this is the main channel of the
  * rdb channel identified by the client-id. */
 void replconfCommand(client *c) {

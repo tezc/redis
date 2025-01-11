@@ -152,7 +152,7 @@ start_server {tags {"repl external:skip"}} {
                 [s 0 connected_slaves] == 1 &&
                 [string match "*wait_bgsave*" [s 0 slave0]]
             } else {
-                fail "replica failed x[s 0 slave0]x"
+                fail "replica failed"
             }
         }
 
@@ -529,8 +529,8 @@ start_server {tags {"repl external:skip"}} {
 
             wait_for_log_messages -1 {"*Background RDB transfer error*"} $loglines 1000 10
 
-            # Verify master rejects set-rdb-client-id after connection is killed
-            assert_error {*Unrecognized*} {$master replconf set-rdb-client-id $id}
+            # Verify master rejects main-ch-client-id after connection is killed
+            assert_error {*Unrecognized*} {$master replconf main-ch-client-id $id}
 
             # Replica should retry
             wait_for_condition 500 200 {
