@@ -74,9 +74,9 @@ start_server {tags {"repl external:skip"}} {
                 $replica1 replicaof $master_host $master_port
                 $replica2 replicaof $master_host $master_port
 
-                set res [wait_for_log_messages 0 {"*Starting BGSAVE* replicas sockets (rdb-channel).*"} 0 2000 10]
+                set res [wait_for_log_messages 0 {"*Starting BGSAVE* replicas sockets (rdb-channel)*"} 0 2000 10]
                 set loglines [lindex $res 1]
-                wait_for_log_messages 0 {"*Starting BGSAVE* replicas sockets.*"} $loglines 2000 10
+                wait_for_log_messages 0 {"*Starting BGSAVE* replicas sockets*"} $loglines 2000 10
 
                 wait_replica_online $master 0
                 wait_replica_online $master 1
@@ -105,7 +105,7 @@ start_server {tags {"repl external:skip"}} {
                 $replica1 replicaof $master_host $master_port
 
                 # Verify log message does not mention rdbchannel
-                wait_for_log_messages 0 {"*Starting BGSAVE for SYNC with target: disk.*"} 0 2000 1
+                wait_for_log_messages 0 {"*Starting BGSAVE for SYNC with target: disk*"} 0 2000 1
 
                 wait_replica_online $master 0
                 wait_for_ofs_sync $master $replica1
@@ -172,17 +172,12 @@ start_server {tags {"repl external:skip"}} {
         test "Test replica rdbchannel client has SC flag on client list output" {
             set input [$master client list type replica]
 
-            # Trim right whitespaces if any
-            set trimmed_input [string trimright $input]
-
-            # Split the input into lines
-            set lines [split $trimmed_input "\n"]
-
             # There will two replicas, second one should be rdbchannel
+            set trimmed_input [string trimright $input]
+            set lines [split $trimmed_input "\n"]
             if {[llength $lines] < 2} {
                 error "There is no second line in the input: $input"
             }
-
             set second_line [lindex $lines 1]
 
             # Check if 'flags=SC' exists in the second line
@@ -192,7 +187,7 @@ start_server {tags {"repl external:skip"}} {
         }
 
         test "Test replica state advances to online when fullsync is completed" {
-            # speed up loading
+            # Speed up loading
             $replica config set key-load-delay 0
 
             wait_replica_online $master 0 100 1000
@@ -463,7 +458,6 @@ start_server {tags {"repl external:skip"}} {
                 } else {
                     fail "Sync did not start"
                 }
-
                 set loglines [count_log_lines -2]
 
                 # kill replica
@@ -478,8 +472,7 @@ start_server {tags {"repl external:skip"}} {
                           rdb_bgsave_in_progress:[s -2 rdb_bgsave_in_progress]
                           connected_slaves: [s -2 connected_slaves]"
                 }
-
-                wait_for_log_messages -2 {"*Background RDB transfer error*"} $loglines 1000 10
+                wait_for_log_messages -2 {"*Background transfer error*"} $loglines 1000 10
             }
 
             stop_write_load $load_handle
@@ -527,7 +520,7 @@ start_server {tags {"repl external:skip"}} {
             set id [get_replica_client_id $master yes]
             $master client kill id $id
 
-            wait_for_log_messages -1 {"*Background RDB transfer error*"} $loglines 1000 10
+            wait_for_log_messages -1 {"*Background transfer error*"} $loglines 1000 10
 
             # Verify master rejects main-ch-client-id after connection is killed
             assert_error {*Unrecognized*} {$master replconf main-ch-client-id $id}
@@ -548,7 +541,7 @@ start_server {tags {"repl external:skip"}} {
             set id [get_replica_client_id $master yes]
             $master client kill id $id
 
-            wait_for_log_messages -1 {"*Background RDB transfer error*"} $loglines 1000 20
+            wait_for_log_messages -1 {"*Background transfer error*"} $loglines 1000 20
 
             # Replica should retry
             wait_for_condition 500 2000 {

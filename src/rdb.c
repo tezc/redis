@@ -3806,10 +3806,10 @@ static void backgroundSaveDoneHandlerSocket(int exitcode, int bysignal) {
         serverLog(LL_NOTICE,
             "Background RDB transfer terminated with success");
     } else if (!bysignal && exitcode != 0) {
-        serverLog(LL_WARNING, "Background RDB transfer error");
+        serverLog(LL_WARNING, "Background transfer error");
     } else {
         serverLog(LL_WARNING,
-            "Background RDB transfer terminated by signal %d", bysignal);
+            "Background transfer terminated by signal %d", bysignal);
     }
     if (server.rdb_child_exit_pipe!=-1)
         close(server.rdb_child_exit_pipe);

@@ -47,9 +47,9 @@ int cancelReplicationHandshake(int reconnect);
 static void rdbChannelFullSyncWithMaster(connection *conn);
 static client *rdbChannelLookupMainChannelClient(uint64_t id);
 static int rdbChannelAbortRdbTransfer(void);
-void rdbChannelBufferReplData(connection *conn);
+static void rdbChannelBufferReplData(connection *conn);
 static void rdbChannelReplDataBufInit(void);
-void rdbChannelSuccess(void);
+static void rdbChannelSuccess(void);
 
 /* We take a global flag to remember if this instance generated an RDB
  * because of replication, so that we can remove the RDB file in case
@@ -76,7 +76,7 @@ int replicationCheckHasMainChannel(client *replica) {
         return 0;
 
     listRewind(server.slaves,&li);
-    while((ln = listNext(&li))) {
+    while ((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         if (replica->main_ch_client_id && replica->main_ch_client_id == c->id)
             return 1;
@@ -264,7 +264,7 @@ int canFeedReplicaReplBuffer(client *replica) {
 }
 
 /* Create the replication backlog if needed. */
-void createBacklogIfNeeded(void) {
+void createReplicationBacklogIfNeeded(void) {
     if (listLength(server.slaves) == 1 && server.repl_backlog == NULL) {
         /* When we create the backlog from scratch, we always use a new
          * replication ID and clear the ID2, since there is no valid
@@ -949,7 +949,7 @@ int startBgsaveForReplication(int mincapa, int req) {
 
     serverLog(LL_NOTICE,"Starting BGSAVE for SYNC with target: %s%s",
         socket_target ? "replicas sockets" : "disk",
-        (req & SLAVE_REQ_RDB_CHANNEL) ? " (rdb-channel)." : ".");
+        (req & SLAVE_REQ_RDB_CHANNEL) ? " (rdb-channel)" : "");
 
     rdbSaveInfo rsi, *rsiptr;
     rsiptr = rdbPopulateSaveInfo(&rsi);
@@ -1122,7 +1122,7 @@ void syncCommand(client *c) {
                 c->replstate = SLAVE_STATE_WAIT_RDB_CHANNEL;
                 c->repl_ack_time = server.unixtime;
                 listAddNodeTail(server.slaves, c);
-                createBacklogIfNeeded();
+                createReplicationBacklogIfNeeded();
 
                 /* Add replica to waiting rdbchannel list. */
                 raxInsert(server.replicas_waiting_rdbchannel,
@@ -1163,7 +1163,7 @@ void syncCommand(client *c) {
     listAddNodeTail(server.slaves,c);
 
     /* Create the replication backlog if needed. */
-    createBacklogIfNeeded();
+    createReplicationBacklogIfNeeded();
 
     /* CASE 1: BGSAVE is in progress, with disk target. */
     if (server.child_type == CHILD_TYPE_RDB &&
@@ -3401,15 +3401,15 @@ void replicationHandleMasterDisconnection(void) {
  *  - When replica connects to the master, it sends 'rdb-channel-repl' as part
  *    of capability exchange to let master to know replica supports rdb channel.
  *  - When replica lacks sufficient data for PSYNC, master sends +RDBCHANNELSYNC
- *    reply. As the next step, the replica opens a new connection (rdb-channel)
- *    and configures it against the master with the appropriate capabilities
- *    and requirements. Then, replica requests fullsync using the RDB channel.
- *  - Prior to forking, master sends the snapshot's end repl-offset and
- *    rdbchannel's client id to the replica rdbchannel. Then, master attaches
- *    the replica to the replication backlog to keep replication data until the
- *    replica requests psync starting at the snapshot end offset. The replica
- *    sends rdbchannel client id using the main channel so, master can associate
- *    replica's channels. After that, replica request a PSYNC.
+ *    reply with replica's client id. As the next step, the replica opens a new
+ *    connection (rdb-channel) and configures it against the master with the
+ *    appropriate capabilities and requirements. It also sends given client id
+ *    back to master over rdbchannel so that master can associate these
+ *    channels (initial replica connection will be referred as main-channel)
+ *    Then, replica requests fullsync using the RDB channel.
+ *  - Prior to forking, master attaches the replica's main channel to the
+ *    replication backlog to deliver replication stream starting at the snapshot
+ *    end offset.
  *  - The master main process sends replication stream via the main channel,
  *    while the bgsave process sends the RDB directly to the replica via the
  *    rdb-channel. Replica accumulates replication stream in a local buffer,
@@ -3436,11 +3436,11 @@ void replicationHandleMasterDisconnection(void) {
  * │RECEIVE_AUTH_REPLY │        │ │  └───────┬───────────────────────┘                           │
  * └────────┬──────────┘        │ │          │+OK                          Main channel state    │
  *          │+OK                │ │  ┌───────▼───────────────────────┐   ┌──▼────────────────┐   │
- * ┌────────▼──────────┐        │ │  │ RDB_CH_RECEIVE_FULLRESYNC     │   │REPL_TRANSFER      │ ◄─┼────┐
+ * ┌────────▼──────────┐        │ │  │ RDB_CH_RECEIVE_FULLRESYNC     │   │   REPL_TRANSFER   ◄───┼────┐
  * │RECEIVE_PORT_REPLY │        │ │  └───────┬───────────────────────┘   └──┬────────────────┘   │    │
  * └────────┬──────────┘        │ │          │+FULLRESYNC ..                │ buffer repl stream │    │
  *          │+OK                │ │          │                              │ in parallel to RDB │    │
- * ┌────────▼──────────┐        │ │          │                              │                    │    │
+ * ┌────────▼──────────┐        │ │          │                              │ download           │    │
  * │RECEIVE_IP_REPLY   │        │ │  ┌───────▼───────────────┐              │                    │    │
  * └────────┬──────────┘        │ │  │REPL_RDB_CH_RDB_LOADING│              │                    │    │
  *          │+OK                │ │  └───────┬───────────────┘              │                    │    │
@@ -3459,7 +3459,7 @@ void replicationHandleMasterDisconnection(void) {
  *   │      │ └─────────────────┘──────────────────────┼──────────────────────────────────────────────┘
  *   │      │+FULLRESYNC                               │
  *   │    ┌─▼─────────────────┐                   ┌────▼──────────────┐
- *   │    │TRANSFER           ├───────────────────►CONNECTED          │
+ *   │    │ REPL_TRANSFER     ├───────────────────►CONNECTED          │
  *   │    └───────────────────┘                   └────▲──────────────┘
  *   │                                                 │
  *   └─────────────────────────────────────────────────┘
@@ -3890,7 +3890,7 @@ static int rdbChannelAbortRdbTransfer(void) {
 
 /* Replication: Replica side. After loading the rdb, create a master client and
  * stream replication buffer to the db. */
-void rdbChannelSuccess(void) {
+static void rdbChannelSuccess(void) {
     serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Starting to stream replication buffer into the db"
                          " (%zu bytes).", server.repl_pending_data.used);
     if (rdbChannelStreamReplDataToDb(server.master) == C_ERR) {

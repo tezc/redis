@@ -488,8 +488,6 @@ void debugCommand(client *c) {
 "    Enable or disable the reply buffer resize cron job",
 "REPL-PAUSE <clear|after-fork|before-rdb-channel|on-streaming-repl-buf>",
 "    Pause the server's main process during various replication steps.",
-"DELAY-RDB-CLIENT-FREE <seconds>",
-"    Grace period in seconds for replica main channel to establish psync.",
 "DICT-RESIZING <0|1>",
 "    Enable or disable the main dict and expire dict resizing.",
 "SCRIPT <LIST|<sha>>",
