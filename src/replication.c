@@ -3421,10 +3421,6 @@ void replicationHandleMasterDisconnection(void) {
  *
  * Main channel state
  * ┌───────────────────┐
- * │REPL_STATE_CONNECT │
- * └────────┬──────────┘
- *          │
- * ┌────────▼──────────┐
  * │RECEIVE_PING_REPLY │
  * └────────┬──────────┘
  *          │ +PONG
