@@ -78,8 +78,8 @@ start_server {tags {"repl external:skip"}} {
                 set loglines [lindex $res 1]
                 wait_for_log_messages 0 {"*Starting BGSAVE* replicas sockets*"} $loglines 2000 10
 
-                wait_replica_online $master 0
-                wait_replica_online $master 1
+                wait_replica_online $master 0 100 100
+                wait_replica_online $master 1 100 100
 
                 # Verify two new forks.
                 assert_equal [s 0 total_forks] [expr $prev_forks + 2]
