@@ -184,7 +184,7 @@ client *createClient(connection *conn) {
     c->slave_addr = NULL;
     c->slave_capa = SLAVE_CAPA_NONE;
     c->slave_req = SLAVE_REQ_NONE;
-    c->main_channel_client_id = 0;
+    c->main_ch_client_id = 0;
     c->reply = listCreate();
     c->deferred_reply_errors = NULL;
     c->reply_bytes = 0;

@@ -491,9 +491,8 @@ typedef enum {
 /* Replication debug flags for testing. */
 #define REPL_DEBUG_PAUSE_NONE             (1 << 0)
 #define REPL_DEBUG_AFTER_FORK             (1 << 1)
-#define REPL_DEBUG_BEFORE_RDB_CHANNEL      (1 << 2)
+#define REPL_DEBUG_BEFORE_RDB_CHANNEL     (1 << 2)
 #define REPL_DEBUG_ON_STREAMING_REPL_BUF  (1 << 3)
-
 
 /* The state of an in progress coordinated failover */
 typedef enum {
@@ -522,7 +521,6 @@ typedef enum {
 #define SLAVE_CAPA_EOF              (1<<0) /* Can parse the RDB EOF streaming format. */
 #define SLAVE_CAPA_PSYNC2           (1<<1) /* Supports PSYNC2 protocol. */
 #define SLAVE_CAPA_RDB_CHANNEL_REPL (1<<2) /* Supports rdb channel replication during full sync */
-
 
 /* Slave requirements */
 #define SLAVE_REQ_NONE                  0
@@ -1303,7 +1301,7 @@ typedef struct client {
     char *slave_addr;       /* Optionally given by REPLCONF ip-address */
     int slave_capa;         /* Slave capabilities: SLAVE_CAPA_* bitwise OR. */
     int slave_req;          /* Slave requirements: SLAVE_REQ_* */
-    uint64_t main_channel_client_id; /* The client id of this replica's rdb connection */
+    uint64_t main_ch_client_id; /* The client id of this replica's main channel */
     multiState mstate;      /* MULTI/EXEC state */
     blockingState bstate;     /* blocking state */
     long long woff;         /* Last write global replication offset. */
@@ -1717,7 +1715,7 @@ struct redisServer {
     list *clients_pending_write; /* There is to write or install handler. */
     list *clients_pending_read;  /* Client has pending read socket buffers. */
     list *slaves, *monitors;    /* List of slaves and MONITORs */
-    rax *replicas_waiting_psync;/* List of rdb channel clients until their main channel establishes pysnc. */
+    rax *replicas_waiting_rdbchannel;/* List of main channel clients until their rdb channel connects. */
     client *current_client;     /* The client that triggered the command execution (External or AOF). */
     client *executing_client;   /* The client executing the current command (possibly script or module). */
 
@@ -2014,7 +2012,7 @@ struct redisServer {
     int repl_syncio_timeout; /* Timeout for synchronous I/O calls */
     int repl_state;          /* Replication status if the instance is a slave */
     int repl_rdb_ch_state; /* State of the replica's rdb channel during rdb channel replication */
-    uint64_t repl_loaded_main_ch_client_id; /* dbid in the loaded rdb */
+    uint64_t repl_main_ch_client_id; /* Main channel client id received in +RDBCHANNELSYNC reply. */
     off_t repl_transfer_size; /* Size of RDB to read from master during sync. */
     off_t repl_transfer_read; /* Amount of RDB read from master during sync. */
     off_t repl_transfer_last_fsync_off; /* Offset when we fsync-ed last time. */

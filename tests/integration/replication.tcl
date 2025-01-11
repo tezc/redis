@@ -5,7 +5,6 @@ proc log_file_matches {log pattern} {
     string match $pattern $content
 }
 
-foreach rdbchannel {"yes" "no"} {
 start_server {tags {"repl network external:skip"}} {
     set slave [srv 0 client]
     set slave_host [srv 0 host]
@@ -20,13 +19,11 @@ start_server {tags {"repl network external:skip"}} {
         # operation, so that the slave remains in the handshake state.
         $master config set repl-diskless-sync yes
         $master config set repl-diskless-sync-delay 1000
-        $master config set repl-rdb-channel $rdbchannel
-        $slave config set repl-rdb-channel $rdbchannel
 
         # Start the replication process...
         $slave slaveof $master_host $master_port
 
-        test "Slave enters handshake rdbchannel=$rdbchannel" {
+        test {Slave enters handshake} {
             wait_for_condition 50 1000 {
                 [string match *handshake* [$slave role]]
             } else {
@@ -34,12 +31,11 @@ start_server {tags {"repl network external:skip"}} {
             }
         }
 
-        test "Slave enters wait_bgsave rdbchannel=$rdbchannel" {
-            wait_for_condition 50 100 {
-                [string match *state=wait_bgsave* [$master info replication]] ||
-                ($rdbchannel == yes && [string match *state=wait_rdb_channel* [$master info replication]])
+        test {Slave enters wait_bgsave} {
+            wait_for_condition 50 1000 {
+                [string match *state=wait_bgsave* [$master info replication]]
             } else {
-                fail "Replica does not enter wait_bgsave state [$master info replication]"
+                fail "Replica does not enter wait_bgsave state"
             }
         }
 
@@ -53,7 +49,7 @@ start_server {tags {"repl network external:skip"}} {
         # should detect the timeout.
         $master debug sleep 10
 
-        test "Slave is able to detect timeout during handshake rdbchannel=$rdbchannel" {
+        test {Slave is able to detect timeout during handshake} {
             wait_for_condition 50 1000 {
                 [log_file_matches $slave_log "*Timeout connecting to the MASTER*"]
             } else {
@@ -61,7 +57,6 @@ start_server {tags {"repl network external:skip"}} {
             }
         }
     }
-}
 }
 
 start_server {tags {"repl external:skip"}} {
@@ -1313,8 +1308,6 @@ start_server {tags {"repl external:skip"}} {
                     assert_equal [s master_replid] [s -1 master_replid]
                     assert ![log_file_matches [srv -1 stdout] "*Connection with master lost*"]
                     # Sub replica just has one full sync, no partial resync.
-                    # Though, full sync will include a single partial sync as
-                    # there will be two connections in parallel.
                     assert_equal 1 [s sync_full]
                     assert_equal 0 [s sync_partial_ok]
                 }

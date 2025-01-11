@@ -2690,7 +2690,7 @@ void initServer(void) {
     server.clients_to_close = listCreate();
     server.slaves = listCreate();
     server.monitors = listCreate();
-    server.replicas_waiting_psync = raxNew();
+    server.replicas_waiting_rdbchannel = raxNew();
     server.clients_pending_write = listCreate();
     server.clients_pending_read = listCreate();
     server.clients_timeout_table = raxNew();
@@ -5460,11 +5460,10 @@ const char *replstateToString(int replstate) {
     switch (replstate) {
     case SLAVE_STATE_WAIT_BGSAVE_START:
     case SLAVE_STATE_WAIT_BGSAVE_END:
+    case SLAVE_STATE_WAIT_RDB_CHANNEL:
         return "wait_bgsave";
     case SLAVE_STATE_BG_RDB_TRANSFER:
         return "bg_rdb_transfer";
-    case SLAVE_STATE_WAIT_RDB_CHANNEL:
-        return "wait_rdb_channel";
     case SLAVE_STATE_SEND_BULK:
         return "send_bulk";
     case SLAVE_STATE_ONLINE:

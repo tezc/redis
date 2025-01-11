@@ -45,7 +45,7 @@ int replicaPutOnline(client *slave);
 void replicaStartCommandStream(client *slave);
 int cancelReplicationHandshake(int reconnect);
 static void rdbChannelFullSyncWithMaster(connection *conn);
-static client *rdbChannelLookupRdbClient(uint64_t id);
+static client *rdbChannelLookupMainChannelClient(uint64_t id);
 static int rdbChannelAbortRdbTransfer(void);
 void rdbChannelBufferReplData(connection *conn);
 static void rdbChannelReplDataBufInit(void);
@@ -78,7 +78,7 @@ int replicationCheckHasMainChannel(client *replica) {
     listRewind(server.slaves,&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
-        if (replica->main_channel_client_id && replica->main_channel_client_id == c->id)
+        if (replica->main_ch_client_id && replica->main_ch_client_id == c->id)
             return 1;
     }
     return 0;
@@ -768,14 +768,14 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
      * the old SYNC command. */
     if (!(slave->flags & CLIENT_PRE_PSYNC)) {
         if (slave->slave_req & SLAVE_REQ_RDB_CHANNEL) {
-            client *c = rdbChannelLookupRdbClient(slave->main_channel_client_id);
+            client *c = rdbChannelLookupMainChannelClient(slave->main_ch_client_id);
             if (c) {
                 c->replstate = SLAVE_STATE_BG_RDB_TRANSFER;
-                //listAddNodeTail(server.slaves, c);
-                //c->flags |= CLIENT_SLAVE;
-                //c->repl_ack_time = server.unixtime;
-                //c->repl_start_cmd_stream_on_ack = 0;
-                addReplyReplicationBacklog(c, offset + 1);
+                serverLog(LL_NOTICE, "Starting to deliver RDB and replication stream to replica: %s",
+                          replicationGetSlaveName(c));
+            } else {
+                serverLog(LL_WARNING, "Starting to deliver RDB stream to replica %s but it has no assoicated main channel",
+                          replicationGetSlaveName(c));
             }
         }
         buflen = snprintf(buf,sizeof(buf),"+FULLRESYNC %s %lld\r\n",
@@ -1093,7 +1093,6 @@ void syncCommand(client *c) {
                 c->replstate = SLAVE_STATE_WAIT_RDB_CHANNEL;
                 c->repl_ack_time = server.unixtime;
                 c->repl_start_cmd_stream_on_ack = 0;
-
                 listAddNodeTail(server.slaves, c);
 
                 /* Create the replication backlog if needed. */
@@ -1109,8 +1108,7 @@ void syncCommand(client *c) {
                               server.replid, server.replid2);
                 }
 
-
-                raxInsert(server.replicas_waiting_psync, (unsigned char*)&c->id, sizeof(c->id), c, NULL);
+                raxInsert(server.replicas_waiting_rdbchannel, (unsigned char*)&c->id, sizeof(c->id), c, NULL);
 
                 snprintf(buf,sizeof(buf),"+RDBCHANNELSYNC %llu\r\n", (unsigned long long) c->id);
 
@@ -1265,7 +1263,7 @@ void syncCommand(client *c) {
  * a single include filter: "functions". Passing an empty string "" will
  * result in an empty RDB.
  *
- * - set-rdb-client-id <client-id>
+ * - set-main-ch-client-id <client-id>
  * Replica's main channel informs master that this is the main channel of the
  * rdb channel identified by the client-id. */
 void replconfCommand(client *c) {
@@ -1393,17 +1391,18 @@ void replconfCommand(client *c) {
                 c->flags &= ~CLIENT_REPL_RDB_CHANNEL;
                 c->slave_req &= ~SLAVE_REQ_RDB_CHANNEL;
             }
-        } else if (!strcasecmp(c->argv[j]->ptr, "client-id")) {
-            /* REPLCONF set-rdb-client-id <client-id> is used to identify the
-             * current replica main channel with existing rdb-connection. */
+        } else if (!strcasecmp(c->argv[j]->ptr, "main-ch-client-id")) {
+            /* REPLCONF main-ch-client-id <client-id> is used to identify
+             * the current replica rdb channel with existing main channel
+             * connection. */
             long long client_id = 0;
             if (getLongLongFromObjectOrReply(c, c->argv[j + 1], &client_id, NULL) != C_OK)
                 return;
-            //if (!rdbChannelLookupRdbClient(client_id)) {
-            //    addReplyErrorFormat(c, "Unrecognized RDB client id: %lld", client_id);
-            //    return;
-            //}
-            c->main_channel_client_id = (uint64_t)client_id;
+            if (!rdbChannelLookupMainChannelClient(client_id)) {
+                addReplyErrorFormat(c, "Unrecognized RDB client id: %lld", client_id);
+                return;
+            }
+            c->main_ch_client_id = (uint64_t)client_id;
         } else {
             addReplyErrorFormat(c,"Unrecognized REPLCONF option: %s",
                 (char*)c->argv[j]->ptr);
@@ -2722,12 +2721,16 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
     }
 
     if (!strncmp(reply, "+RDBCHANNELSYNC", strlen("+RDBCHANNELSYNC"))) {
-        char *client_id = strchr(reply,' ');
-        unsigned long long cid;
+        char *client_id = client_id = strchr(reply,' ');
+        if (client_id)
+            client_id++;
 
-        sscanf(client_id, "%llu", &cid);
-        server.repl_loaded_main_ch_client_id = cid;
-
+        if (!client_id) {
+            serverLog(LL_WARNING,
+                      "Master replied with wrong +RDBCHANNELSYNC syntax: %s", reply);
+            return PSYNC_NOT_SUPPORTED;
+        }
+        server.repl_main_ch_client_id = strtoll(client_id, NULL, 10);;
         /* A response of +RDBCHANNELSYNC from the master implies that partial
          * synchronization is not possible and that the master supports full
          * sync using dedicated RDB channel. Full sync will continue that way.*/
@@ -3405,43 +3408,45 @@ void replicationHandleMasterDisconnection(void) {
  *    streams the accumulated replication stream into the db. Sync is completed.
  *
  * * Replica state machine *
+ *
+ * Main channel state
  * ┌───────────────────┐             Rdb channel sync
  * │REPL_STATE_CONNECT │          ┌──────────────────────────────────────────────────────────────┐
- * └────────┬──────────┘          │     RDB channel state                Main channel state      │
- *          │                     │     ┌────────────────────────────┐   ┌───────────────────┐   │
- * ┌───────────────────┐        ┌─┼─────►RDB_CH_SEND_HANDSHAKE       │ ┌─►SEND_HANDSHAKE     │   │
- * │RECEIVE_PING_REPLY │        │ │     └────┬───────────────────────┘ │ └──┬────────────────┘   │
- * └────────┬──────────┘        │ │          │                         │    │REPLCONF set-rdb-client-id <clientid>
- *          │ +PONG             │ │  ┌───────▼───────────────────────┐ │ ┌──▼────────────────┐   │
- * ┌────────▼──────────┐        │ │  │ RDB_CH_RECEIVE_AUTH_REPLY     │ │ │RECEIVE_CAPA_REPLY │   │
- * │SEND_HANDSHAKE     │        │ │  └───────┬───────────────────────┘ │ └──┬────────────────┘   │
- * └────────┬──────────┘        │ │          │+OK                      │    │+OK                 │
- *          │+OK                │ │  ┌───────▼───────────────────────┐ │ ┌──▼────────────────┐   │
- * ┌────────▼──────────┐        │ │  │ RDB_CH_RECEIVE_REPLCONF_REPLY │ │ │SEND_PSYNC         │   │
- * │RECEIVE_AUTH_REPLY │        │ │  └───────┬───────────────────────┘ │ └──┬────────────────┘   │
- * └────────┬──────────┘        │ │          │+OK                      │    │PSYNC use snapshot  │
- *          │+OK                │ │  ┌───────▼───────────────────────┐ │    │end-offset provided │
- * ┌────────▼──────────┐        │ │  │ RDB_CH_RECEIVE_FULLRESYNC     │ │    │by the master       │
- * │RECEIVE_PORT_REPLY │        │ │  └───────┬───────────────────────┘ │ ┌──▼────────────────┐   │
- * └────────┬──────────┘        │ │          │FULLRESYNC .. <clientid> │ │RECEIVE_PSYNC_REPLY│   │
- *          │+OK                │ │          ├─────────────────────────┘ └──┬────────────────┘   │
- * ┌────────▼──────────┐        │ │          │                              │+CONTINUE           │
- * │RECEIVE_IP_REPLY   │        │ │  ┌───────▼───────────────┐           ┌──▼────────────────┐   │
- * └────────┬──────────┘        │ │  │REPL_RDB_CH_RDB_LOAD   │           │TRANSFER           │   │
- *          │+OK                │ │  └───────┬───────────────┘           └─────┬─────────────┘   │
- * ┌────────▼──────────┐        │ │          │Done loading                     │                 │
- * │RECEIVE_CAPA_REPLY │        │ │  ┌───────▼───────────────┐                 │                 │
- * └────────┬──────────┘        │ │  │REPL_RDB_CH_RDB_LOADED │                 │                 │
- *          │                   │ │  └───────┬───────────────┘                 │                 │
- * ┌────────▼───┐               │ │          │                                 │                 │
- * │SEND_PSYNC  │               │ │          │Replica loads local replication  │                 │
- * └─┬──────────┘               │ │          │buffer into memory               │                 │
- *   │PSYNC (use cached-master) │ │          └─────────┬───────────────────────┘                 │
- * ┌─▼─────────────────┐        │ │                    │                                         │
- * │RECEIVE_PSYNC_REPLY│        │ └────────────────────┼─────────────────────────────────────────┘
- * └────────┬─┬────────┘        │                      │
- * +CONTINUE│ │+RDBCHANNELSYNC  │                      │
- *   │      │ └─────────────────┘                      │
+ * └────────┬──────────┘          │     RDB channel state                                        │
+ *          │                     │     ┌────────────────────────────┐                           │
+ * ┌───────────────────┐        ┌─┼─────►RDB_CH_SEND_HANDSHAKE       │                           │
+ * │RECEIVE_PING_REPLY │        │ │     └────┬───────────────────────┘                           │
+ * └────────┬──────────┘        │ │  REPLCONF set-client-id <clientid>                           │
+ *          │ +PONG             │ │  ┌───────▼───────────────────────┐                           │
+ * ┌────────▼──────────┐        │ │  │ RDB_CH_RECEIVE_AUTH_REPLY     │                           │
+ * │SEND_HANDSHAKE     │        │ │  └───────┬───────────────────────┘                           │
+ * └────────┬──────────┘        │ │          │+OK                                                │
+ *          │+OK                │ │  ┌───────▼───────────────────────┐                           │
+ * ┌────────▼──────────┐        │ │  │ RDB_CH_RECEIVE_REPLCONF_REPLY │                           │
+ * │RECEIVE_AUTH_REPLY │        │ │  └───────┬───────────────────────┘                           │
+ * └────────┬──────────┘        │ │          │+OK                          Main channel state    │
+ *          │+OK                │ │  ┌───────▼───────────────────────┐   ┌──▼────────────────┐   │
+ * ┌────────▼──────────┐        │ │  │ RDB_CH_RECEIVE_FULLRESYNC     │   │REPL_TRANSFER      │ ◄─┼────┐
+ * │RECEIVE_PORT_REPLY │        │ │  └───────┬───────────────────────┘   └──┬────────────────┘   │    │
+ * └────────┬──────────┘        │ │          │+FULLRESYNC ..                │ buffer repl stream │    │
+ *          │+OK                │ │          │                              │ in parallel to RDB │    │
+ * ┌────────▼──────────┐        │ │          │                              │                    │    │
+ * │RECEIVE_IP_REPLY   │        │ │  ┌───────▼───────────────┐              │                    │    │
+ * └────────┬──────────┘        │ │  │REPL_RDB_CH_RDB_LOADING│              │                    │    │
+ *          │+OK                │ │  └───────┬───────────────┘              │                    │    │
+ * ┌────────▼──────────┐        │ │          │Done loading                  │                    │    │
+ * │RECEIVE_CAPA_REPLY │        │ │          │                              │                    │    │
+ * └────────┬──────────┘        │ │          │ Replica loads replication    │                    │    │
+ *          │                   │ │          │ buffer into memory           │                    │    │
+ * ┌────────▼───┐               │ │          └─────────┬────────────────────┘                    │    │
+ * │SEND_PSYNC  │               │ │                    │                                         │    │
+ * └─┬──────────┘               │ │                    │                                         │    │
+ *   │PSYNC (use cached-master) │ │                    │                                         │    │
+ * ┌─▼─────────────────┐        │ │                    │                                         │    │
+ * │RECEIVE_PSYNC_REPLY│        │ └────────────────────┼─────────────────────────────────────────┘    │
+ * └────────┬─┬────────┘        │                      │                                              │
+ * +CONTINUE│ │+RDBCHANNELSYNC <client-id>             │                                              │
+ *   │      │ └─────────────────┘──────────────────────┼──────────────────────────────────────────────┘
  *   │      │+FULLRESYNC                               │
  *   │    ┌─▼─────────────────┐                   ┌────▼──────────────┐
  *   │    │TRANSFER           ├───────────────────►CONNECTED          │
@@ -3450,11 +3455,11 @@ void replicationHandleMasterDisconnection(void) {
  *   └─────────────────────────────────────────────────┘
  */
 
-static client *rdbChannelLookupRdbClient(uint64_t id) {
+static client *rdbChannelLookupMainChannelClient(uint64_t id) {
     void *c = NULL;
     if (id == 0)
         return NULL;
-    raxFind(server.replicas_waiting_psync, (unsigned char *)&id, sizeof(id), &c);
+    raxFind(server.replicas_waiting_rdbchannel, (unsigned char *)&id, sizeof(id), &c);
     return c;
 }
 
@@ -3484,10 +3489,10 @@ static int rdbChannelSendHandshake(connection *conn, sds *err) {
     slaveGetPortStr(buf, sizeof(buf));
 
     char cid[LONG_STR_SIZE];
-    ll2string(cid, sizeof(cid), server.repl_loaded_main_ch_client_id);
+    ull2string(cid, sizeof(cid), server.repl_main_ch_client_id);
 
     *err = sendCommand(conn, "REPLCONF", "capa", "eof", "rdb-only", "1",
-                       "rdb-channel", "1", "client-id", cid,
+                       "rdb-channel", "1", "main-ch-client-id", cid,
                        "listening-port", buf, NULL);
     if (*err) {
         serverLog(LL_WARNING, "Error sending REPLCONF command to master in rdb channel handshake: %s", *err);
@@ -3560,8 +3565,7 @@ static int rdbChannelHandleFullresyncReply(connection *conn, sds *err) {
     }
 
     /* Parse +FULLRESYNC reply */
-    if (sscanf(*err, "+FULLRESYNC %40s %lld", replid, &reploff) != 2)
-    {
+    if (sscanf(*err, "+FULLRESYNC %40s %lld", replid, &reploff) != 2) {
         serverLog(LL_WARNING, "Received unexpected psync reply: %s", *err);
         return C_ERR;
     }
@@ -3574,6 +3578,10 @@ static int rdbChannelHandleFullresyncReply(connection *conn, sds *err) {
      * offset. Prepare the main and rdb channels accordingly.*/
     server.repl_state = REPL_STATE_TRANSFER;
     rdbChannelReplDataBufInit();
+
+    serverLog(LL_NOTICE, "Received from master: %s", *err);
+    serverLog(LL_NOTICE, "Starting to load RDB and accumulating replication stream in parallel");
+
     /* RDB is still loading. Setup connection to accumulate repl data.  */
     if (connSetReadHandler(server.repl_transfer_s,
                            rdbChannelBufferReplData) != C_OK)

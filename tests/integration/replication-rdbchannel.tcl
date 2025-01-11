@@ -144,18 +144,18 @@ start_server {tags {"repl external:skip"}} {
         populate 5 prefix4 1000000
 
         # On master info output, we should see state transition in this order:
-        # 1. Replica opens rdbchannel: wait_bgsave
+        # 1. Replica receives psync error (+RDBCHANNELSYNC): wait_bgsave
         # 2. Replica establishes psync: bg_rdb_transfer
         # 3. Sync is completed: online
-        test "Test replica state should start with wait_rdb_channel" {
+        test "Test replica state should start with wait_bgsave" {
             $replica config set key-load-delay 100000
-            # Pause replica before psync
+            # Pause replica before opening rdb channel conn
             $replica debug repl-pause before-rdb-channel
             $replica replicaof $master_host $master_port
 
             wait_for_condition 50 200 {
                 [s 0 connected_slaves] == 1 &&
-                [string match "*wait_rdb_channel*" [s 0 slave0]]
+                [string match "*wait_bgsave*" [s 0 slave0]]
             } else {
                 fail "replica failed x[s 0 slave0]x"
             }
@@ -183,7 +183,7 @@ start_server {tags {"repl external:skip"}} {
             # Split the input into lines
             set lines [split $trimmed_input "\n"]
 
-            # Check if there is more than one line, and take the second line
+            # There will two replicas, second one should be rdbchannel
             if {[llength $lines] < 2} {
                 error "There is no second line in the input: $input"
             }
@@ -197,6 +197,7 @@ start_server {tags {"repl external:skip"}} {
         }
 
         test "Test replica state advances to online when fullsync is completed" {
+            # speed up loading
             $replica config set key-load-delay 0
 
             wait_replica_online $master 0 100 1000
@@ -333,7 +334,6 @@ start_server {tags {"repl external:skip"}} {
     }
 }
 
-
 start_server {tags {"repl external:skip"}} {
     set master [srv 0 client]
     set master_host [srv 0 host]
@@ -460,8 +460,7 @@ start_server {tags {"repl external:skip"}} {
             test "Test master aborts rdb delivery if all replicas are dropped" {
                 $replica2 replicaof no one
 
-                # Start replicaof
-                set cur_psync [status $master sync_partial_ok]
+                # Start replication
                 $replica2 replicaof $master_host $master_port
 
                 wait_for_condition 50 1000 {
@@ -469,13 +468,6 @@ start_server {tags {"repl external:skip"}} {
                 } else {
                     fail "Sync did not start"
                 }
-
-                ## Wait replica main connection to establish psync
-                #wait_for_condition 50 1000 {
-                #    [s -2 sync_partial_ok] == $cur_psync + 1
-                #} else {
-                #    fail "No new psync, sync_partial_ok: [s -2 sync_partial_ok]"
-                #}
 
                 set loglines [count_log_lines -2]
 

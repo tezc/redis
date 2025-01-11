@@ -486,7 +486,7 @@ void debugCommand(client *c) {
 "    In case RESET is provided the peak reset time will be restored to the default value",
 "REPLYBUFFER RESIZING <0|1>",
 "    Enable or disable the reply buffer resize cron job",
-"REPL-PAUSE <clear|after-fork|on-streaming-repl-buf>",
+"REPL-PAUSE <clear|after-fork|before-rdb-channel|on-streaming-repl-buf>",
 "    Pause the server's main process during various replication steps.",
 "DELAY-RDB-CLIENT-FREE <seconds>",
 "    Grace period in seconds for replica main channel to establish psync.",
