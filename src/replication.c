@@ -774,7 +774,7 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
                 serverLog(LL_NOTICE, "Starting to deliver RDB and replication stream to replica: %s",
                           replicationGetSlaveName(c));
             } else {
-                serverLog(LL_WARNING, "Starting to deliver RDB stream to replica %s but it has no assoicated main channel",
+                serverLog(LL_WARNING, "Starting to deliver RDB stream to replica %s but it has no associated main channel",
                           replicationGetSlaveName(c));
             }
         }
