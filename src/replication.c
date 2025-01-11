@@ -3895,6 +3895,7 @@ static int rdbChannelAbortRdbTransfer(void) {
 static void rdbChannelSuccess(void) {
     serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Starting to stream replication buffer into the db"
                          " (%zu bytes).", server.repl_pending_data.used);
+
     if (rdbChannelStreamReplDataToDb(server.master) == C_ERR) {
         serverLog(LL_WARNING, "Failed to stream local replication buffer into the db");
 
@@ -3903,8 +3904,8 @@ static void rdbChannelSuccess(void) {
             freeClientAsync(server.master);
         return;
     }
-    serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Successfully streamed replication buffer into the db");
 
+    serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Successfully streamed replication buffer into the db");
     rdbChannelReplDataBufFree();
     server.repl_rdb_ch_state = REPL_RDB_CH_STATE_NONE;
 }
