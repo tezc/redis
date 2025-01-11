@@ -102,8 +102,6 @@ start_server {tags {"repl external:skip"}} {
                 $master config set repl-diskless-sync no
 
                 $master set x 3
-                set prev_partial_ok [status $master sync_partial_ok]
-
                 $replica1 replicaof $master_host $master_port
 
                 # Verify log message does not mention rdbchannel
@@ -115,9 +113,6 @@ start_server {tags {"repl external:skip"}} {
                 # Verify db's are identical
                 assert_equal [$replica1 get x] 3
                 assert_equal [$master debug digest] [$replica1 debug digest]
-
-                # rdbchannel replication would have increased psync count.
-                assert_equal [status $master sync_partial_ok] $prev_partial_ok
             }
         }
     }
@@ -144,9 +139,9 @@ start_server {tags {"repl external:skip"}} {
         populate 5 prefix4 1000000
 
         # On master info output, we should see state transition in this order:
-        # 1. Replica receives psync error (+RDBCHANNELSYNC): wait_bgsave
-        # 2. Replica establishes psync: bg_rdb_transfer
-        # 3. Sync is completed: online
+        # 1. wait_bgsave: Replica receives psync error (+RDBCHANNELSYNC)
+        # 2. bg_rdb_transfer: Replica opens rdbchannel and delivery started
+        # 3. online: Sync is completed
         test "Test replica state should start with wait_bgsave" {
             $replica config set key-load-delay 100000
             # Pause replica before opening rdb channel conn

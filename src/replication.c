@@ -263,6 +263,20 @@ int canFeedReplicaReplBuffer(client *replica) {
     return 1;
 }
 
+/* Create the replication backlog if needed. */
+void createBacklogIfNeeded(void) {
+    if (listLength(server.slaves) == 1 && server.repl_backlog == NULL) {
+        /* When we create the backlog from scratch, we always use a new
+         * replication ID and clear the ID2, since there is no valid
+         * past history. */
+        changeReplicationId();
+        clearReplicationId2();
+        createReplicationBacklog();
+        serverLog(LL_NOTICE,"Replication backlog created, my new "
+                            "replication IDs are '%s' and '%s'",
+                  server.replid, server.replid2);
+    }
+}
 /* Similar with 'prepareClientToWrite', note that we must call this function
  * before feeding replication stream into global replication buffer, since
  * clientHasPendingReplies in prepareClientToWrite will access the global
@@ -360,9 +374,12 @@ void incrementalTrimReplicationBacklog(size_t max_blocks) {
                               server.repl_backlog->histlen + 1;
 }
 
-/* Free replication buffer blocks that are referenced by this client. */
-void freeReplicaReferencedReplBuffer(client *replica) {
-    //raxRemove(server.replicas_waiting_psync, (unsigned char*) &replica->id, sizeof(replica->id), NULL);
+/* Free replication buffer blocks that are referenced by this client.
+ * Also, removes replica from rdbchannel waiting list. */
+void freeReplicaReferences(client *replica) {
+    raxRemove(server.replicas_waiting_rdbchannel,
+              (unsigned char*) &replica->id, sizeof(replica->id), NULL);
+
     if (replica->ref_repl_buf_node != NULL) {
         /* Decrease the start buffer node reference count. */
         replBufBlock *o = listNodeValue(replica->ref_repl_buf_node);
@@ -768,14 +785,21 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
      * the old SYNC command. */
     if (!(slave->flags & CLIENT_PRE_PSYNC)) {
         if (slave->slave_req & SLAVE_REQ_RDB_CHANNEL) {
-            client *c = rdbChannelLookupMainChannelClient(slave->main_ch_client_id);
+            /* This slave is rdbchannel. Find its associated main channel and
+             * change its state so we can deliver replication stream from now
+             * on, in parallel to rdb. */
+            uint64_t id = slave->main_ch_client_id;
+            client *c = rdbChannelLookupMainChannelClient(id);
             if (c) {
                 c->replstate = SLAVE_STATE_BG_RDB_TRANSFER;
+                raxRemove(server.replicas_waiting_rdbchannel,
+                          (unsigned char*) &id, sizeof(id), NULL);
                 serverLog(LL_NOTICE, "Starting to deliver RDB and replication stream to replica: %s",
                           replicationGetSlaveName(c));
             } else {
-                serverLog(LL_WARNING, "Starting to deliver RDB stream to replica %s but it has no associated main channel",
-                          replicationGetSlaveName(c));
+                serverLog(LL_WARNING, "Starting to deliver RDB stream to replica %s"
+                                      " but it has no associated main channel",
+                                      replicationGetSlaveName(slave));
             }
         }
         buflen = snprintf(buf,sizeof(buf),"+FULLRESYNC %s %lld\r\n",
@@ -1088,36 +1112,32 @@ void syncCommand(client *c) {
              * resync. */
             if (master_replid[0] != '?') server.stat_sync_partial_err++;
             if (c->slave_capa & SLAVE_CAPA_RDB_CHANNEL_REPL) {
+                int len;
                 char buf[128];
+                /* Replica is capable of rdbchannel replication. This is
+                 * replica's main channel. Let replica know full sync is needed.
+                 * Replica will open another connection (rdbchannel). Once rdb
+                 * delivery starts, we'll stream repl data to the main channel.*/
                 c->flags |= CLIENT_SLAVE;
                 c->replstate = SLAVE_STATE_WAIT_RDB_CHANNEL;
                 c->repl_ack_time = server.unixtime;
-                c->repl_start_cmd_stream_on_ack = 0;
                 listAddNodeTail(server.slaves, c);
+                createBacklogIfNeeded();
 
-                /* Create the replication backlog if needed. */
-                if (listLength(server.slaves) == 1 && server.repl_backlog == NULL) {
-                    /* When we create the backlog from scratch, we always use a new
-                     * replication ID and clear the ID2, since there is no valid
-                     * past history. */
-                    changeReplicationId();
-                    clearReplicationId2();
-                    createReplicationBacklog();
-                    serverLog(LL_NOTICE,"Replication backlog created, my new "
-                                        "replication IDs are '%s' and '%s'",
-                              server.replid, server.replid2);
-                }
-
-                raxInsert(server.replicas_waiting_rdbchannel, (unsigned char*)&c->id, sizeof(c->id), c, NULL);
-
-                snprintf(buf,sizeof(buf),"+RDBCHANNELSYNC %llu\r\n", (unsigned long long) c->id);
-
+                /* Add replica to waiting rdbchannel list. */
+                raxInsert(server.replicas_waiting_rdbchannel,
+                          (unsigned char*)&c->id, sizeof(c->id), c, NULL);
                 serverLog(LL_NOTICE,
                           "Replica %s is capable of rdb channel synchronization, and partial sync isn't possible. "
                           "Full sync will continue with dedicated RDB channel.",
                           replicationGetSlaveName(c));
 
-                if (connWrite(c->conn, buf, strlen(buf)) != (int)strlen(buf))
+                /* Send +RDBCHANNELSYNC with client id. Rdbchannel of replica
+                 * will call 'replconf set-main-ch-id <client-id>' so we can
+                 * associate replica connections on master.*/
+                len = snprintf(buf, sizeof(buf), "+RDBCHANNELSYNC %llu\r\n",
+                               (unsigned long long) c->id);
+                if (connWrite(c->conn, buf, strlen(buf)) != len)
                     freeClientAsync(c);
 
                 return;
@@ -1143,17 +1163,7 @@ void syncCommand(client *c) {
     listAddNodeTail(server.slaves,c);
 
     /* Create the replication backlog if needed. */
-    if (listLength(server.slaves) == 1 && server.repl_backlog == NULL) {
-        /* When we create the backlog from scratch, we always use a new
-         * replication ID and clear the ID2, since there is no valid
-         * past history. */
-        changeReplicationId();
-        clearReplicationId2();
-        createReplicationBacklog();
-        serverLog(LL_NOTICE,"Replication backlog created, my new "
-                            "replication IDs are '%s' and '%s'",
-                            server.replid, server.replid2);
-    }
+    createBacklogIfNeeded();
 
     /* CASE 1: BGSAVE is in progress, with disk target. */
     if (server.child_type == CHILD_TYPE_RDB &&
@@ -3551,8 +3561,7 @@ static int rdbChannelHandleReplconfReply(connection *conn, sds *err) {
 
 /* Replication: Replica side. */
 static int rdbChannelHandleFullresyncReply(connection *conn, sds *err) {
-    long long reploff = 0;
-    char replid[CONFIG_RUN_ID_SIZE + 1] = {0};
+    char *replid = NULL, *offset = NULL;
 
     *err = receiveSynchronousResponse(conn);
     if (*err == NULL)
@@ -3564,23 +3573,28 @@ static int rdbChannelHandleFullresyncReply(connection *conn, sds *err) {
         return C_RETRY;
     }
 
-    /* Parse +FULLRESYNC reply */
-    if (sscanf(*err, "+FULLRESYNC %40s %lld", replid, &reploff) != 2) {
+    /* FULL RESYNC, parse the reply in order to extract the replid
+     * and the replication offset. */
+    replid = strchr(*err,' ');
+    if (replid) {
+        replid++;
+        offset = strchr(replid, ' ');
+        if (offset) offset++;
+    }
+    if (!replid || !offset || (offset-replid-1) != CONFIG_RUN_ID_SIZE) {
         serverLog(LL_WARNING, "Received unexpected psync reply: %s", *err);
         return C_ERR;
     }
+    memcpy(server.master_replid, replid, offset-replid-1);
+    server.master_replid[CONFIG_RUN_ID_SIZE] = '\0';
+    server.master_initial_offset = strtoll(offset,NULL,10);
 
-    /* Save replid, reploff and rdb_client id */
-    memcpy(server.master_replid, replid, sizeof(replid));
-    server.master_initial_offset = reploff;
-
-    /* Now that we have the snapshot end-offset, we can ask for psync from that
-     * offset. Prepare the main and rdb channels accordingly.*/
+    /* Prepare the main and rdb channels for rdb and repl stream delivery.*/
     server.repl_state = REPL_STATE_TRANSFER;
     rdbChannelReplDataBufInit();
 
-    serverLog(LL_NOTICE, "Received from master: %s", *err);
-    serverLog(LL_NOTICE, "Starting to load RDB and accumulating replication stream in parallel");
+    serverLog(LL_NOTICE, "Fullresync from master: %s", *err);
+    serverLog(LL_NOTICE, "Starting to receive RDB and accumulate replication stream in parallel.");
 
     /* RDB is still loading. Setup connection to accumulate repl data.  */
     if (connSetReadHandler(server.repl_transfer_s,

@@ -395,7 +395,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_MODULE_PREVENT_AOF_PROP (1ULL<<48) /* Module client do not want to propagate to AOF */
 #define CLIENT_MODULE_PREVENT_REPL_PROP (1ULL<<49) /* Module client do not want to propagate to replica */
 #define CLIENT_REPROCESSING_COMMAND (1ULL<<50) /* The client is re-processing the command. */
-#define CLIENT_REPL_RDB_CHANNEL (1ULL<<51)      /* Rdb channel replication sync: track a connection which is used for rdb delivery */
+#define CLIENT_REPL_RDB_CHANNEL (1ULL<<51)      /* Client which is used for rdb delivery as part of rdb channel replication */
 
 /* Any flag that does not let optimize FLUSH SYNC to run it in bg as blocking client ASYNC */
 #define CLIENT_AVOID_BLOCKING_ASYNC_FLUSH (CLIENT_DENY_BLOCKING|CLIENT_MULTI|CLIENT_LUA_DEBUG|CLIENT_LUA_DEBUG_SYNC|CLIENT_MODULE)
@@ -485,7 +485,6 @@ typedef enum {
     REPL_RDB_CH_RECEIVE_REPLCONF_REPLY, /* Wait for REPLCONF reply */
     REPL_RDB_CH_RECEIVE_FULLRESYNC,     /* Wait for +FULLRESYNC reply */
     REPL_RDB_CH_RDB_LOADING,            /* Loading rdb using rdb channel */
-    REPL_RDB_CH_RDB_LOADED,             /* RDB is loaded */
 } repl_rdb_channel_state;
 
 /* Replication debug flags for testing. */
@@ -512,7 +511,8 @@ typedef enum {
 #define SLAVE_STATE_ONLINE 9 /* RDB file transmitted, sending just updates. */
 #define SLAVE_STATE_RDB_TRANSMITTED 10 /* RDB file transmitted - This state is used only for
                                         * a replica that only wants RDB without replication buffer  */
-#define SLAVE_STATE_WAIT_RDB_CHANNEL 11
+#define SLAVE_STATE_WAIT_RDB_CHANNEL 11 /* Main channel of replica is connected,
+                                         * we are waiting rdbchannel connection to start delivery.*/
 #define SLAVE_STATE_BG_RDB_TRANSFER 12 /* Main channel of a replica which uses rdb channel replication.
                                         * Sending RDB file and replication stream in parallel. */
 
@@ -2963,7 +2963,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc);
 void replicationFeedStreamFromMasterStream(char *buf, size_t buflen);
 void resetReplicationBuffer(void);
 void feedReplicationBuffer(char *buf, size_t len);
-void freeReplicaReferencedReplBuffer(client *replica);
+void freeReplicaReferences(client *replica);
 void replicationFeedMonitors(client *c, list *monitors, int dictid, robj **argv, int argc);
 void updateSlavesWaitingBgsave(int bgsaveerr, int type);
 void replicationCron(void);
