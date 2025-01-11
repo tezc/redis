@@ -850,7 +850,7 @@ int masterTryPartialResynchronization(client *c, long long psync_offset) {
         } else {
             serverLog(LL_NOTICE,"Full resync requested by replica %s %s",
                 replicationGetSlaveName(c),
-                c->flags & CLIENT_REPL_RDB_CHANNEL ? "(rdbchannel)" : "");
+                c->flags & CLIENT_REPL_RDB_CHANNEL ? "(rdb-channel)" : "");
         }
         goto need_full_resync;
     }
@@ -1129,7 +1129,7 @@ void syncCommand(client *c) {
                           (unsigned char*)&c->id, sizeof(c->id), c, NULL);
                 serverLog(LL_NOTICE,
                           "Replica %s is capable of rdb channel synchronization, and partial sync isn't possible. "
-                          "Full sync will continue with dedicated RDB channel.",
+                          "Full sync will continue with dedicated rdb channel.",
                           replicationGetSlaveName(c));
 
                 /* Send +RDBCHANNELSYNC with client id. Rdbchannel of replica
@@ -3593,8 +3593,8 @@ static int rdbChannelHandleFullresyncReply(connection *conn, sds *err) {
     server.repl_state = REPL_STATE_TRANSFER;
     rdbChannelReplDataBufInit();
 
-    serverLog(LL_NOTICE, "Fullresync from master: %s", *err);
-    serverLog(LL_NOTICE, "Starting to receive RDB and accumulate replication stream in parallel.");
+    serverLog(LL_NOTICE, "Fullresync reply from master: %s", *err);
+    serverLog(LL_NOTICE, "Starting to receive RDB and replication stream in parallel.");
 
     /* RDB is still loading. Setup connection to accumulate repl data.  */
     if (connSetReadHandler(server.repl_transfer_s,
