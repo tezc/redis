@@ -184,6 +184,7 @@ client *createClient(connection *conn) {
     c->slave_addr = NULL;
     c->slave_capa = SLAVE_CAPA_NONE;
     c->slave_req = SLAVE_REQ_NONE;
+    c->main_ch_client_id = 0;
     c->reply = listCreate();
     c->deferred_reply_errors = NULL;
     c->reply_bytes = 0;
@@ -248,6 +249,7 @@ void putClientInPendingWriteQueue(client *c) {
      * writes at this stage. */
     if (!(c->flags & CLIENT_PENDING_WRITE) &&
         (c->replstate == REPL_STATE_NONE ||
+         c->replstate == SLAVE_STATE_BG_RDB_TRANSFER ||
          (c->replstate == SLAVE_STATE_ONLINE && !c->repl_start_cmd_stream_on_ack)))
     {
         /* Here instead of installing the write handler, we just flag the
@@ -1537,7 +1539,16 @@ void unlinkClient(client *c) {
             }
         }
         /* Only use shutdown when the fork is active and we are the parent. */
-        if (server.child_type) connShutdown(c->conn);
+        if (server.child_type) {
+            /* connShutdown() may access TLS state. If this is a rdbchannel
+             * client, bgsave fork is writing to the connection and TLS state in
+             * the main process is stale. SSL_shutdown() involves a handshake,
+             * and it may block the caller when used with stale TLS state.*/
+            if (c->flags & CLIENT_REPL_RDB_CHANNEL)
+                shutdown(c->conn->fd, SHUT_RDWR);
+            else
+                connShutdown(c->conn);
+        }
         connClose(c->conn);
         c->conn = NULL;
     }
@@ -1706,7 +1717,8 @@ void freeClient(client *c) {
 
     /* Log link disconnection with slave */
     if (clientTypeIsSlave(c)) {
-        serverLog(LL_NOTICE,"Connection with replica %s lost.",
+        const char *type = c->flags & CLIENT_REPL_RDB_CHANNEL ? " (rdbchannel)" : "";
+        serverLog(LL_NOTICE,"Connection with replica%s %s lost.", type,
             replicationGetSlaveName(c));
     }
 
@@ -1738,7 +1750,7 @@ void freeClient(client *c) {
     /* Free data structures. */
     listRelease(c->reply);
     zfree(c->buf);
-    freeReplicaReferencedReplBuffer(c);
+    freeReplicaReferences(c);
     freeClientArgv(c);
     freeClientOriginalArgv(c);
     if (c->deferred_reply_errors)
@@ -1840,7 +1852,7 @@ void freeClientAsync(client *c) {
     c->flags |= CLIENT_CLOSE_ASAP;
     /* Replicas that was marked as CLIENT_CLOSE_ASAP should not keep the
      * replication backlog from been trimmed. */
-    if (c->flags & CLIENT_SLAVE) freeReplicaReferencedReplBuffer(c);
+    if (c->flags & CLIENT_SLAVE) freeReplicaReferences(c);
     listAddNodeTail(server.clients_to_close,c);
 }
 
@@ -3051,6 +3063,7 @@ sds catClientInfoString(sds s, client *client) {
     if (client->flags & CLIENT_READONLY) *p++ = 'r';
     if (client->flags & CLIENT_NO_EVICT) *p++ = 'e';
     if (client->flags & CLIENT_NO_TOUCH) *p++ = 'T';
+    if (client->flags & CLIENT_REPL_RDB_CHANNEL) *p++ = 'C';
     if (p == flags) *p++ = 'N';
     *p++ = '\0';
 
@@ -4272,7 +4285,7 @@ void flushSlavesOutputBuffers(void) {
          *
          * 3. Obviously if the slave is not ONLINE.
          */
-        if (slave->replstate == SLAVE_STATE_ONLINE &&
+        if ((slave->replstate == SLAVE_STATE_ONLINE || slave->replstate == SLAVE_STATE_BG_RDB_TRANSFER) &&
             !(slave->flags & CLIENT_CLOSE_ASAP) &&
             can_receive_writes &&
             !slave->repl_start_cmd_stream_on_ack &&
