@@ -3888,8 +3888,7 @@ static int rdbChannelAbortRdbTransfer(void) {
     return C_OK;
 }
 
-/* Replication: Replica side. After loading the rdb, create a master client and
- * stream replication buffer to the db. */
+/* Replica side. After loading the rdb, stream replication buffer to the db. */
 static void rdbChannelSuccess(void) {
     serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Starting to stream replication buffer into the db"
                          " (%zu bytes).", server.repl_pending_data.used);
