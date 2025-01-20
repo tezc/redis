@@ -1200,6 +1200,7 @@ typedef struct replDataBufBlock {
  * rdb channel replication on replica side. */
 typedef struct replDataBuf {
     list *blocks; /* List of replDataBufBlock */
+    size_t mem_used; /* Total allocated memory */
     size_t size;  /* Total number of bytes available in all blocks. */
     size_t used;  /* Total number of bytes actually used in all blocks. */
     size_t peak;  /* Peak number of bytes stored in all blocks. */
