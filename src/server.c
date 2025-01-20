@@ -6793,6 +6793,15 @@ void dismissMemoryInChild(void) {
         dismissMemory(o, o->size);
     }
 
+    /* Dismiss accumulated repl buffer on replica. */
+    if (server.repl_full_sync_buffer.blocks) {
+        listRewind(server.repl_full_sync_buffer.blocks, &li);
+        while((ln = listNext(&li))) {
+            replDataBufBlock *o = listNodeValue(ln);
+            dismissMemory(o, o->size);
+        }
+    }
+
     /* Dismiss all clients memory. */
     listRewind(server.clients, &li);
     while((ln = listNext(&li))) {

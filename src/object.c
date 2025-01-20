@@ -1210,6 +1210,7 @@ struct redisMemOverhead *getMemoryOverheadData(void) {
             raxSize(server.repl_backlog->blocks_index) * sizeof(void*);
     }
     mem_total += mh->repl_backlog;
+    mem_total += server.repl_full_sync_buffer.mem_used;
     mem_total += mh->clients_slaves;
 
     /* Computing the memory used by the clients would be O(N) if done

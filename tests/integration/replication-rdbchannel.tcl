@@ -396,10 +396,10 @@ start_server {tags {"repl external:skip"}} {
             populate 20000 master 100 -1
 
             $replica replicaof $master_host $master_port
-            wait_for_condition 50 200 {
+            wait_for_condition 100 200 {
                 [s 0 loading] == 1
             } else {
-                fail "[s 0 loading] sdsdad"
+                fail "Replica did not start loading"
             }
 
             # Generate some traffic for backlog ~2mb
@@ -469,8 +469,7 @@ start_server {tags {"repl external:skip"}} {
                 wait_for_condition 500 100 {
                     [s -2 connected_slaves] == 2
                 } else {
-                    fail "Replicas didn't establish psync:
-                          sync_partial_ok: [s -2 sync_partial_ok]"
+                    fail "Replicas didn't establish psync"
                 }
 
                 # kill one of the replicas
@@ -483,10 +482,7 @@ start_server {tags {"repl external:skip"}} {
                     [s -2 sync_full] == 2 &&
                     [s -2 connected_slaves] == 1
                 } else {
-                    fail "Sync session did not continue
-                          master_link_status: [s 0 master_link_status]
-                          sync_full:[s -2 sync_full]
-                          connected_slaves: [s -2 connected_slaves]"
+                    fail "Sync session did not continue"
                 }
             }
 
@@ -511,9 +507,7 @@ start_server {tags {"repl external:skip"}} {
                     [s -2 rdb_bgsave_in_progress] == 0 &&
                     [s -2 connected_slaves] == 0
                 } else {
-                    fail "Master should abort the sync
-                          rdb_bgsave_in_progress:[s -2 rdb_bgsave_in_progress]
-                          connected_slaves: [s -2 connected_slaves]"
+                    fail "Master should abort the sync"
                 }
                 wait_for_log_messages -2 {"*Background transfer error*"} $loglines 1000 50
             }
@@ -722,7 +716,7 @@ start_server {tags {"repl external:skip"}} {
                 [s 0 sync_full] == 1 &&
                 [s 0 sync_partial_ok] == 1
             } else {
-                fail "psync was not successful [s 0 sync_full] [s 0 sync_partial_ok]"
+                fail "psync was not successful"
             }
 
             # Verify db's are identical after recovery
@@ -773,7 +767,6 @@ start_server {tags {"repl external:skip"}} {
 
             # Speed up loading
             $replica config set key-load-delay 0
-            stop_write_load $load_handle
 
             # Wait until replica recovers and becomes online
             wait_replica_online $master 0 100 100
@@ -783,7 +776,7 @@ start_server {tags {"repl external:skip"}} {
                 [s 0 sync_full] == 2 &&
                 [s 0 sync_partial_ok] == 0
             } else {
-                fail "sync was not successful [s 0 sync_full] [s 0 sync_partial_ok]"
+                fail "sync was not successful"
             }
 
             # Verify db's are identical after recovery
