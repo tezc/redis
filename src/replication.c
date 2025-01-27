@@ -3670,7 +3670,9 @@ error:
  * during rdb channel sync. */
 static void rdbChannelReplDataBufInit(void) {
     serverAssert(server.repl_full_sync_buffer.blocks == NULL);
-    server.repl_full_sync_buffer = (replDataBuf) {0};
+    server.repl_full_sync_buffer.size = 0;
+    server.repl_full_sync_buffer.used = 0;
+    server.repl_full_sync_buffer.mem_used = 0;
     server.repl_full_sync_buffer.blocks = listCreate();
     server.repl_full_sync_buffer.blocks->free = zfree;
 }
@@ -3679,7 +3681,10 @@ static void rdbChannelReplDataBufInit(void) {
  * Free replica's local replication buffer */
 static void rdbChannelReplDataBufFree(void) {
     listRelease(server.repl_full_sync_buffer.blocks);
-    server.repl_full_sync_buffer = (replDataBuf) {0};
+    server.repl_full_sync_buffer.blocks = NULL;
+    server.repl_full_sync_buffer.size = 0;
+    server.repl_full_sync_buffer.used = 0;
+    server.repl_full_sync_buffer.mem_used = 0;
 }
 
 /* Replication: Replica side.
