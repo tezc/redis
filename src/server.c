@@ -2757,7 +2757,7 @@ void initServer(void) {
         server.db[j].id = j;
         server.db[j].avg_ttl = 0;
         server.db[j].defrag_later = listCreate();
-        listSetFreeMethod(server.db[j].defrag_later,(void (*)(void*))sdsfree);
+        listSetFreeMethod(server.db[j].defrag_later, sdsfreegeneric);
     }
     evictionPoolAlloc(); /* Initialize the LRU keys pool. */
     /* Note that server.pubsub_channels was chosen to be a kvstore (with only one dict, which

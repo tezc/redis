@@ -174,6 +174,11 @@ void sdsfree(sds s) {
     s_free((char*)s-sdsHdrSize(s[-1]));
 }
 
+/* Generic version of sdsfree. */
+void sdsfreegeneric(void *s) {
+    sdsfree((sds)s);
+}
+
 /* Set the sds string length to the length as obtained with strlen(), so
  * considering as content only up to the first null term character.
  *

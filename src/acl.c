@@ -277,7 +277,7 @@ int ACLListMatchSds(void *a, void *b) {
 
 /* Method to free list elements from ACL users password/patterns lists. */
 void ACLListFreeSds(void *item) {
-    sdsfree(item);
+    sdsfreegeneric(item);
 }
 
 /* Method to duplicate list elements from ACL users password/patterns lists. */
@@ -467,6 +467,11 @@ void ACLFreeUser(user *u) {
     listRelease(u->passwords);
     listRelease(u->selectors);
     zfree(u);
+}
+
+/* Generic version of ACLFreeUser. */
+void ACLFreeUserGeneric(void *u) {
+    ACLFreeUser((user *)u);
 }
 
 /* When a user is deleted we need to cycle the active
@@ -2459,12 +2464,12 @@ sds ACLLoadFromFile(const char *filename) {
         }
 
         if (user_channels)
-            raxFreeWithCallback(user_channels, (void(*)(void*))listRelease);
-        raxFreeWithCallback(old_users,(void(*)(void*))ACLFreeUser);
+            raxFreeWithCallback(user_channels, listReleaseGeneric);
+        raxFreeWithCallback(old_users, ACLFreeUserGeneric);
         sdsfree(errors);
         return NULL;
     } else {
-        raxFreeWithCallback(Users,(void(*)(void*))ACLFreeUser);
+        raxFreeWithCallback(Users, ACLFreeUserGeneric);
         Users = old_users;
         errors = sdscat(errors,"WARNING: ACL errors detected, no change to the previously active ACL rules was performed");
         return errors;

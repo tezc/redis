@@ -33,6 +33,7 @@
 #define STREAM_LISTPACK_MAX_SIZE (1<<30)
 
 void streamFreeCG(streamCG *cg);
+void streamFreeCGGeneric(void *cg);
 void streamFreeNACK(streamNACK *na);
 size_t streamReplyWithRangeFromConsumerPEL(client *c, stream *s, streamID *start, streamID *end, size_t count, streamConsumer *consumer);
 int streamParseStrictIDOrReply(client *c, robj *o, streamID *id, uint64_t missing_seq, int *seq_given);
@@ -60,9 +61,9 @@ stream *streamNew(void) {
 
 /* Free a stream, including the listpacks stored inside the radix tree. */
 void freeStream(stream *s) {
-    raxFreeWithCallback(s->rax,(void(*)(void*))lpFree);
+    raxFreeWithCallback(s->rax, lpFreeGeneric);
     if (s->cgroups)
-        raxFreeWithCallback(s->cgroups,(void(*)(void*))streamFreeCG);
+        raxFreeWithCallback(s->cgroups, streamFreeCGGeneric);
     zfree(s);
 }
 
@@ -2478,6 +2479,11 @@ void streamFreeNACK(streamNACK *na) {
     zfree(na);
 }
 
+/* Generic version of streamFreeNACK. */
+void streamFreeNACKGeneric(void *na) {
+    streamFreeNACK((streamNACK *)na);
+}
+
 /* Free a consumer and associated data structures. Note that this function
  * will not reassign the pending messages associated with this consumer
  * nor will delete them from the stream, so when this function is called
@@ -2488,6 +2494,11 @@ void streamFreeConsumer(streamConsumer *sc) {
                          between the consumer and the main stream PEL. */
     sdsfree(sc->name);
     zfree(sc);
+}
+
+/* Generic version of streamFreeConsumer. */
+void streamFreeConsumerGeneric(void *sc) {
+    streamFreeConsumer((streamConsumer *)sc);
 }
 
 /* Create a new consumer group in the context of the stream 's', having the
@@ -2510,9 +2521,14 @@ streamCG *streamCreateCG(stream *s, char *name, size_t namelen, streamID *id, lo
 
 /* Free a consumer group and all its associated data. */
 void streamFreeCG(streamCG *cg) {
-    raxFreeWithCallback(cg->pel,(void(*)(void*))streamFreeNACK);
-    raxFreeWithCallback(cg->consumers,(void(*)(void*))streamFreeConsumer);
+    raxFreeWithCallback(cg->pel, streamFreeNACKGeneric);
+    raxFreeWithCallback(cg->consumers, streamFreeConsumerGeneric);
     zfree(cg);
+}
+
+/* Generic version of streamFreeCG. */
+void streamFreeCGGeneric(void *cg) {
+    streamFreeCG((streamCG *)cg);
 }
 
 /* Lookup the consumer group in the specified stream and returns its
