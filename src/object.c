@@ -1209,8 +1209,10 @@ struct redisMemOverhead *getMemoryOverheadData(void) {
             server.repl_backlog->blocks_index->numnodes * sizeof(raxNode) +
             raxSize(server.repl_backlog->blocks_index) * sizeof(void*);
     }
+
+    mh->replica_fullsync_buffer = server.repl_full_sync_buffer.mem_used;
+    mem_total += mh->replica_fullsync_buffer;
     mem_total += mh->repl_backlog;
-    mem_total += server.repl_full_sync_buffer.mem_used;
     mem_total += mh->clients_slaves;
 
     /* Computing the memory used by the clients would be O(N) if done
@@ -1561,7 +1563,7 @@ NULL
     } else if (!strcasecmp(c->argv[1]->ptr,"stats") && c->argc == 2) {
         struct redisMemOverhead *mh = getMemoryOverheadData();
 
-        addReplyMapLen(c,32+mh->num_dbs);
+        addReplyMapLen(c,33+mh->num_dbs);
 
         addReplyBulkCString(c,"peak.allocated");
         addReplyLongLong(c,mh->peak_allocated);
@@ -1574,6 +1576,9 @@ NULL
 
         addReplyBulkCString(c,"replication.backlog");
         addReplyLongLong(c,mh->repl_backlog);
+
+        addReplyBulkCString(c,"replica.fullsync.buffer");
+        addReplyLongLong(c,mh->replica_fullsync_buffer);
 
         addReplyBulkCString(c,"clients.slaves");
         addReplyLongLong(c,mh->clients_slaves);

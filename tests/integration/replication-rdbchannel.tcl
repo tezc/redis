@@ -79,6 +79,7 @@ start_server {tags {"repl external:skip"}} {
                 $replica1 config set repl-rdb-channel yes
                 $replica2 config set repl-rdb-channel no
 
+                set loglines [count_log_lines 0]
                 set prev_forks [s 0 total_forks]
                 $master set x 2
 
@@ -87,9 +88,8 @@ start_server {tags {"repl external:skip"}} {
                 $replica1 replicaof $master_host $master_port
                 $replica2 replicaof $master_host $master_port
 
-                set res [wait_for_log_messages 0 {"*Starting BGSAVE* replicas sockets (rdb-channel)*"} 0 2000 10]
-                set loglines [lindex $res 1]
-                wait_for_log_messages 0 {"*Starting BGSAVE* replicas sockets*"} $loglines 2000 10
+                wait_for_log_messages 0 {"*Starting BGSAVE* replicas sockets (rdb-channel)*"} $loglines 300 100
+                wait_for_log_messages 0 {"*Starting BGSAVE* replicas sockets"} $loglines 300 100
 
                 wait_replica_online $master 0 100 100
                 wait_replica_online $master 1 100 100
@@ -486,6 +486,14 @@ start_server {tags {"repl external:skip"}} {
                           master_link_status: [s 0 master_link_status]
                           sync_full:[s -2 sync_full]
                           connected_slaves: [s -2 connected_slaves]"
+                }
+
+                # Wait until replica catches up
+                wait_replica_online $master 0 2000 100
+                wait_for_condition 200 100 {
+                    [s 0 mem_replica_full_sync_buffer] == 0
+                } else {
+                    fail "Replica did not consume buffer in time"
                 }
             }
 
