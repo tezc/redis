@@ -502,7 +502,7 @@ void afterErrorReply(client *c, const char *s, size_t len, int flags) {
     if (c->flags & CLIENT_MODULE) {
         if (!c->deferred_reply_errors) {
             c->deferred_reply_errors = listCreate();
-            listSetFreeMethod(c->deferred_reply_errors, (void (*)(void*))sdsfree);
+            listSetFreeMethod(c->deferred_reply_errors, sdsfreegeneric);
         }
         listAddNodeTail(c->deferred_reply_errors, sdsnewlen(s, len));
         return;

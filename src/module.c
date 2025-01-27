@@ -10557,7 +10557,7 @@ RedisModuleServerInfoData *RM_GetServerInfo(RedisModuleCtx *ctx, const char *sec
  * context instead of passing NULL. */
 void RM_FreeServerInfo(RedisModuleCtx *ctx, RedisModuleServerInfoData *data) {
     if (ctx != NULL) autoMemoryFreed(ctx,REDISMODULE_AM_INFO,data);
-    raxFreeWithCallback(data->rax, (void(*)(void*))sdsfree);
+    raxFreeWithCallback(data->rax, sdsfreegeneric);
     zfree(data);
 }
 
