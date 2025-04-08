@@ -1920,6 +1920,8 @@ void afterSleep(struct aeEventLoop *eventLoop) {
     if (!ProcessingEventsWhileBlocked) {
         server.cmd_time_snapshot = server.mstime;
     }
+    void handleIOThreads(void);
+    handleIOThreads();
 }
 
 /* =========================== Server initialization ======================== */

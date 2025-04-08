@@ -1420,7 +1420,7 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     list *pending_clients;                      /* List of clients with pending writes. */
     list *processing_clients;                   /* List of clients being processed. */
     eventNotifier *pending_clients_notifier;    /* Used to wake up the loop when write should be performed. */
-    pthread_mutex_t pending_clients_mutex;      /* Mutex for pending write list */
+    pthread_spinlock_t pending_clients_mutex;      /* Mutex for pending write list */
     list *pending_clients_to_main_thread;       /* Clients that are waiting to be executed by the main thread. */
     list *clients;                              /* IO thread managed clients. */
 } IOThread;

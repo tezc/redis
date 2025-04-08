@@ -392,6 +392,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
                 tvp = &tv;
             }
         }
+        tv.tv_sec = tv.tv_usec = 0;
         /* Call the multiplexing API, will return only on timeout or when
          * some event fires. */
         numevents = aeApiPoll(eventLoop, tvp);

@@ -16,7 +16,7 @@ static IOThread IOThreads[IO_THREADS_MAX_NUM];
 static list *mainThreadPendingClientsToIOThreads[IO_THREADS_MAX_NUM]; /* Clients to IO threads */
 static list *mainThreadProcessingClients[IO_THREADS_MAX_NUM]; /* Clients in processing */
 static list *mainThreadPendingClients[IO_THREADS_MAX_NUM]; /* Pending clients from IO threads */
-static pthread_mutex_t mainThreadPendingClientsMutexes[IO_THREADS_MAX_NUM]; /* Mutex for pending clients */
+static pthread_spinlock_t mainThreadPendingClientsMutexes[IO_THREADS_MAX_NUM]; /* Mutex for pending clients */
 static eventNotifier* mainThreadPendingClientsNotifiers[IO_THREADS_MAX_NUM]; /* Notifier for pending clients */
 
 /* When IO threads read a complete query of clients or want to free clients, it
@@ -295,13 +295,13 @@ int sendPendingClientsToIOThreads(void) {
         int len = listLength(mainThreadPendingClientsToIOThreads[i]);
         if (len > 0) {
             IOThread *t = &IOThreads[i];
-            pthread_mutex_lock(&t->pending_clients_mutex);
+            pthread_spin_lock(&t->pending_clients_mutex);
             listJoin(t->pending_clients, mainThreadPendingClientsToIOThreads[i]);
-            pthread_mutex_unlock(&t->pending_clients_mutex);
+            pthread_spin_unlock(&t->pending_clients_mutex);
             /* Trigger an event, maybe an error is returned when buffer is full
              * if using pipe, but no worry, io thread will handle all clients
              * in list when receiving a notification. */
-            triggerEventNotifier(t->pending_clients_notifier);
+            //triggerEventNotifier(t->pending_clients_notifier);
         }
         processed += len;
     }
@@ -400,10 +400,10 @@ void processClientsFromIOThread(IOThread *t) {
         server.aof_fsync != AOF_FSYNC_ALWAYS &&
         !ProcessingEventsWhileBlocked)
     {
-        pthread_mutex_lock(&(t->pending_clients_mutex));
+        pthread_spin_lock(&(t->pending_clients_mutex));
         listJoin(t->pending_clients, mainThreadPendingClientsToIOThreads[t->id]);
-        pthread_mutex_unlock(&(t->pending_clients_mutex));
-        triggerEventNotifier(t->pending_clients_notifier);
+        pthread_spin_unlock(&(t->pending_clients_mutex));
+        //triggerEventNotifier(t->pending_clients_notifier);
     }
 }
 
@@ -417,13 +417,13 @@ void handleClientsFromIOThread(struct aeEventLoop *el, int fd, void *ptr, int ma
     IOThread *t = ptr;
 
     /* Handle fd event first. */
-    serverAssert(fd == getReadEventFd(mainThreadPendingClientsNotifiers[t->id]));
-    handleEventNotifier(mainThreadPendingClientsNotifiers[t->id]);
+    //serverAssert(fd == getReadEventFd(mainThreadPendingClientsNotifiers[t->id]));
+    //handleEventNotifier(mainThreadPendingClientsNotifiers[t->id]);
 
     /* Get the list of clients to process. */
-    pthread_mutex_lock(&mainThreadPendingClientsMutexes[t->id]);
+    pthread_spin_lock(&mainThreadPendingClientsMutexes[t->id]);
     listJoin(mainThreadProcessingClients[t->id], mainThreadPendingClients[t->id]);
-    pthread_mutex_unlock(&mainThreadPendingClientsMutexes[t->id]);
+    pthread_spin_unlock(&mainThreadPendingClientsMutexes[t->id]);
     if (listLength(mainThreadProcessingClients[t->id]) == 0) return;
 
     /* Process the clients from IO threads. */
@@ -458,12 +458,12 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
     IOThread *t = ptr;
 
     /* Handle fd event first. */
-    serverAssert(fd == getReadEventFd(t->pending_clients_notifier));
-    handleEventNotifier(t->pending_clients_notifier);
+    //serverAssert(fd == getReadEventFd(t->pending_clients_notifier));
+    //handleEventNotifier(t->pending_clients_notifier);
 
-    pthread_mutex_lock(&t->pending_clients_mutex);
+    pthread_spin_lock(&t->pending_clients_mutex);
     listJoin(t->processing_clients, t->pending_clients);
-    pthread_mutex_unlock(&t->pending_clients_mutex);
+    pthread_spin_unlock(&t->pending_clients_mutex);
     if (listLength(t->processing_clients) == 0) return;
 
     listIter li;
@@ -524,14 +524,16 @@ void IOThreadBeforeSleep(struct aeEventLoop *el) {
     /* Check if there are clients to be processed in main thread, and then join
      * them to the list of main thread. */
     if (listLength(t->pending_clients_to_main_thread) > 0) {
-        pthread_mutex_lock(&mainThreadPendingClientsMutexes[t->id]);
+        pthread_spin_lock(&mainThreadPendingClientsMutexes[t->id]);
         listJoin(mainThreadPendingClients[t->id], t->pending_clients_to_main_thread);
-        pthread_mutex_unlock(&mainThreadPendingClientsMutexes[t->id]);
+        pthread_spin_unlock(&mainThreadPendingClientsMutexes[t->id]);
         /* Trigger an event, maybe an error is returned when buffer is full
          * if using pipe, but no worry, main thread will handle all clients
          * in list when receiving a notification. */
-        triggerEventNotifier(mainThreadPendingClientsNotifiers[t->id]);
+        //triggerEventNotifier(mainThreadPendingClientsNotifiers[t->id]);
     }
+
+    handleClientsFromMainThread(NULL, -1, t, 0);
 }
 
 /* The main function of IO thread, it will run an event loop. The mian thread
@@ -546,6 +548,13 @@ void *IOThreadMain(void *ptr) {
     aeSetBeforeSleepProc(t->el, IOThreadBeforeSleep);
     aeMain(t->el);
     return NULL;
+}
+
+void handleIOThreads(void) {
+    for (int i = 1; i < server.io_threads_num; i++) {
+        IOThread *t = &IOThreads[i];
+        handleClientsFromIOThread(NULL, -1, t, 0);
+    }
 }
 
 /* Initialize the data structures needed for threaded I/O. */
@@ -572,13 +581,7 @@ void initThreadedIO(void) {
         t->clients = listCreate();
         atomicSetWithSync(t->paused, IO_THREAD_UNPAUSED);
 
-        pthread_mutexattr_t *attr = NULL;
-        #if defined(__linux__) && defined(__GLIBC__)
-        attr = zmalloc(sizeof(pthread_mutexattr_t));
-        pthread_mutexattr_init(attr);
-        pthread_mutexattr_settype(attr, PTHREAD_MUTEX_ADAPTIVE_NP);
-        #endif
-        pthread_mutex_init(&t->pending_clients_mutex, attr);
+        pthread_spin_init(&t->pending_clients_mutex, PTHREAD_PROCESS_PRIVATE);
 
         t->pending_clients_notifier = createEventNotifier();
         if (aeCreateFileEvent(t->el, getReadEventFd(t->pending_clients_notifier),
@@ -598,7 +601,7 @@ void initThreadedIO(void) {
         mainThreadPendingClientsToIOThreads[i] = listCreate();
         mainThreadPendingClients[i] = listCreate();
         mainThreadProcessingClients[i] = listCreate();
-        pthread_mutex_init(&mainThreadPendingClientsMutexes[i], attr);
+        pthread_spin_init(&mainThreadPendingClientsMutexes[i], PTHREAD_PROCESS_PRIVATE);
         mainThreadPendingClientsNotifiers[i] = createEventNotifier();
         if (aeCreateFileEvent(server.el, getReadEventFd(mainThreadPendingClientsNotifiers[i]),
                               AE_READABLE, handleClientsFromIOThread, t) != AE_OK)
@@ -606,7 +609,7 @@ void initThreadedIO(void) {
             serverLog(LL_WARNING, "Fatal: Can't register file event for main thread notifications.");
             exit(1);
         }
-        if (attr) zfree(attr);
+        //if (attr) zfree(attr);
     }
 }
 
