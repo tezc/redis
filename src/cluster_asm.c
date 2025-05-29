@@ -9,6 +9,6 @@
 
 #include "cluster_asm.h"
 
-int dummy() {
+int dummy(void) {
     return 0;
 }
