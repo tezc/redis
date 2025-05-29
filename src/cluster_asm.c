@@ -8,3 +8,7 @@
  */
 
 #include "cluster_asm.h"
+
+int dummy() {
+    return 0;
+}
