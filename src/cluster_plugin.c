@@ -156,64 +156,19 @@ const char** clusterDebugCommandExtendedHelp(void) {
 int handleDebugClusterCommand(client *c) {
     UNUSED(c);
     return 0;
-//    if(!strcasecmp(c->argv[1]->ptr, "flotilla.dump")) {
-//        flotilla_dump_debug_command(c);
-//    } else if (!strcasecmp(c->argv[1]->ptr, "flotilla.set_id")) {
-//        if (c->argc != 3) {
-//            addReplyErrorArity(c);
-//            return 1;
-//        }
-//        long long id;
-//        if (getLongLongFromObject(c->argv[2], &id) != C_OK) {
-//            addReplyErrorFormat(c, "Invalid id: %s", (char *) c->argv[2]->ptr);
-//            return 1;
-//        }
-//        debug_set_my_id(id);
-//        addReply(c, shared.ok);
-//    } else if (!strcasecmp(c->argv[1]->ptr, "flotilla.send_topo_msg")) {
-//        if (c->argc != 3) {
-//            addReplyErrorArity(c);
-//            return 1;
-//        }
-//        debug_send_topo_msg(c, c->argv[2]->ptr);
-//    } else if (!strcasecmp(c->argv[1]->ptr, "flotilla.panic.main_thread")) {
-//        flotilla_panic_debug_command();
-//        addReply(c, shared.ok);
-//    } else if (!strcasecmp(c->argv[1]->ptr, "flotilla.panic.datanode_thread")) {
-//        flotilla_panic_datanode_thread_debug_command();
-//        addReply(c, shared.ok);
-//    } else if (!strcasecmp(c->argv[1]->ptr, "flotilla.cluster_epoch")) {
-//        addReplyLongLong(c, flotilla_get_cluster_epoch());
-//    } else if (!strcasecmp(c->argv[1]->ptr, "flotilla.shard_epoch")) {
-//        addReplyLongLong(c, flotilla_get_shard_epoch());
-//    } else {
-//        return 0;
-//    }
-//
-//    return 1;
 }
 
 void clusterInitLast(void) {
-    // No OP
 }
 
 void clusterBeforeSleep(void) {
-    // This function is executed before redis' main loop enters poll on its sockets.
-    // Do anything urgent here
 }
 
 int verifyClusterConfigWithData(void) {
-    // see documentation in cluster_legacy.c
-    // In short, verify upon server startup that there are no contradicting conditions, e.g., some cached
-    // or stored config/data does not match the cluster config or state
     return 0;
 }
 
 void clusterUpdateMyselfFlags(void) {
-    /* Some flags (currently just the NOFAILOVER flag) may need to be updated
-     * in the "myself" node based on the current configuration of the node,
-     * that may change at runtime via CONFIG SET. This function changes the
-     * set of flags in myself->flags accordingly. */
 }
 
 unsigned long getClusterConnectionsCount(void) {
@@ -221,16 +176,12 @@ unsigned long getClusterConnectionsCount(void) {
 }
 
 void clusterUpdateMyselfHostname(void) {
-    // NO OP - this is a config line and it does not seem to apply to us
 }
 
 void clusterUpdateMyselfAnnouncedPorts(void) {
-    // NO OP - this is a config line and it does not seem to apply to us
 }
 
 void clusterUpdateMyselfIp(void) {
-    //TBD: Need to handle this??
-    //setFlotillaConfigUpdatedFlag(1);
 }
 
 int clusterSendModuleMessageToTarget(const char *target, uint64_t module_id, uint8_t type, const char *payload, uint32_t len) {
@@ -239,7 +190,6 @@ int clusterSendModuleMessageToTarget(const char *target, uint64_t module_id, uin
     UNUSED(type);
     UNUSED(payload);
     UNUSED(len);
-    // Not supported. Return an error
     return 0;
 }
 
@@ -247,22 +197,18 @@ void clusterPropagatePublish(robj *channel, robj *message, int sharded) {
     UNUSED(channel);
     UNUSED(message);
     UNUSED(sharded);
-    // not initially supported
 }
 
 void slotToChannelAdd(sds channel) {
     UNUSED(channel);
-    // not initially supported
 }
 
 void slotToChannelDel(sds channel) {
     UNUSED(channel);
-    // not initially supported
 }
 
 int clusterNodePending(clusterNode *node) {
     UNUSED(node);
-    //need to implement
     return 0;
 }
 
@@ -272,24 +218,20 @@ int clusterNodeIsSlave(clusterNode *node) {
 
 int clusterNodeIsFailing(clusterNode *node) {
     UNUSED(node);
-    //need to implement
     return 0;
 }
 
 int clusterNodeTimedOut(clusterNode *node) {
     UNUSED(node);
-    //need to implement
     return 0;
 }
 
 int clusterNodeIsNoFailover(clusterNode *node) {
     UNUSED(node);
-    //need to implement
     return 0;
 }
 
 int isClusterHealthy(void) {
-    //need to implement
     return 1;
 }
 
@@ -302,26 +244,11 @@ int clusterEnabled(void) {
 }
 
 void clusterUpdateMyselfHumanNodename(void) {
-    //no op
 }
 
 int getNodeDefaultClientPort(clusterNode *n) {
     UNUSED(n);
-    return 0; //server.tls_cluster ? flotilla_get_node_tls_port(n) : flotilla_get_node_tcp_port(n);
-}
-
-char** getClusterNodesList(size_t *numnodes) {
-    size_t count = clusterPlugin->getClusterSize();
-    char **ids = zmalloc((count+1)*CLUSTER_NAMELEN);
-    for(size_t i = 0; i < count; i++) {
-        clusterNode *node = clusterPlugin->getNodeAtIdx(i);
-        ids[i] = zmalloc(CLUSTER_NAMELEN);
-        memcpy(ids[i], clusterNodeGetName(node),CLUSTER_NAMELEN);
-    }
-    *numnodes = count;
-    ids[count] = NULL; /* Null term so that FreeClusterNodesList does not need
-                    * to also get the count argument. */
-    return ids;
+    return 0;
 }
 
 clusterNode *clusterNodeGetMaster(clusterNode *node) {
