@@ -251,6 +251,20 @@ int getNodeDefaultClientPort(clusterNode *n) {
     return 0;
 }
 
+char** getClusterNodesList(size_t *numnodes) {
+    size_t count = clusterPlugin->getClusterSize();
+    char **ids = zmalloc((count+1)*CLUSTER_NAMELEN);
+    for(size_t i = 0; i < count; i++) {
+        clusterNode *node = clusterPlugin->getNodeAtIdx(i);
+        ids[i] = zmalloc(CLUSTER_NAMELEN);
+        memcpy(ids[i], clusterNodeGetName(node),CLUSTER_NAMELEN);
+    }
+    *numnodes = count;
+    ids[count] = NULL; /* Null term so that FreeClusterNodesList does not need
+                    * to also get the count argument. */
+    return ids;
+}
+
 clusterNode *clusterNodeGetMaster(clusterNode *node) {
     return clusterPlugin->clusterNodeGetMaster(node);
 }
