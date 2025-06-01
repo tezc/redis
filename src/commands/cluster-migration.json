@@ -1,0 +1,64 @@
+{
+    "MIGRATION": {
+        "summary": "Start, monitor and cancel slot migration.",
+        "complexity": "O(N) where N is the total number of the slots between the start slot and end slot arguments.",
+        "group": "cluster",
+        "since": "9.0.0",
+        "arity": -3,
+        "container": "CLUSTER",
+        "function": "clusterCommand",
+        "command_flags": [
+            "NO_ASYNC_LOADING",
+            "ADMIN",
+            "STALE"
+        ],
+        "arguments": [
+            {
+                "name": "condition",
+                "type": "oneof",
+                "arguments": [
+                    {
+                        "token": "IMPORT",
+                        "name": "import",
+                        "type": "block",
+                        "multiple": true,
+                        "arguments": [
+                            {
+                                "name": "start-slot",
+                                "type": "integer"
+                            },
+                            {
+                                "name": "end-slot",
+                                "type": "integer"
+                            }
+                        ]
+                    },
+                    {
+                        "token": "CANCEL",
+                        "name": "cancel",
+                        "type": "block",
+                        "multiple": true,
+                        "arguments": [
+                            {
+                                "name": "start-slot",
+                                "type": "integer"
+                            },
+                            {
+                                "name": "end-slot",
+                                "type": "integer"
+                            }
+                        ]
+                    },
+                    {
+                        "token": "STATUS",
+                        "name": "status",
+                        "type": "pure-token"
+                    }
+                ]
+            }
+        ],
+        "reply_schema": {
+            "const": "OK"
+        }
+    }
+}
