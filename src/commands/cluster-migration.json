@@ -89,7 +89,7 @@
                                         "const": "importing"
                                     },
                                     {
-                                        "type": "migrating"
+                                        "const": "migrating"
                                     }
                                 ]
                             },
