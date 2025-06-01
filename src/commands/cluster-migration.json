@@ -58,7 +58,48 @@
             }
         ],
         "reply_schema": {
-            "const": "OK"
+            "oneOf": [
+                {
+                    "description": "Reply to CLUSTER STATUS.",
+                    "const": "OK"
+                },
+                {
+                    "description": "Reply to CLUSTER CANCEL, number of cancelled migration operations",
+                    "type": "integer"
+                },
+                {
+                    "description": "Reply to CLUSTER STATUS, array of migration operation details.",
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "slots_range": {
+                                "type": "string"
+                            },
+                            "source": {
+                                "type": "string"
+                            },
+                            "dest": {
+                                "type": "string"
+                            },
+                            "operation": {
+                                "oneOf": [
+                                    {
+                                        "const": "importing"
+                                    },
+                                    {
+                                        "type": "migrating"
+                                    }
+                                ]
+                            },
+                            "state": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            ]
         }
     }
 }
