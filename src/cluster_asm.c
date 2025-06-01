@@ -56,10 +56,11 @@ static int checkOverlappingImport(SlotRange *req) {
  * - Ensures the current node is a master.
  * - Verifies all slots are in a STABLE state.
  * - Checks that slot ranges are well-formed and non-overlapping.
- * - Confirms all slots belong to a single remote source node.
+ * - Confirms all slots belong to a single source node.
+ * - Confirms no ongoing import operation that overlaps with the slot ranges.
  *
- * Returns the source node if validation succeeds; sets an error message otherwise.
- */
+ * Returns the source node if validation succeeds.
+ * Otherwise, returns NULL and sets 'err' variable. */
 static clusterNode *validateImportSlotRanges(list *slot_ranges, sds *err) {
     listNode *ln;
     listIter li;
@@ -97,6 +98,7 @@ static clusterNode *validateImportSlotRanges(list *slot_ranges, sds *err) {
             goto out;
         }
 
+        /* Ensure no import operation overlaps with this slot range. */
         if (checkOverlappingImport(sr) != C_OK) {
             *err = sdscatprintf(sdsempty(),
                                 "overlapping import exists for slot range: %d-%d",
@@ -291,7 +293,7 @@ static sds createSlotRangesStr(list *slot_ranges) {
 }
 
 /* CLUSTER MIGRATION STATUS
- *  - Reply: Map containing details of atomic slot migration links */
+ *  - Reply: Array of atomic slot migration links */
 static void clusterCommandMigrationStatus(client *c) {
     listIter li;
     listNode *ln;
