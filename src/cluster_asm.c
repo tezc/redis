@@ -15,13 +15,13 @@
 #define ASM_IMPORT  (1 << 1)
 #define ASM_MIGRATE (1 << 2)
 
-typedef struct asmLink {
+typedef struct asmTask {
     list *slot_ranges;            /* List of slot ranges for this migration operation */
     sds state;                    /* Dummy state str */
     char source[CLUSTER_NAMELEN]; /* Source node name */
     char dest[CLUSTER_NAMELEN];   /* Destination node name */
     int operation;                /* Either ASM_IMPORT or ASM_MIGRATE */
-} asmLink;
+} asmTask;
 
 /* Returns C_OK if there is no overlapping import operation in progress for the
  * given slot range. Otherwise, returns C_ERR */
@@ -31,7 +31,7 @@ static int checkOverlappingImport(SlotRange *req) {
 
     listRewind(server.cluster->asm_links, &li);
     while ((ln = listNext(&li)) != NULL) {
-        asmLink *link = ln->value;
+        asmTask *link = ln->value;
 
         /* Only import operations on the destination side can be cancelled. */
         if (link->operation != ASM_IMPORT ||
@@ -179,7 +179,7 @@ static void clusterCommandMigrationImport(client *c) {
     }
 
     /* Schedule slot migration operation */
-    asmLink *link = zcalloc(sizeof(*link));
+    asmTask *link = zcalloc(sizeof(*link));
     link->slot_ranges = slot_ranges;
     link->state = sdsnew("inprogress");
     link->operation = ASM_IMPORT;
@@ -199,7 +199,7 @@ static int cancelLinksForSlotRange(SlotRange *req_range) {
 
     listRewind(server.cluster->asm_links, &li);
     while ((ln = listNext(&li)) != NULL) {
-        asmLink *link = ln->value;
+        asmTask *link = ln->value;
 
         /* Only import operations on the destination side can be cancelled. */
         if (link->operation != ASM_IMPORT ||
@@ -302,7 +302,7 @@ static void clusterCommandMigrationStatus(client *c) {
 
     listRewind(server.cluster->asm_links, &li);
     while ((ln = listNext(&li)) != NULL) {
-        asmLink *link = ln->value;
+        asmTask *link = ln->value;
 
         addReplyMapLen(c, 5);
         addReplyBulkCString(c, "slots_range");
