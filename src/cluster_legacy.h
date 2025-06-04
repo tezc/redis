@@ -385,6 +385,9 @@ struct clusterState {
      * stops claiming the slot. This prevents spreading incorrect information (that
      * source still owns the slot) using UPDATE messages. */
     unsigned char owner_not_claiming_slot[CLUSTER_SLOTS / 8];
+
+    /* Atomic slot migration */
+    list *asm_links;
     /* Struct used for storing slot statistics, for all slots owned by the current shard. */
     slotStat slot_stats[CLUSTER_SLOTS];
 };
