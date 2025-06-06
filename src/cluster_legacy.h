@@ -380,6 +380,7 @@ struct clusterState {
 
     /* Atomic slot migration */
     list *asm_links;
+    list *asm_slot_ranges;
 };
 
 

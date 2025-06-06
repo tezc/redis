@@ -227,6 +227,7 @@ client *createClient(connection *conn) {
     c->net_input_bytes = 0;
     c->net_output_bytes = 0;
     c->commands_processed = 0;
+    c->task = NULL;
     return c;
 }
 

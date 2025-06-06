@@ -21,7 +21,31 @@ typedef struct asmTask {
     char source[CLUSTER_NAMELEN]; /* Source node name */
     char dest[CLUSTER_NAMELEN];   /* Destination node name */
     int operation;                /* Either ASM_IMPORT or ASM_MIGRATE */
+    clusterNode *source_node;     /* Source node */
+    connection *main_channel_con; /* Main channel connection */
+    int main_channel_state;       /* State of the main channel */
+    int main_channel_id;          /* Main channel ID for the task */
+    connection *rdb_channel_con;  /* RDB channel connection */
+    int rdb_channel_state;        /* State of the RDB channel */
 } asmTask;
+
+enum asmState {
+    ASM_NONE,
+    ASM_CONNECTING,
+    ASM_SYNCSLOTS_REPLY,
+    ASM_ESTABLISH_RDBCHANNEL,
+    ASM_BUFFER_STREAM,
+    ASM_REPLAY_STREAM,
+    ASM_SLOTS_HANDOFF,
+    ASM_DONE,
+
+    /* RDB channel state */
+    ASM_RDBCHANNEL_REPLY,
+    ASM_RDBCHANNEL_TRANSFER,
+    ASM_RDBCHANNEL_DONE,
+};
+
+void asmStartSyncSlots(asmTask *task);
 
 /* Returns C_OK if there is no overlapping import operation in progress for the
  * given slot range. Otherwise, returns C_ERR */
@@ -183,9 +207,17 @@ static void clusterCommandMigrationImport(client *c) {
     link->slot_ranges = slot_ranges;
     link->state = sdsnew("inprogress");
     link->operation = ASM_IMPORT;
+    link->source_node = source;
+    link->main_channel_con = NULL;
+    link->main_channel_state = ASM_NONE;
+    link->rdb_channel_con = NULL;
+    link->rdb_channel_state = ASM_NONE;
+    link->main_channel_id = -1;
     memcpy(link->source, source->name, CLUSTER_NAMELEN);
     memcpy(link->dest, server.cluster->myself->name, CLUSTER_NAMELEN);
     listAddNodeTail(server.cluster->asm_links, link);
+
+    asmStartSyncSlots(link);
 
     addReply(c, shared.ok);
 }
@@ -338,4 +370,509 @@ void clusterMigrationCommand(client *c) {
     } else {
         addReplyError(c, "unknown argument");
     }
+}
+
+char *sendCommand(connection *conn, ...);
+char *receiveSynchronousResponse(connection *conn);
+ConnectionType *connTypeOfReplication(void);
+
+void mainChannelBufferStream(connection *conn) {
+    UNUSED(conn);
+}
+
+void rdbChannelSyncWithSource(connection *conn) {
+    asmTask *task = connGetPrivateData(conn);
+    char *err = NULL;
+
+    if (task->rdb_channel_state == ASM_CONNECTING) {
+        connSetReadHandler(conn, rdbChannelSyncWithSource);
+        connSetWriteHandler(conn, NULL);
+        task->rdb_channel_state = ASM_RDBCHANNEL_REPLY;
+        char cid[LONG_STR_SIZE];
+        ull2string(cid, sizeof(cid), server.repl_main_ch_client_id);
+        err = sendCommand(conn, "CLUSTER", "SYNCSLOTS", "RDBCHANNEL", cid, NULL);
+        if (err) goto write_error;
+        return;
+    }
+
+    if (task->rdb_channel_state == ASM_RDBCHANNEL_REPLY) {
+        /* Read reply */
+        err = receiveSynchronousResponse(conn);
+        /* The destination node did not reply */
+        if (err == NULL) goto no_response_error;
+
+        /* Check `+SLOTSSNAPSHOT` reply */
+        if (!strncmp(err, "+SLOTSSNAPSHOT", strlen("+SLOTSSNAPSHOT"))) {
+            task->main_channel_state = ASM_BUFFER_STREAM;
+            /* Should buffer pending commands stream */
+            // connSetReadHandler(task->main_channel_con, mainChannelBufferStream);
+
+            task->rdb_channel_state = ASM_RDBCHANNEL_TRANSFER;
+            client *c = createClient(conn);
+            c->flags |= CLIENT_MASTER;
+            c->querybuf = sdsempty();
+            c->authenticated = 1;
+            c->user = NULL;
+            c->task = task;
+            connSetPrivateData(conn, c);
+            connSetReadHandler(conn, readQueryFromClient);
+            serverLog(LL_NOTICE,
+                "Source replied to SLOTSSNAPSHOT, sync slots snapshot can continue...");
+            sdsfree(err);
+        } else {
+            serverLog(LL_WARNING,"Error reply to CLUSTER SYNCSLOTS RDBCHANNEL from source: '%s'",err);
+            sdsfree(err);
+            goto error;
+        }
+    }
+    return;
+
+no_response_error:
+    serverLog(LL_WARNING, "Source node did not respond to command during RDBCHANNELSYNCSLOTS handshake");
+    /* Fall through to regular error handling */
+error:
+    connClose(conn);
+    connClose(task->main_channel_con);
+    task->main_channel_con = NULL;
+    task->rdb_channel_con = NULL;
+    task->main_channel_state = ASM_NONE;
+    task->rdb_channel_state = ASM_NONE;
+    return;
+write_error: /* Handle sendCommand() errors. */
+    serverLog(LL_WARNING,"Sending command to source: %s", err);
+    sdsfree(err);
+    goto error;
+}
+
+char *sendCommandArgv(connection *conn, int argc, char **argv, size_t *argv_lens);
+void syncWithSource(connection *conn) {
+    asmTask *task = connGetPrivateData(conn);
+    char *err = NULL;
+
+    if (task->main_channel_state == ASM_CONNECTING) {
+        connSetReadHandler(conn, syncWithSource);
+        connSetWriteHandler(conn, NULL);
+        task->main_channel_state = ASM_SYNCSLOTS_REPLY;
+        
+        size_t argc = (listLength(task->slot_ranges)*2 + 3);
+        char **args = zcalloc(sizeof(char*) * argc);
+        size_t *lens = zcalloc(sizeof(size_t) * argc);
+        args[0] = "CLUSTER";
+        args[1] = "SYNCSLOTS";
+        args[2] = "RANGES";
+        lens[0] = strlen("CLUSTER");
+        lens[1] = strlen("SYNCSLOTS");
+        lens[2] = strlen("RANGES");
+
+        size_t i = 3;
+        listNode *ln;
+        listIter li;
+        listRewind(task->slot_ranges, &li);
+        while ((ln = listNext(&li)) != NULL) {
+            SlotRange *sr = ln->value;
+            args[i] = sdscatprintf(sdsempty(), "%d", sr->first);
+            lens[i] = sdslen(args[i]);
+            args[i+1] = sdscatprintf(sdsempty(), "%d", sr->last);
+            lens[i+1] = sdslen(args[i+1]);
+            i += 2;
+        }
+        serverAssert(i == argc);
+
+        /* Send command to source node */
+        err = sendCommandArgv(conn, argc, args, lens);
+        for (size_t j = 3; j < argc; j++) {
+            sdsfree(args[j]);
+        }
+        zfree(args);
+        zfree(lens);
+        if (err) goto write_error;
+
+        sds slot_rages_str = createSlotRangesStr(task->slot_ranges);
+        serverLog(LL_NOTICE,
+            "Sent CLUSTER SYNCSLOTS RANGES command to source node %s, ranges: %s",
+            task->source_node->name, slot_rages_str);
+        sdsfree(slot_rages_str);
+        return;
+    }
+
+    if (task->main_channel_state == ASM_SYNCSLOTS_REPLY) {
+        /* Read reply */
+        err = receiveSynchronousResponse(conn);
+        /* The Source node did not reply */
+        if (err == NULL) goto no_response_error;
+
+        /* Check `+RDBCHANNELSYNCSLOTS client-id` reply */
+        if (!strncmp(err, "+RDBCHANNELSYNCSLOTS", strlen("+RDBCHANNELSYNCSLOTS"))) {
+            /* Parse main channel id */
+            char *client_id = strchr(err,' ');
+            if (client_id) client_id++;
+            if (!client_id) {
+                serverLog(LL_WARNING,
+                            "Source replied with wrong +RDBCHANNELSYNC syntax: %s", err);
+                sdsfree(err);
+                goto error;
+            }
+            task->main_channel_id = strtoll(client_id, NULL, 10);
+            serverLog(LL_NOTICE,
+                "Source replied to RDBCHANNELSYNCSLOTS, sync slots can continue...");
+    
+            sdsfree(err);
+            err = NULL;
+            task->main_channel_state = ASM_ESTABLISH_RDBCHANNEL ;
+        } else {
+            serverLog(LL_WARNING,"Error reply to SYNCSLOTS RANGES from Source: '%s'",err);
+            sdsfree(err);
+            goto error;
+        }
+    }
+
+    if (task->main_channel_state == ASM_ESTABLISH_RDBCHANNEL) {
+        /* Create RDB connection */
+        task->rdb_channel_con = connCreate(server.el, connTypeOfReplication());
+        if (connConnect(task->rdb_channel_con, task->source_node->ip,
+                        task->source_node->tcp_port, server.bind_source_addr,
+                        rdbChannelSyncWithSource) == C_ERR)
+        {
+            serverLog(LL_WARNING, "Unable to connect to source node: %s",
+                      connGetLastError(task->rdb_channel_con));
+            goto error;
+        }
+        task->rdb_channel_state  = ASM_CONNECTING;
+        connSetPrivateData(task->rdb_channel_con, task);
+
+        /* Main channel waits for new events */
+        connSetReadHandler(conn, NULL);
+        return;
+    }
+    return;
+
+no_response_error:
+    serverLog(LL_WARNING, "Source node did not respond to command during SYNC handshake");
+    /* Fall through to regular error handling */
+
+error:
+    connClose(conn);
+    task->main_channel_con = NULL;
+    task->main_channel_state = ASM_NONE;
+    return;
+
+write_error: /* Handle sendCommand() errors. */
+    serverLog(LL_WARNING,"Sending command to Source: %s", err);
+    sdsfree(err);
+    goto error;
+}
+
+/* CLUSTER SYNCSLOTS SNAPSHOT-EOF
+ *
+ * This command is sent by the source node to the destination node to indicate
+ * that the slots snapshot has ended. */
+void clusterSyncSlotsSnapshotEOF(client *c) {
+    /* This client is RDB channel connection. */
+    asmTask *task = c->task;
+    serverAssert(task->rdb_channel_state == ASM_RDBCHANNEL_TRANSFER);
+    task->rdb_channel_state = ASM_RDBCHANNEL_DONE;
+    serverLog(LL_NOTICE,
+        "RDB channel snapshot transfer done for task");
+
+    task->main_channel_state = ASM_REPLAY_STREAM;
+  
+    client *main_channel_client = createClient(task->main_channel_con);
+    main_channel_client->flags |= CLIENT_MASTER;
+    main_channel_client->querybuf = sdsempty();
+    main_channel_client->authenticated = 1;
+    main_channel_client->user = NULL;
+    
+    /* Replay stream. */
+    // replayStream()
+    serverLog(LL_NOTICE, "Replaying stream for task is done");
+
+    /* Set the task for the client, and continue to chat */
+    main_channel_client->task = task;
+    connSetPrivateData(task->main_channel_con, main_channel_client);
+    connSetReadHandler(task->main_channel_con, readQueryFromClient);
+
+    /* ACK offset during replaying buffer stream, fake offset. */
+    sendCommand(task->main_channel_con, "CLUSTER", "SYNCSLOTS", "ACK", "123", NULL);
+    /* Free the RDB channel connection. */
+    c->task = NULL;
+    c->flags &= ~CLIENT_MASTER;
+    freeClientAsync(c); /* Free the client, it is no longer needed. */
+}
+
+int clusterNodeSetSlotBit(clusterNode *n, int slot);
+void clusterSendUpdate(clusterLink *link, clusterNode *node);
+int clusterBumpConfigEpochWithoutConsensus(void);
+void clusterSaveConfigOrDie(int do_fsync);
+
+/* CLUSTER SYNCSLOTS STREAM-EOF
+ *
+ * This command is sent by the source node to the destination node to indicate
+ * that the slot sync stream has ended and the slots can be handed off. */
+void clusterSyncSlotsStreamEOF(client *c) {
+    asmTask *task = c->task;
+    if (task->main_channel_state != ASM_REPLAY_STREAM) {
+        serverLog(LL_WARNING, "Unexpected CLUSTER SYNCSLOTS STREAM-EOF state: %d",
+                               task->main_channel_state);
+        return;
+    }
+    serverLog(LL_NOTICE, "CLUSTER SYNCSLOTS STREAM-EOF received");
+    
+    /* Iterate task->slot_range, and hand the ownership of slots */
+    task->main_channel_state = ASM_SLOTS_HANDOFF;
+    listIter li;
+    listNode *ln;
+    listRewind(task->slot_ranges, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        SlotRange *sr = ln->value;
+        for (int i = sr->first; i <= sr->last; i++) {
+            clusterNode *myself = getMyClusterNode();
+            server.cluster->slots[i] = myself;
+            clusterNodeSetSlotBit(myself, i);
+        }
+    }
+    /* New config and Bump new config */
+    clusterBumpConfigEpochWithoutConsensus();
+    clusterSendUpdate(task->source_node->link, getMyClusterNode());
+    clusterSaveConfigOrDie(1);
+
+    sds slot_ranges_str = createSlotRangesStr(task->slot_ranges);
+    serverLog(LL_NOTICE, "Slot ranges: %s handed off", slot_ranges_str);
+    sdsfree(slot_ranges_str);
+    task->main_channel_state = ASM_DONE;
+
+    /* Free the task */
+    listDelNode(server.cluster->asm_links, listSearchKey(server.cluster->asm_links, task));
+    listRelease(task->slot_ranges); /* Free the slot ranges list */
+    sdsfree(task->state); /* Free the state string */
+    zfree(task); /* Free the task itself */
+    serverLog(LL_NOTICE, "Slot migration task completed");
+
+    /* Free the main channel connection. */
+    c->task = NULL;
+    c->flags &= ~CLIENT_MASTER;
+    freeClientAsync(c); /* Free the client, it is no longer needed. */
+}
+
+/* Start the sync slots task. */
+void asmStartSyncSlots(asmTask *task) {
+    if (task->main_channel_state != ASM_NONE) {
+        return;
+    }
+
+   task->main_channel_con = connCreate(server.el, connTypeOfReplication());
+   if (connConnect(task->main_channel_con, task->source_node->ip, task->source_node->tcp_port,
+                   server.bind_source_addr, syncWithSource) == C_ERR)
+    {
+        serverLog(LL_WARNING,"Unable to connect to source node: %s",
+                    connGetLastError(task->main_channel_con));
+        connClose(task->main_channel_con);
+        task->main_channel_con = NULL;
+        return;
+    }
+    connSetPrivateData(task->main_channel_con, task);
+    task->main_channel_state = ASM_CONNECTING;
+}
+
+int startBgsaveForReplication(int mincapa, int req);
+void createReplicationBacklogIfNeeded(void);
+
+void clusterSyncSlotsCommand(client *c) {
+    if (!strcasecmp(c->argv[2]->ptr, "ranges") && c->argc >= 5) {
+        /* CLUSTER SYNCSLOTS RANGES <start-slot> <end-slot> [<start-slot> <end-slot>] */
+        int j, first, last;
+        if (c->argc % 2 == 0) {
+            addReplyErrorArity(c);
+            return;
+        }
+
+        list *slot_ranges = listCreate();
+        listSetFreeMethod(slot_ranges, zfree);
+
+        for (j = 3; j < c->argc; j += 2) {
+            if ((first = getSlotOrReply(c, c->argv[j])) == -1 ||
+                (last = getSlotOrReply(c, c->argv[j + 1])) == -1) 
+            {
+                listRelease(slot_ranges);
+                return;
+            }
+            if (first > last) {
+                listRelease(slot_ranges);
+                addReplyErrorFormat(c, "start slot number %d is greater than end slot number %d", first, last);
+                return;
+            }
+            SlotRange *sr = zmalloc(sizeof(*sr));
+            sr->first = first;
+            sr->last = last;
+            listAddNodeTail(slot_ranges, sr);
+        }
+        /* Only one slots sync on source node */
+        if (server.cluster->asm_slot_ranges != NULL) {
+            addReplyError(c, "SYNCSLOTS RANGES already in progress");
+            listRelease(slot_ranges);
+            return;
+        }
+
+        server.cluster->asm_slot_ranges = slot_ranges;
+        addReplyStatusFormat(c, "RDBCHANNELSYNCSLOTS %llu",
+                               (unsigned long long) c->id);
+    } else if (!strcasecmp(c->argv[2]->ptr, "rdbchannel") && c->argc == 4) {
+        /* CLUSTER SYNCSLOTS RDBCHANNEL <client-id> */
+        long long client_id;
+
+        if (getLongLongFromObjectOrReply(c, c->argv[3], &client_id, NULL) != C_OK) {
+            return;
+        }
+
+        c->slave_capa |= SLAVE_CAPA_EOF;
+        c->slave_req |= SLAVE_REQ_SLOTS_SNAPSHOT;
+        c->slave_req |= SLAVE_REQ_RDB_CHANNEL;
+        c->flags |= CLIENT_REPL_RDB_CHANNEL;
+        c->flags |= CLIENT_REPL_RDBONLY;
+        c->replstate = SLAVE_STATE_WAIT_BGSAVE_START;
+        if (server.repl_disable_tcp_nodelay)
+            connDisableTcpNoDelay(c->conn); /* Non critical if it fails. */
+        c->repldbfd = -1;
+        c->flags |= CLIENT_SLAVE;
+        listAddNodeTail(server.slaves, c);
+        /* Create the replication backlog if needed. */
+        createReplicationBacklogIfNeeded();
+
+        if (!hasActiveChildProcess()) {
+            startBgsaveForReplication(c->slave_capa, c->slave_req);
+        } else {
+            serverLog(LL_NOTICE, "BGSAVE for slots snapshot sync delayed");
+        }
+    } else if (!strcasecmp(c->argv[2]->ptr, "snapshot-eof") && c->argc == 3) {
+        /* CLUSTER SYNCSLOTS SNAPSHOT-EOF */
+        clusterSyncSlotsSnapshotEOF(c);
+    } else if (!strcasecmp(c->argv[2]->ptr, "stream-eof") && c->argc == 3) {
+        /* CLUSTER SYNCSLOTS STREAM-EOF */
+        clusterSyncSlotsStreamEOF(c);
+    } else if (!strcasecmp(c->argv[2]->ptr, "ack") && c->argc == 4) {
+        /* CLUSTER SYNCSLOTS ACK <offset> */
+        long long offset;
+        if ((getLongLongFromObject(c->argv[3], &offset) != C_OK))
+            return;
+        serverLog(LL_NOTICE, "CLUSTER SYNCSLOTS ACK received, offset: %lld", offset);
+        /* --- For destination ---- */
+        if (c->task) {
+            /* This is a main channel connection, and we are replaying stream. */
+            asmTask *task = c->task;
+            if (task->main_channel_state == ASM_REPLAY_STREAM) {
+                /* Update the source offset*/
+            }
+            return;
+        }
+
+        /* --- For source ---- */
+        /* Update the destination offset*/
+        /* Pause write if needed */
+        /* Drain all slot ranges command stream */
+        /* Send STREAM EOF */
+        sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "STREAM-EOF", NULL);
+        listRelease(server.cluster->asm_slot_ranges);
+        server.cluster->asm_slot_ranges = NULL;
+        freeClientAsync(c); /* Free the client, it is no longer needed. */
+    } else if (!strcasecmp(c->argv[2]->ptr, "fail") && c->argc == 4) {
+        /* CLUSTER SYNCSLOTS FAIL <err> */
+        return; /* This is a no-op, just to handle the command syntax. */
+    } else if (!strcasecmp(c->argv[2]->ptr, "conf") && c->argc >= 5) {
+        /* CLUSTER SYNCSLOTS CONF <option> <value> [<option> <value>] */
+        for (int j = 3; j < c->argc; j += 2) {
+            if (j + 1 >= c->argc) {
+                addReplyErrorArity(c);
+                return;
+            }
+            /* Handle each option here */
+            if (!strcasecmp(c->argv[j]->ptr, "option1")) {
+                /* Handle option 'snapshot' */
+                long value1 = 0;
+                if (getRangeLongFromObjectOrReply(c, c->argv[j+1],
+                                    0, 1, &value1, NULL) != C_OK)
+                {
+                    return;
+                }
+                addReply(c, shared.ok);
+            } else {
+                addReplyErrorFormat(c, "Unknown option %s", (char *)c->argv[j]->ptr);
+            }
+        }
+    } else {
+        addReplyErrorObject(c, shared.syntaxerr);
+    }
+}
+
+void createDumpPayload(rio *payload, robj *o, robj *key, int dbid);
+
+int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
+    UNUSED(error);
+    serverAssert(req & SLAVE_REQ_SLOTS_SNAPSHOT);
+
+    dictEntry *de;
+    kvstoreDictIterator *kvs_di = NULL;
+
+    for (int j = 0; j < server.dbnum; j++) {
+        char selectcmd[] = "*2\r\n$6\r\nSELECT\r\n";
+        redisDb *db = server.db + j;
+        if (kvstoreSize(db->keys) == 0) continue;
+
+        /* SELECT the new DB */
+        if (rioWrite(rdb,selectcmd,sizeof(selectcmd)-1) == 0) goto werr;
+        if (rioWriteBulkLongLong(rdb, j) == 0) goto werr;
+
+        /* Iterate all slot ranges, and generate the DUMP encoded
+         * representation of each key in the DB. */
+        listIter li;
+        listNode *ln;
+        listRewind(server.cluster->asm_slot_ranges, &li);
+        while ((ln = listNext(&li)) != NULL) {
+            SlotRange *sr = listNodeValue(ln);
+            /* Iterate all keys in the slot range */
+            for (int i = sr->first; i <= sr->last; i++) {
+                kvs_di = kvstoreGetDictIterator(server.db->keys, i);
+                while ((de = kvstoreDictIteratorNext(kvs_di)) != NULL) {
+                    /* Get the value object (of type kvobj) */
+                    kvobj *o = dictGetKV(de);
+
+                    /* Get the expire time */
+                    long long expiretime = kvobjGetExpire(o);
+
+                    /* Set on stack string object for key */
+                    robj key;
+                    initStaticStringObject(key, kvobjGetKey(o));
+
+                    if (rioWriteBulkCount(rdb, '*', 5) == 0) goto werr;
+                    if (rioWriteBulkString(rdb, "RESTORE", 7) == 0) goto werr;
+                    if (rioWriteBulkObject(rdb, &key) == 0) goto werr;
+                    if (rioWriteBulkLongLong(rdb, expiretime == -1 ? 0 : expiretime) == 0) goto werr;
+
+                    /* Create the DUMP encoded representation. */
+                    rio payload;
+                    createDumpPayload(&payload, o, &key, j);
+                    sds buf = payload.io.buffer.ptr;
+                    if (rioWriteBulkString(rdb, buf, sdslen(buf)) == 0) {
+                        sdsfree(payload.io.buffer.ptr);
+                        goto werr;
+                    }
+                    sdsfree(payload.io.buffer.ptr);
+
+                    /* Write ABSTTL */
+                    if (rioWriteBulkString(rdb, "ABSTTL", 6) == 0) goto werr;
+                }
+                kvstoreReleaseDictIterator(kvs_di);
+                kvs_di = NULL;
+            }
+        }
+    }
+
+    /* Write the end of the snapshot command */
+    if (rioWriteBulkCount(rdb, '*', 3) == 0) goto werr;
+    if (rioWriteBulkString(rdb, "CLUSTER", 7) == 0) goto werr;
+    if (rioWriteBulkString(rdb, "SYNCSLOTS", 9) == 0) goto werr;
+    if (rioWriteBulkString(rdb, "SNAPSHOT-EOF", 12) == 0) goto werr;
+    return C_OK;
+
+werr:
+    if (kvs_di) kvstoreReleaseDictIterator(kvs_di);
+    return C_ERR;
 }

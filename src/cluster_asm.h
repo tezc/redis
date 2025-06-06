@@ -11,6 +11,6 @@
 #define CLUSTER_ASM_H
 
 void clusterMigrationCommand(client *c);
-
+void clusterSyncSlotsCommand(client *c);
 #endif
 
