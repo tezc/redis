@@ -12,5 +12,6 @@
 
 void clusterMigrationCommand(client *c);
 void clusterSyncSlotsCommand(client *c);
+
 #endif
 

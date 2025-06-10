@@ -783,6 +783,7 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
     if (slave->flags & CLIENT_REPL_RDB_CHANNEL &&
         slave->slave_req & SLAVE_REQ_SLOTS_SNAPSHOT)
     {
+        /* TODO: Start to deliver the commands stream on exporting slots. */
         buflen = snprintf(buf, sizeof(buf), "+SLOTSSNAPSHOT\r\n");
         if (connWrite(slave->conn, buf, buflen) != buflen) {
             freeClientAsync(slave);

@@ -224,6 +224,8 @@ union clusterMsgData {
     } module;
 };
 
+struct asmExport;
+
 #define CLUSTER_PROTO_VER 1 /* Cluster bus protocol version. */
 
 typedef struct {
@@ -380,7 +382,6 @@ struct clusterState {
 
     /* Atomic slot migration */
     list *asm_links;
-    list *asm_slot_ranges;
 };
 
 

@@ -971,7 +971,6 @@ void clusterInit(void) {
     server.cluster->cant_failover_reason = CLUSTER_CANT_FAILOVER_NONE;
     server.cluster->lastVoteEpoch = 0;
     server.cluster->asm_links = listCreate();
-    server.cluster->asm_slot_ranges = NULL;
 
     /* Initialize stats */
     for (int i = 0; i < CLUSTERMSG_TYPE_COUNT; i++) {
