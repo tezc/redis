@@ -1779,7 +1779,7 @@ void freeClient(client *c) {
     }
 
     /* Log link disconnection with slave */
-    if (clientTypeIsSlave(c)) {
+    if (clientTypeIsSlave(c) && !(c->slave_req & SLAVE_REQ_SLOTS_SNAPSHOT)) {
         const char *type = c->flags & CLIENT_REPL_RDB_CHANNEL ? " (rdbchannel)" : "";
         serverLog(LL_NOTICE,"Connection with replica%s %s lost.", type,
             replicationGetSlaveName(c));

@@ -34,7 +34,7 @@ start_cluster 3 3 {tags {external:skip cluster}} {
     }
 
     test "Test IMPORT not allowed if the node is already the owner" {
-        assert_error {*already the owner of the slot: 100*} {R 0 CLUSTER MIGRATION IMPORT 100 100}
+        assert_error {*already the owner of the slot*} {R 0 CLUSTER MIGRATION IMPORT 100 100}
     }
 
     test "Test IMPORT not allowed for a slot without an owner" {

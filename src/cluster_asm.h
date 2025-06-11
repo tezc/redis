@@ -10,6 +10,9 @@
 #ifndef CLUSTER_ASM_H
 #define CLUSTER_ASM_H
 
+struct asmTask;
+struct asmTaskManager;
+
 void clusterMigrationCommand(client *c);
 void clusterSyncSlotsCommand(client *c);
 
