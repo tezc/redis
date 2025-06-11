@@ -387,7 +387,7 @@ struct clusterState {
     unsigned char owner_not_claiming_slot[CLUSTER_SLOTS / 8];
 
     /* Atomic slot migration */
-    list *asm_links;
+    list *asm_tasks;
     /* Struct used for storing slot statistics, for all slots owned by the current shard. */
     slotStat slot_stats[CLUSTER_SLOTS];
 };
