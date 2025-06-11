@@ -784,6 +784,7 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
         slave->slave_req & SLAVE_REQ_SLOTS_SNAPSHOT)
     {
         /* TODO: Start to deliver the commands stream on exporting slots. */
+        /* task->state = +ASM_SEND_BULK_AND_STREAM */
         buflen = snprintf(buf, sizeof(buf), "+SLOTSSNAPSHOT\r\n");
         if (connWrite(slave->conn, buf, buflen) != buflen) {
             freeClientAsync(slave);

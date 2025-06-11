@@ -50,7 +50,7 @@ enum asmState {
     ASM_WAIT_RDBCHANNEL,
     ASM_WAIT_BGSAVE_START,
     ASM_SEND_BULK_AND_STREAM,
-    ASM_SEND_STREAM,
+    ASM_PAUSE_WRITE,
     ASM_STREAM_DONE,
 
     /* RDB channel state */
@@ -93,7 +93,7 @@ char *asmTaskStateToString(int state) {
         case ASM_WAIT_RDBCHANNEL: return "wait-rdbchannel";
         case ASM_WAIT_BGSAVE_START: return "wait-bgsave-start";
         case ASM_SEND_BULK_AND_STREAM: return "send-bulk-and-stream";
-        case ASM_SEND_STREAM: return "send-stream";
+        case ASM_PAUSE_WRITE: return "pause-write";
         case ASM_STREAM_DONE: return "stream-done";
 
         default: return "unknown";
@@ -918,6 +918,7 @@ void clusterSyncSlotsCommand(client *c) {
         serverLog(LL_NOTICE, "CLUSTER SYNCSLOTS ACK received, offset: %lld, updated destination offset to %lld",
                   offset, task->dest_offset);
         /* Pause write if needed */
+        task->state = ASM_PAUSE_WRITE;
         /* Drain all slot ranges command stream */
         /* Send STREAM EOF */
         sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "STREAM-EOF", NULL);
