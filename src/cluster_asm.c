@@ -16,18 +16,18 @@
 #define ASM_MIGRATE (1 << 2)
 
 typedef struct asmTask {
-    int operation;                /* Either ASM_IMPORT or ASM_MIGRATE */
-    list *slot_ranges;            /* List of slot ranges for this migration operation */
-    int state;                    /* Current state of the task */
-    char source[CLUSTER_NAMELEN]; /* Source node name */
-    char dest[CLUSTER_NAMELEN];   /* Destination node name */
-    clusterNode *source_node;     /* Source node */
-    connection *main_channel_con; /* Main channel connection */
-    long long main_channel_id;    /* Main channel ID for the task */
-    connection *rdb_channel_con;  /* RDB channel connection */
-    int rdb_channel_state;        /* State of the RDB channel */
-    long long dest_offset;        /* Destination offset */
-    long long source_offset;      /* Source offset */
+    int operation;                      /* Either ASM_IMPORT or ASM_MIGRATE */
+    list *slot_ranges;                  /* List of slot ranges for this migration operation */
+    int state;                          /* Current state of the task */
+    char source[CLUSTER_NAMELEN];       /* Source node name */
+    char dest[CLUSTER_NAMELEN];         /* Destination node name */
+    clusterNode *source_node;           /* Source node */
+    connection *main_channel_conn;      /* Main channel connection */
+    long long main_channel_id;          /* Main channel ID for the task */
+    connection *rdb_channel_conn;       /* RDB channel connection */
+    int rdb_channel_state;              /* State of the RDB channel */
+    long long dest_offset;              /* Destination offset */
+    long long source_offset;            /* Source offset */
 } asmTask;
 
 enum asmState {
@@ -260,8 +260,8 @@ static void clusterCommandMigrationImport(client *c) {
     task->state = ASM_NONE;
     task->operation = ASM_IMPORT;
     task->source_node = source;
-    task->main_channel_con = NULL;
-    task->rdb_channel_con = NULL;
+    task->main_channel_conn = NULL;
+    task->rdb_channel_conn = NULL;
     task->rdb_channel_state = ASM_NONE;
     task->main_channel_id = -1;
     memcpy(task->source, source->name, CLUSTER_NAMELEN);
@@ -385,11 +385,10 @@ static void clusterCommandMigrationStatus(client *c) {
     listRewind(server.cluster->asm_tasks, &li);
     while ((ln = listNext(&li)) != NULL) {
         asmTask *task = listNodeValue(ln);
-        sds slots_range_str = createSlotRangesStr(task->slot_ranges);
 
         addReplyMapLen(c, 5);
         addReplyBulkCString(c, "slots_range");
-        addReplyBulkSds(c, slots_range_str);
+        addReplyBulkSds(c, createSlotRangesStr(task->slot_ranges));
         addReplyBulkCString(c, "source");
         addReplyBulkCBuffer(c, task->source, CLUSTER_NAMELEN);
         addReplyBulkCString(c, "dest");
@@ -398,8 +397,6 @@ static void clusterCommandMigrationStatus(client *c) {
         addReplyBulkCString(c, task->operation == ASM_IMPORT ? "importing" : "migrating");
         addReplyBulkCString(c, "state");
         addReplyBulkCString(c, asmTaskStateToString(task->state));
-
-        sdsfree(slots_range_str);
     }
 }
 
@@ -428,9 +425,9 @@ void clusterMigrationCommand(client *c) {
 /* Sends an AUTH command to the source node using the internal secret.
  * Returns an error string if the command fails, or NULL on success. */
 char *asmSendInternalAuth(connection *conn) {
-    size_t len = -1;
+    size_t len = 0;
     const char *internal_secret = clusterGetSecret(&len);
-    serverAssert(len > 0);
+    serverAssert(internal_secret != NULL);
 
     sds secret = sdsnewlen(internal_secret, len);
     char *err = sendCommand(conn, "AUTH", "internal connection", secret, NULL);
@@ -490,7 +487,7 @@ void asmRdbChannelSyncWithSource(connection *conn) {
         if (!strncmp(err, "+SLOTSSNAPSHOT", strlen("+SLOTSSNAPSHOT"))) {
             task->state = ASM_BUFFER_STREAM;
             /* TODO: buffer pending commands stream */
-            // connSetReadHandler(task->main_channel_con, mainChannelBufferStream);
+            // connSetReadHandler(task->main_channel_conn, mainChannelBufferStream);
 
             task->rdb_channel_state = ASM_RDBCHANNEL_TRANSFER;
             client *c = createClient(conn);
@@ -499,8 +496,6 @@ void asmRdbChannelSyncWithSource(connection *conn) {
             c->authenticated = 1;
             c->user = NULL;
             c->task = task;
-            connSetPrivateData(conn, c);
-            connSetReadHandler(conn, readQueryFromClient);
             serverLog(LL_NOTICE,
                 "Source replied to SLOTSSNAPSHOT, sync slots snapshot can continue...");
             sdsfree(err);
@@ -518,9 +513,9 @@ no_response_error:
 
 error:
     connClose(conn);
-    connClose(task->main_channel_con);
-    task->main_channel_con = NULL;
-    task->rdb_channel_con = NULL;
+    connClose(task->main_channel_conn);
+    task->main_channel_conn = NULL;
+    task->rdb_channel_conn = NULL;
     task->state = ASM_NONE;
     task->rdb_channel_state = ASM_NONE;
     return;
@@ -633,17 +628,17 @@ void asmSyncWithSource(connection *conn) {
 
     if (task->state == ASM_INIT_RDBCHANNEL) {
         /* Create RDB connection */
-        task->rdb_channel_con = connCreate(server.el, connTypeOfReplication());
-        if (connConnect(task->rdb_channel_con, task->source_node->ip,
+        task->rdb_channel_conn = connCreate(server.el, connTypeOfReplication());
+        if (connConnect(task->rdb_channel_conn, task->source_node->ip,
                         task->source_node->tcp_port, server.bind_source_addr,
                         asmRdbChannelSyncWithSource) == C_ERR)
         {
             serverLog(LL_WARNING, "Unable to connect to the source node: %s",
-                      connGetLastError(task->rdb_channel_con));
+                      connGetLastError(task->rdb_channel_conn));
             goto error;
         }
         task->rdb_channel_state  = ASM_CONNECTING;
-        connSetPrivateData(task->rdb_channel_con, task);
+        connSetPrivateData(task->rdb_channel_conn, task);
         serverLog(LL_NOTICE,
             "RDB channel connection to source node %.40s established, waiting for AUTH reply...",
             task->source_node->name);
@@ -660,7 +655,7 @@ no_response_error:
 
 error:
     connClose(conn);
-    task->main_channel_con = NULL;
+    task->main_channel_conn = NULL;
     task->state = ASM_NONE;
     return;
 
@@ -684,23 +679,19 @@ void clusterSyncSlotsSnapshotEOF(client *c) {
 
     task->state = ASM_REPLAY_STREAM;
   
-    client *main_channel_client = createClient(task->main_channel_con);
+    client *main_channel_client = createClient(task->main_channel_conn);
     main_channel_client->flags |= CLIENT_MASTER;
     main_channel_client->querybuf = sdsempty();
     main_channel_client->authenticated = 1;
     main_channel_client->user = NULL;
-    
+    main_channel_client->task = task;
+
     /* Replay stream. */
     // TODO: replay the buffered stream from the main channel connection.
     serverLog(LL_NOTICE, "Replaying stream for task is done");
 
-    /* Set the task for the client, and continue to chat */
-    main_channel_client->task = task;
-    connSetPrivateData(task->main_channel_con, main_channel_client);
-    connSetReadHandler(task->main_channel_con, readQueryFromClient);
-
     /* ACK offset during replaying buffer stream, fake offset. */
-    sendCommand(task->main_channel_con, "CLUSTER", "SYNCSLOTS", "ACK", "123", NULL);
+    sendCommand(task->main_channel_conn, "CLUSTER", "SYNCSLOTS", "ACK", "123", NULL);
     /* Free the RDB channel connection. */
     c->task = NULL;
     c->flags &= ~CLIENT_MASTER;
@@ -759,17 +750,17 @@ void clusterSyncSlotsStreamEOF(client *c) {
 void asmStartSyncSlots(asmTask *task) {
     if (task->state != ASM_NONE) return;
 
-   task->main_channel_con = connCreate(server.el, connTypeOfReplication());
-   if (connConnect(task->main_channel_con, task->source_node->ip, task->source_node->tcp_port,
+   task->main_channel_conn = connCreate(server.el, connTypeOfReplication());
+   if (connConnect(task->main_channel_conn, task->source_node->ip, task->source_node->tcp_port,
                    server.bind_source_addr, asmSyncWithSource) == C_ERR)
     {
         serverLog(LL_WARNING,"Unable to connect to source node: %s",
-                    connGetLastError(task->main_channel_con));
-        connClose(task->main_channel_con);
-        task->main_channel_con = NULL;
+                    connGetLastError(task->main_channel_conn));
+        connClose(task->main_channel_conn);
+        task->main_channel_conn = NULL;
         return;
     }
-    connSetPrivateData(task->main_channel_con, task);
+    connSetPrivateData(task->main_channel_conn, task);
     task->state = ASM_CONNECTING;
 }
 
@@ -804,7 +795,6 @@ void clusterSyncSlotsCommand(client *c) {
         sds err = NULL;
         clusterNode *source = validateImportSlotRanges(slot_ranges, &err);
         if (!source) {
-            serverLog(LL_WARNING, "CLUSTER SYNCSLOTS RANGES error: %s", err);
             addReplyErrorSds(c, err);
             listRelease(slot_ranges);
             return;
@@ -812,7 +802,7 @@ void clusterSyncSlotsCommand(client *c) {
 
         /* Check if the source node is the same as the current node. */
         if (source != getMyClusterNode()) {
-            addReplyError(c, "This node is already the owner of the slots");
+            addReplyError(c, "This node is not the owner of the slots");
             listRelease(slot_ranges);
             return;
         }
