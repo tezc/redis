@@ -894,7 +894,6 @@ void clusterSyncSlotsCommand(client *c) {
             return;
         }
 
-        
         if (listLength(server.cluster->asm_tasks) == 0) {
             addReplyError(c, "No migrate slots task in progress");
             return;
