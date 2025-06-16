@@ -119,7 +119,7 @@ static int checkOverlappingImport(slotRange *req) {
         for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
             slotRange *sr = &task->slot_ranges->ranges[i];
             /* Cancel if any slot range overlaps with the requested range. */
-            if (sr->start_slot <= req->end_slot && sr->end_slot >= req->start_slot)
+            if (sr->start <= req->end && sr->end >= req->start)
                 return C_ERR;
         }
     }
@@ -165,12 +165,12 @@ static clusterNode *validateImportSlotRanges(slotRangeArray *slot_ranges, sds *e
         if (checkOverlappingImport(sr) != C_OK) {
             *err = sdscatprintf(sdsempty(),
                                 "overlapping import exists for slot range: %d-%d",
-                                sr->start_slot, sr->end_slot);
+                                sr->start, sr->end);
             goto out;
         }
 
         /* Validate if we can start migration operation for this slot range. */
-        for (int j = sr->start_slot; j <= sr->end_slot; j++) {
+        for (int j = sr->start; j <= sr->end; j++) {
             if (server.cluster->slots[j] == NULL) {
                 *err = sdscatprintf(sdsempty(), "slot has no owner: %d", j);
                 goto out;
@@ -202,10 +202,7 @@ static void clusterCommandMigrationImport(client *c) {
     }
 
     slotRangeArray *slot_ranges = parseSlotRangesOrReply(c, c->argc, 3);
-    if (!slot_ranges) {
-        zfree(slot_ranges);
-        return;
-    }
+    if (!slot_ranges) return;
 
     sds err = NULL;
     clusterNode *source;
@@ -264,9 +261,7 @@ static int cancelLinksForSlotRange(slotRange *req_range) {
         for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
             slotRange *sr = &task->slot_ranges->ranges[i];
             /* Cancel if any slot range overlaps with the requested range. */
-            if (sr->start_slot <= req_range->end_slot &&
-                sr->end_slot >= req_range->start_slot)
-            {
+            if (sr->start <= req_range->end && sr->end >= req_range->start) {
                 task->state = ASM_CANCELED;
                 num_cancelled++;
                 break;
@@ -282,11 +277,8 @@ static int cancelLinksForSlotRange(slotRange *req_range) {
  * Cancels import operations that overlap with the specified slot ranges.
  * Multiple operations may be cancelled. */
 static void clusterCommandMigrationCancel(client *c) {
-    int remaining, start_slot, end_slot;
-    int num_cancelled = 0;
-    listIter li;
-    listNode *ln;
-    list *slot_ranges;
+    int remaining, num_cancelled = 0;
+    slotRangeArray *slot_ranges;
 
     /* Validate slot range arg count */
     remaining = c->argc - 3;
@@ -295,39 +287,15 @@ static void clusterCommandMigrationCancel(client *c) {
         return;
     }
 
-    slot_ranges = listCreate();
-    listSetFreeMethod(slot_ranges, zfree);
-
-    /* Parse slot ranges into the list */
-    for (int i = 3; i < c->argc; i += 2) {
-        if ((start_slot = getSlotOrReply(c, c->argv[i])) == -1 ||
-            (end_slot = getSlotOrReply(c, c->argv[i + 1])) == -1)
-        {
-            listRelease(slot_ranges);
-            return;
-        }
-
-        if (start_slot > end_slot) {
-            addReplyErrorFormat(c, "invalid slot range: %d-%d",
-                                start_slot, end_slot);
-            listRelease(slot_ranges);
-            return;
-        }
-
-        slotRange *sr = zmalloc(sizeof(*sr));
-        sr->start_slot = start_slot;
-        sr->end_slot = end_slot;
-        listAddNodeTail(slot_ranges, sr);
-    }
+    slot_ranges = parseSlotRangesOrReply(c, c->argc, 3);
+    if (!slot_ranges) return;
 
     /* Cancel asm operations that overlaps with the slot ranges. */
-    listRewind(slot_ranges, &li);
-    while ((ln = listNext(&li)) != NULL) {
-        num_cancelled += cancelLinksForSlotRange(listNodeValue(ln));
-    }
+    for (int i = 0; i < slot_ranges->num_ranges; i++)
+        num_cancelled += cancelLinksForSlotRange(&slot_ranges->ranges[i]);
 
     addReplyLongLong(c, num_cancelled);
-    listRelease(slot_ranges);
+    zfree(slot_ranges);
 }
 
 /* Create a slot range string in the format of: "1000-2000 3000-4000 ..." */
@@ -336,7 +304,7 @@ static sds createSlotRangesStr(slotRangeArray *slot_ranges) {
 
     for (int i = 0; i < slot_ranges->num_ranges; i++) {
         slotRange *sr = &slot_ranges->ranges[i];
-        s = sdscatprintf(s, "%d-%d ", sr->start_slot, sr->end_slot);
+        s = sdscatprintf(s, "%d-%d ", sr->start, sr->end);
     }
     sdssetlen(s, sdslen(s) - 1);
     s[sdslen(s)] = '\0';
@@ -543,9 +511,9 @@ void asmSyncWithSource(connection *conn) {
         size_t i = 3;
         for (int j = 0; j < task->slot_ranges->num_ranges; j++) {
             slotRange *sr = &task->slot_ranges->ranges[j];
-            args[i] = sdscatprintf(sdsempty(), "%d", sr->start_slot);
+            args[i] = sdscatprintf(sdsempty(), "%d", sr->start);
             lens[i] = sdslen(args[i]);
-            args[i+1] = sdscatprintf(sdsempty(), "%d", sr->end_slot);
+            args[i+1] = sdscatprintf(sdsempty(), "%d", sr->end);
             lens[i+1] = sdslen(args[i+1]);
             i += 2;
         }
@@ -683,7 +651,7 @@ void clusterSyncSlotsStreamEOF(client *c) {
 
     for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
         slotRange *sr = &task->slot_ranges->ranges[i];
-        for (int j = sr->start_slot; j <= sr->end_slot; j++) {
+        for (int j = sr->start; j <= sr->end; j++) {
             clusterNode *myself = getMyClusterNode();
             server.cluster->slots[j] = myself;
             clusterNodeSetSlotBit(myself, j);
@@ -925,7 +893,7 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
         for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
             slotRange *sr = &task->slot_ranges->ranges[i];
             /* Iterate all keys in the slot range */
-            for (int j = sr->start_slot; j <= sr->end_slot; j++) {
+            for (int j = sr->start; j <= sr->end; j++) {
                 kvs_di = kvstoreGetDictIterator(server.db->keys, j);
                 while ((de = kvstoreDictIteratorNext(kvs_di)) != NULL) {
                     /* Get the value object (of type kvobj) */

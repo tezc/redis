@@ -3657,7 +3657,7 @@ kvobj *dbUnshareStringValueByLink(redisDb *db, robj *key, kvobj *kv, dictEntryLi
 #define FLUSH_TYPE_DB    1
 #define FLUSH_TYPE_SLOTS 2
 typedef struct slotRange {
-    unsigned short start_slot, end_slot;
+    unsigned short start, end;
 } slotRange;
 typedef struct slotRangeArray {
     int num_ranges;
