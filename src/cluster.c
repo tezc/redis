@@ -1617,6 +1617,8 @@ slotRangeArray *parseSlotRangesOrReply(client *c, int argc, int pos) {
     slotRangeArray *sra;
 
     serverAssert(pos <= argc);
+    serverAssert((argc - pos) % 2 == 0);
+
     count = (argc - pos) / 2;
     sra = zcalloc(sizeof(*sra) + count * sizeof(slotRange));
 
