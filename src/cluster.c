@@ -1621,6 +1621,7 @@ slotRangeArray *parseSlotRangesOrReply(client *c, int argc, int pos) {
 
     count = (argc - pos) / 2;
     sra = zcalloc(sizeof(*sra) + count * sizeof(slotRange));
+    sra->num_ranges = 0;
 
     for (int j = pos; j < argc; j += 2) {
         if ((start = getSlotOrReply(c, c->argv[j])) == -1 ||
