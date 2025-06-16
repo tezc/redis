@@ -232,6 +232,7 @@ client *createClient(connection *conn) {
     c->net_output_bytes = 0;
     c->commands_processed = 0;
     c->task = NULL;
+    c->node_id = NULL;
     return c;
 }
 
@@ -1900,6 +1901,7 @@ void freeClient(client *c) {
     sdsfree(c->peerid);
     sdsfree(c->sockname);
     sdsfree(c->slave_addr);
+    sdsfree(c->node_id);
     zfree(c);
 }
 
