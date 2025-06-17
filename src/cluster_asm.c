@@ -75,7 +75,7 @@ ConnectionType *connTypeOfReplication(void);
 void createDumpPayload(rio *payload, robj *o, robj *key, int dbid);
 int startBgsaveForReplication(int mincapa, int req);
 void createReplicationBacklogIfNeeded(void);
-static sds createSlotRangesStr(list *slot_ranges);
+static sds createSlotRangesStr(slotRangeArray *slot_ranges);
 
 char *asmTaskStateToString(int state) {
     switch (state) {
