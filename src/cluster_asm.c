@@ -676,6 +676,7 @@ void clusterSyncSlotsSnapshotEOF(client *c) {
     /* Replay stream. */
     asmSyncBufferStreamToDb(task);
     serverLog(LL_NOTICE, "Replaying stream for task is done");
+    connSetReadHandler(task->main_channel_conn, readQueryFromClient);
 
     /* ACK offset during replaying buffer stream, fake offset. */
     sendCommand(task->main_channel_conn, "CLUSTER", "SYNCSLOTS", "ACK", "123", NULL);
@@ -1036,16 +1037,16 @@ static void asmSyncBufferReadFromConn(connection *conn) {
 }
 
 static void asmSyncBufferStreamYieldCallback(void *ctx) {
-    replDataBufToDbCtx *contex = (replDataBufToDbCtx *) ctx;
-    client *c = contex->based_client;
-    sds offset = sdsfromlonglong(contex->total_offset);
+    replDataBufToDbCtx *context = (replDataBufToDbCtx *) ctx;
+    client *c = context->based_client;
+    sds offset = sdsfromlonglong(context->total_offset);
     sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "ACK", offset, NULL);
     sdsfree(offset);
 }
 
 static int asmSyncBufferStreamShouldContinue(void *ctx) {
-    replDataBufToDbCtx *contex = (replDataBufToDbCtx *) ctx;
-    UNUSED(contex);
+    replDataBufToDbCtx *context = (replDataBufToDbCtx *) ctx;
+    UNUSED(context);
     return 1;
 }
 
@@ -1059,7 +1060,7 @@ static int asmSyncBufferStreamToDb(asmTask *task) {
     c->authenticated = 1;
     c->user = NULL;
     c->task = task;
-    connSetReadHandler(c->conn, asmSyncBufferReadFromConn);
+    connSetReadHandler(c->conn, NULL);
 
     replDataBufToDbCtx ctx = {
         .based_client = c,

@@ -3891,7 +3891,7 @@ int replDataBufStreamToDb(replDataBuf *buf, replDataBufToDbCtx *ctx) {
             if (server.loading_process_events_interval_bytes &&
                 ((offset + bytes) / server.loading_process_events_interval_bytes >
                   offset / server.loading_process_events_interval_bytes))
-            {                
+            {
                 ctx->yield_callback(ctx);
                 processEventsWhileBlocked();
             }
@@ -3934,11 +3934,14 @@ static uint64_t ReplNumMasterDisconnection = 0;
 /* Replication: Replica side.
  * Check if we should continue streaming replDataBuf to database */
 static int rdbChannelStreamShouldContinue(void *ctx) {
-    replDataBufToDbCtx *contex = (replDataBufToDbCtx *) ctx;
+    replDataBufToDbCtx *context = (replDataBufToDbCtx *) ctx;
 
+    /* Check if master client was freed in processEventsWhileBlocked().
+     * It can happen if we receive 'replicaof' command or 'client kill'
+     * command for the master. */
     if (ReplNumMasterDisconnection != server.repl_num_master_disconnection ||
         !server.repl_full_sync_buffer.blocks ||
-        contex->based_client->flags & CLIENT_CLOSE_ASAP)
+        context->based_client->flags & CLIENT_CLOSE_ASAP)
     {
         return 0;
     }
@@ -5182,4 +5185,3 @@ void updateFailoverStatus(void) {
             server.target_replica_port);
     }
 }
-
