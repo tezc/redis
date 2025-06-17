@@ -1322,6 +1322,7 @@ typedef struct {
     } offset;
 } clientReqResInfo;
 #endif
+
 struct asmTask;
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
@@ -1486,6 +1487,14 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     list *pending_clients_to_main_thread;       /* Clients that are waiting to be executed by the main thread. */
     list *clients;                              /* IO thread managed clients. */
 } IOThread;
+
+/* Context for streaming replDataBuf to database */
+typedef struct replDataBufToDbCtx {
+    client *client;                     /* Client to process commands */
+    size_t total_offset;                /* Total offset processed */
+    int  (*should_continue)(void *ctx); /* Check if should continue */
+    void (*yield_callback)(void *ctx);  /* Yield to event loop */
+} replDataBufToDbCtx;
 
 /* ACL information */
 typedef struct aclInfo {
@@ -3145,6 +3154,10 @@ void abortFailover(const char *err);
 const char *getFailoverStateString(void);
 int replicationCheckHasMainChannel(client *slave);
 unsigned long replicationLogicalReplicaCount(void);
+void replDataBufInit(replDataBuf *buf);
+void replDataBufClear(replDataBuf *buf);
+void replDataBufReadFromConn(connection *conn, replDataBuf *buf, void (*error_handler)(connection *conn));
+int replDataBufStreamToDb(replDataBuf *buf, replDataBufToDbCtx *ctx);
 
 /* Generic persistence functions */
 void startLoadingFile(size_t size, char* filename, int rdbflags);
