@@ -3725,7 +3725,7 @@ void replDataBufInit(replDataBuf *buf) {
     buf->blocks->free = zfree;
 }
 
-void replDataBufFree(replDataBuf *buf) {
+void replDataBufClear(replDataBuf *buf) {
     if (buf->blocks) listRelease(buf->blocks);
     buf->blocks = NULL;
     buf->size = 0;
@@ -3742,16 +3742,19 @@ static void rdbChannelReplDataBufInit(void) {
 }
 
 /* Replication: Replica side.
- * Free replica's local replication buffer */
-static void rdbChannelReplDataBufFree(void) {
-    replDataBufFree(&server.repl_full_sync_buffer);
+ * Clear replica's local replication buffer */
+static void rdbChannelReplDataBufClear(void) {
+    replDataBufClear(&server.repl_full_sync_buffer);
 }
 
-/* Generic function to read data from connection into a buffer block. */
-static int replDataBufReadIntoBlock(connection *conn,  replDataBuf *buf,
-                replDataBufBlock *block, void (*error_handler)(connection *conn))
+/* Generic function to read data from connection into the last block. */
+static int replDataBufReadIntoLastBlock(connection *conn,  replDataBuf *buf,
+                                    void (*error_handler)(connection *conn))
 {
     atomicIncr(server.stat_io_reads_processed[IOTHREAD_MAIN_THREAD_ID], 1);
+
+    replDataBufBlock *block = listNodeValue(listLast(buf->blocks));
+    serverAssert(block && block->size > block->used);
 
     int nread = connRead(conn, block->buf + block->used, block->size - block->used);
     if (nread <= 0) {
@@ -3780,7 +3783,7 @@ void replDataBufReadFromConn(connection *conn, replDataBuf *buf, void (*error_ha
 
     /* Try to append last node. */
     if (tail && tail->size > tail->used) {
-        nread = replDataBufReadIntoBlock(conn, buf, tail, error_handler);
+        nread = replDataBufReadIntoLastBlock(conn, buf, error_handler);
         if (nread <= 0)
             return;
 
@@ -3826,13 +3829,13 @@ void replDataBufReadFromConn(connection *conn, replDataBuf *buf, void (*error_ha
         if (buf->peak < buf->size)
             buf->peak = buf->size;
 
-        replDataBufReadIntoBlock(conn, buf, tail, error_handler);
+        replDataBufReadIntoLastBlock(conn, buf, error_handler);
     }
 }
 
 /* Replication: Replica side.
  * Main channel read error handler */
-static void readPeplBufferErrorHandler(connection *conn) {
+static void readReplBufferErrorHandler(connection *conn) {
     serverLog(LL_WARNING, "Main channel error while reading from master: %s",
               connGetLastError(conn));
     cancelReplicationHandshake(1);
@@ -3854,7 +3857,7 @@ static void rdbChannelBufferReplData(connection *conn) {
         buf->last_num_blocks = listLength(buf->blocks);
     }
 
-    replDataBufReadFromConn(conn, buf, readPeplBufferErrorHandler);
+    replDataBufReadFromConn(conn, buf, readReplBufferErrorHandler);
 }
 
 /* Generic function to stream replDataBuf data into database
@@ -3863,7 +3866,7 @@ int replDataBufStreamToDb(replDataBuf *buf, replDataBufToDbCtx *ctx) {
     listNode *n;
     int ret = C_OK;
     size_t offset = 0;
-    client *c = ctx->based_client;
+    client *c = ctx->client;
 
     blockingOperationStarts();
     while ((n = listFirst(buf->blocks))) {
@@ -3934,14 +3937,14 @@ static uint64_t ReplNumMasterDisconnection = 0;
 /* Replication: Replica side.
  * Check if we should continue streaming replDataBuf to database */
 static int rdbChannelStreamShouldContinue(void *ctx) {
-    replDataBufToDbCtx *context = (replDataBufToDbCtx *) ctx;
+    replDataBufToDbCtx *context = ctx;
 
     /* Check if master client was freed in processEventsWhileBlocked().
      * It can happen if we receive 'replicaof' command or 'client kill'
      * command for the master. */
     if (ReplNumMasterDisconnection != server.repl_num_master_disconnection ||
         !server.repl_full_sync_buffer.blocks ||
-        context->based_client->flags & CLIENT_CLOSE_ASAP)
+        context->client->flags & CLIENT_CLOSE_ASAP)
     {
         return 0;
     }
@@ -3971,7 +3974,7 @@ static void rdbChannelStreamReplDataToDb(void) {
     connSetReadHandler(c->conn, rdbChannelBufferReplData);
 
     replDataBufToDbCtx ctx = {
-        .based_client = c,
+        .client = c,
         .total_offset = 0,
         .should_continue = rdbChannelStreamShouldContinue,
         .yield_callback = rdbChannelStreamYieldCallback,
@@ -4014,7 +4017,7 @@ out:
 static void rdbChannelCleanup(void) {
     server.repl_rdb_ch_state = REPL_RDB_CH_STATE_NONE;
     server.repl_main_ch_state = REPL_MAIN_CH_NONE;
-    rdbChannelReplDataBufFree();
+    rdbChannelReplDataBufClear();
 }
 
 /* Replication: Replica side.

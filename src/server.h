@@ -1478,7 +1478,7 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
 
 /* Context for streaming replDataBuf to database */
 typedef struct replDataBufToDbCtx {
-    client *based_client;               /* Client to process commands */
+    client *client;                     /* Client to process commands */
     size_t total_offset;                /* Total offset processed */
     int  (*should_continue)(void *ctx); /* Check if should continue */
     void (*yield_callback)(void *ctx);  /* Yield to event loop */
@@ -3129,7 +3129,7 @@ const char *getFailoverStateString(void);
 int replicationCheckHasMainChannel(client *slave);
 unsigned long replicationLogicalReplicaCount(void);
 void replDataBufInit(replDataBuf *buf);
-void replDataBufFree(replDataBuf *buf);
+void replDataBufClear(replDataBuf *buf);
 void replDataBufReadFromConn(connection *conn, replDataBuf *buf, void (*error_handler)(connection *conn));
 int replDataBufStreamToDb(replDataBuf *buf, replDataBufToDbCtx *ctx);
 

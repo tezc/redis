@@ -722,6 +722,7 @@ void clusterSyncSlotsStreamEOF(client *c) {
 
     /* Free the task */
     listDelNode(server.cluster->asm_tasks, listSearchKey(server.cluster->asm_tasks, task));
+    replDataBufClear(&task->sync_buffer); /* Clear the sync buffer */
     zfree(task->slot_ranges); /* Free the slot ranges list */
     zfree(task); /* Free the task itself */
     serverLog(LL_NOTICE, "Slot migration task completed");
@@ -1020,7 +1021,7 @@ static void asmReadSyncBufferErrorHandler(connection *conn) {
     asmTask *task = connGetPrivateData(conn);
 
     task->state = ASM_FAILED;
-    replDataBufFree(&task->sync_buffer);
+    replDataBufClear(&task->sync_buffer);
     if (task->rdb_channel_conn) connClose(task->rdb_channel_conn);
     if (task->main_channel_conn) connClose(task->main_channel_conn);
 }
@@ -1028,24 +1029,21 @@ static void asmReadSyncBufferErrorHandler(connection *conn) {
 /* Read data from connection into sync buffer. */
 static void asmSyncBufferReadFromConn(connection *conn) {
     asmTask *task = connGetPrivateData(conn);
-    if (!task) {
-        serverLog(LL_WARNING, "ASM buffer stream: no task associated with connection");
-        return;
-    }
+    serverAssert(task && task->state == ASM_BUFFER_STREAM);
 
     replDataBufReadFromConn(conn, &task->sync_buffer, asmReadSyncBufferErrorHandler);
 }
 
 static void asmSyncBufferStreamYieldCallback(void *ctx) {
-    replDataBufToDbCtx *context = (replDataBufToDbCtx *) ctx;
-    client *c = context->based_client;
+    replDataBufToDbCtx *context = ctx;
+    client *c = context->client;
     sds offset = sdsfromlonglong(context->total_offset);
     sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "ACK", offset, NULL);
     sdsfree(offset);
 }
 
 static int asmSyncBufferStreamShouldContinue(void *ctx) {
-    replDataBufToDbCtx *context = (replDataBufToDbCtx *) ctx;
+    replDataBufToDbCtx *context = ctx;
     UNUSED(context);
     return 1;
 }
@@ -1063,7 +1061,7 @@ static int asmSyncBufferStreamToDb(asmTask *task) {
     connSetReadHandler(c->conn, NULL);
 
     replDataBufToDbCtx ctx = {
-        .based_client = c,
+        .client = c,
         .total_offset = 0,
         .should_continue = asmSyncBufferStreamShouldContinue,
         .yield_callback = asmSyncBufferStreamYieldCallback,
