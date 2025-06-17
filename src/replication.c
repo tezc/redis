@@ -3748,7 +3748,7 @@ static void rdbChannelReplDataBufClear(void) {
 }
 
 /* Generic function to read data from connection into the last block. */
-static int replDataBufReadIntoLastBlock(connection *conn,  replDataBuf *buf,
+static int replDataBufReadIntoLastBlock(connection *conn, replDataBuf *buf,
                                     void (*error_handler)(connection *conn))
 {
     atomicIncr(server.stat_io_reads_processed[IOTHREAD_MAIN_THREAD_ID], 1);
