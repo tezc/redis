@@ -6510,8 +6510,17 @@ void clusterPromoteSelfToMaster(void) {
 }
 
 int clusterAsmConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
+    UNUSED(err);
     /* TODO: Validation, cancel asmTasks if required */
 
+    sds slot_ranges_str = createSlotRangesStr(slot_ranges);
+    serverLog(LL_NOTICE, "Slot ranges: %s handed off", slot_ranges_str);
+    sdsfree(slot_ranges_str);
+
+    return C_OK;
+}
+
+int clusterAsmImportCompleted(slotRangeArray *slot_ranges, sds *err) {
     for (int i = 0; i < slot_ranges->num_ranges; i++) {
         slotRange *sr = &slot_ranges->ranges[i];
         for (int j = sr->start; j <= sr->end; j++) {
@@ -6524,14 +6533,6 @@ int clusterAsmConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
     clusterBroadcastPong(0);
     clusterSaveConfigOrDie(1);
 
-    sds slot_ranges_str = createSlotRangesStr(slot_ranges);
-    serverLog(LL_NOTICE, "Slot ranges: %s handed off", slot_ranges_str);
-    sdsfree(slot_ranges_str);
-
-    return C_OK;
-}
-
-int clusterAsmImportCompleted(slotRangeArray *slot_ranges, sds *err) {
     return clusterAsmConfigUpdated(slot_ranges, err);
 }
 
@@ -6540,9 +6541,9 @@ int clusterAsmSlotWritesPause(slotRangeArray *slot_ranges, sds *err) {
     return C_OK;
 }
 
-int clusterAsmOnError(slotRangeArray *slot_ranges, sds *err) {
-    (void) slot_ranges;
-    (void) err;
+int clusterAsmOnEvent(slotRangeArray *slot_ranges, int event, void *arg) {
+    UNUSED(slot_ranges);
+    UNUSED(event);
+    UNUSED(arg);
     return C_OK;
 }
-

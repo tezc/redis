@@ -346,11 +346,7 @@ int clusterAsmImportCompleted(slotRangeArray *slot_ranges, sds *err) {
     return clusterPlugin->clusterAsmImportCompleted(slot_ranges, err);
 }
 
-int clusterAsmOnError(slotRangeArray *slot_ranges, sds *err) {
-    return clusterPlugin->clusterAsmOnError(slot_ranges, err);
-}
-
-int clusterAsmOnStateChange(slotRangeArray *slot_ranges, sds *msg, int state) {
-    return clusterPlugin->clusterAsmOnStateChange(slot_ranges, msg, state);
+int clusterAsmOnEvent(slotRangeArray *slot_ranges, int event, void *arg) {
+    return clusterPlugin->clusterAsmOnEvent(slot_ranges, event, arg);
 }
 

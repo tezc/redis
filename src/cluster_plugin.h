@@ -66,8 +66,7 @@ typedef const char *(*clusterGetSecretFunc)(size_t *len);
 
 typedef int (*clusterAsmSlotWritesPauseFunc)(slotRangeArray *slot_ranges, sds *err);
 typedef int (*clusterAsmImportCompletedFunc)(slotRangeArray *slot_ranges, sds *err);
-typedef int (*clusterAsmOnErrorFunc)(slotRangeArray *slot_ranges, sds *err);
-typedef int (*clusterAsmOnStateChangeFunc)(slotRangeArray *slot_ranges, sds *msg, int state);
+typedef int (*clusterAsmOnEventFunc)(slotRangeArray *slot_ranges, int state, void *arg);
 
 typedef struct {
     clusterAllowFailoverCmdFunc clusterAllowFailoverCmd;
@@ -117,8 +116,7 @@ typedef struct {
     clusterGetSecretFunc clusterGetSecret;
     clusterAsmSlotWritesPauseFunc clusterAsmSlotWritesPause;
     clusterAsmImportCompletedFunc clusterAsmImportCompleted;
-    clusterAsmOnErrorFunc clusterAsmOnError;
-    clusterAsmOnStateChangeFunc clusterAsmOnStateChange;
+    clusterAsmOnEventFunc clusterAsmOnEvent;
 
 
 } ClusterPlugin;

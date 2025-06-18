@@ -28,6 +28,7 @@ void clusterSyncSlotsCommand(client *c);
 #define ASM_EVENT_MIGRATE_FAILED    5
 #define ASM_EVENT_MIGRATE_COMPLETED 6
 
+
 /* Called when an ASM event occurs to notify implementation/plugin. */
 int clusterAsmOnEvent(slotRangeArray *slot_ranges, int event, void *arg);
 
