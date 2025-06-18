@@ -64,6 +64,7 @@ static inline unsigned int keyHashSlot(char *key, int keylen) {
 /* functions requiring mechanism specific implementations */
 void clusterInit(void);
 void clusterInitLast(void);
+void clusterCommonInit(void);
 void clusterCron(void);
 void clusterBeforeSleep(void);
 int verifyClusterConfigWithData(void);
@@ -142,6 +143,8 @@ int isValidAuxString(char *s, unsigned int length);
 void migrateCommand(client *c);
 void clusterCommand(client *c);
 ConnectionType *connTypeOfCluster(void);
+sds createSlotRangesStr(slotRangeArray *slot_ranges);
+int validateSlotRanges(slotRangeArray *sra, sds *err);
 slotRangeArray *parseSlotRangesOrReply(client *c, int argc, int pos);
 
 void clusterGenNodesSlotsInfo(int filter);
@@ -162,4 +165,5 @@ clusterNode *clusterShardNodeFirst(void *shard);
 
 int clusterNodeTcpPort(clusterNode *node);
 int clusterNodeTlsPort(clusterNode *node);
+
 #endif /* __CLUSTER_H */

@@ -64,6 +64,11 @@ typedef int (*clusterNodeTlsPortFunc)(clusterNode *node);
 
 typedef const char *(*clusterGetSecretFunc)(size_t *len);
 
+typedef int (*clusterAsmSlotWritesPauseFunc)(slotRangeArray *slot_ranges, sds *err);
+typedef int (*clusterAsmImportCompletedFunc)(slotRangeArray *slot_ranges, sds *err);
+typedef int (*clusterAsmOnErrorFunc)(slotRangeArray *slot_ranges, sds *err);
+typedef int (*clusterAsmOnStateChangeFunc)(slotRangeArray *slot_ranges, sds *msg, int state);
+
 typedef struct {
     clusterAllowFailoverCmdFunc clusterAllowFailoverCmd;
     clusterGenNodesDescriptionFunc clusterGenNodesDescription;
@@ -110,6 +115,12 @@ typedef struct {
     clusterNodeTcpPortFunc clusterNodeTcpPort;
     clusterNodeTlsPortFunc clusterNodeTlsPort;
     clusterGetSecretFunc clusterGetSecret;
+    clusterAsmSlotWritesPauseFunc clusterAsmSlotWritesPause;
+    clusterAsmImportCompletedFunc clusterAsmImportCompleted;
+    clusterAsmOnErrorFunc clusterAsmOnError;
+    clusterAsmOnStateChangeFunc clusterAsmOnStateChange;
+
+
 } ClusterPlugin;
 
 void clusterPluginInit(ClusterPlugin *plugin);

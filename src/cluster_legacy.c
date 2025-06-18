@@ -970,7 +970,6 @@ void clusterInit(void) {
     server.cluster->failover_auth_epoch = 0;
     server.cluster->cant_failover_reason = CLUSTER_CANT_FAILOVER_NONE;
     server.cluster->lastVoteEpoch = 0;
-    server.cluster->asm_tasks = listCreate();
 
     /* Initialize stats */
     for (int i = 0; i < CLUSTERMSG_TYPE_COUNT; i++) {
@@ -1034,6 +1033,7 @@ void clusterInit(void) {
     clusterUpdateMyselfHumanNodename();
 
     getRandomHexChars(server.cluster->internal_secret, CLUSTER_INTERNALSECRETLEN);
+    clusterCommonInit();
 }
 
 void clusterInitLast(void) {
@@ -6508,3 +6508,41 @@ int clusterAllowFailoverCmd(client *c) {
 void clusterPromoteSelfToMaster(void) {
     replicationUnsetMaster();
 }
+
+int clusterAsmConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
+    /* TODO: Validation, cancel asmTasks if required */
+
+    for (int i = 0; i < slot_ranges->num_ranges; i++) {
+        slotRange *sr = &slot_ranges->ranges[i];
+        for (int j = sr->start; j <= sr->end; j++) {
+            server.cluster->slots[j] = myself;
+            clusterNodeSetSlotBit(myself, j);
+        }
+    }
+    /* New config and Bump new config */
+    clusterBumpConfigEpochWithoutConsensus();
+    clusterBroadcastPong(0);
+    clusterSaveConfigOrDie(1);
+
+    sds slot_ranges_str = createSlotRangesStr(slot_ranges);
+    serverLog(LL_NOTICE, "Slot ranges: %s handed off", slot_ranges_str);
+    sdsfree(slot_ranges_str);
+
+    return C_OK;
+}
+
+int clusterAsmImportCompleted(slotRangeArray *slot_ranges, sds *err) {
+    return clusterAsmConfigUpdated(slot_ranges, err);
+}
+
+int clusterAsmSlotWritesPause(slotRangeArray *slot_ranges, sds *err) {
+    clusterAsmSlotWritesPaused(slot_ranges, err);
+    return C_OK;
+}
+
+int clusterAsmOnError(slotRangeArray *slot_ranges, sds *err) {
+    (void) slot_ranges;
+    (void) err;
+    return C_OK;
+}
+
