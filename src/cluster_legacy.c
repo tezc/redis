@@ -6509,7 +6509,7 @@ void clusterPromoteSelfToMaster(void) {
     replicationUnsetMaster();
 }
 
-int clusterAsmConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
+int clusterNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
     UNUSED(err);
     /* TODO: Validation, cancel asmTasks if required */
 
@@ -6520,30 +6520,52 @@ int clusterAsmConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
     return C_OK;
 }
 
-int clusterAsmImportCompleted(slotRangeArray *slot_ranges, sds *err) {
-    for (int i = 0; i < slot_ranges->num_ranges; i++) {
-        slotRange *sr = &slot_ranges->ranges[i];
-        for (int j = sr->start; j <= sr->end; j++) {
-            server.cluster->slots[j] = myself;
-            clusterNodeSetSlotBit(myself, j);
-        }
-    }
-    /* New config and Bump new config */
-    clusterBumpConfigEpochWithoutConsensus();
-    clusterBroadcastPong(0);
-    clusterSaveConfigOrDie(1);
-
-    return clusterAsmConfigUpdated(slot_ranges, err);
-}
-
-int clusterAsmSlotWritesPause(slotRangeArray *slot_ranges, sds *err) {
-    clusterAsmSlotWritesPaused(slot_ranges, err);
-    return C_OK;
-}
-
-int clusterAsmOnEvent(slotRangeArray *slot_ranges, int event, void *arg) {
-    UNUSED(slot_ranges);
-    UNUSED(event);
+int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
     UNUSED(arg);
+
+    sds str = createSlotRangesStr(slot_ranges);
+
+    switch (state) {
+        case ASM_EVENT_IMPORT_STARTED:
+            serverLog(LL_NOTICE, "Import started for slot ranges: %s", str);
+            break;
+        case ASM_EVENT_IMPORT_FAILED:
+            serverLog(LL_NOTICE, "Import failed for slot ranges: %s", str);
+            break;
+        case ASM_EVENT_IMPORT_WAIT_PAUSE:
+            clusterAsmRequest(slot_ranges, ASM_REQUEST_IMPORT_PAUSED, NULL, NULL);
+            serverLog(LL_NOTICE, "Import paused for slot ranges: %s", str);
+            break;
+        case ASM_EVENT_IMPORT_COMPLETED:
+            serverLog(LL_NOTICE, "Import completed for slot ranges: %s", str);
+
+            for (int i = 0; i < slot_ranges->num_ranges; i++) {
+                slotRange *sr = &slot_ranges->ranges[i];
+                for (int j = sr->start; j <= sr->end; j++) {
+                    server.cluster->slots[j] = myself;
+                    clusterNodeSetSlotBit(myself, j);
+                }
+            }
+            /* New config and Bump new config */
+            clusterBumpConfigEpochWithoutConsensus();
+            clusterBroadcastPong(0);
+            clusterSaveConfigOrDie(1);
+            clusterNotifyConfigUpdated(slot_ranges, NULL);
+
+            break;
+        case ASM_EVENT_MIGRATE_STARTED:
+            serverLog(LL_NOTICE, "Migration started for slot ranges: %s", str);
+            break;
+        case ASM_EVENT_MIGRATE_FAILED:
+            serverLog(LL_NOTICE, "Migration failed for slot ranges: %s", str);
+            break;
+        case ASM_EVENT_MIGRATE_COMPLETED:
+            serverLog(LL_NOTICE, "Migration completed for slot ranges: %s", str);
+            break;
+        default:
+            break;
+    }
+
+    sdsfree(str);
     return C_OK;
 }

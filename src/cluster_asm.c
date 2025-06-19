@@ -84,8 +84,6 @@ void createReplicationBacklogIfNeeded(void);
 static void asmSyncBufferReadFromConn(connection *conn);
 static int  asmSyncBufferStreamToDb(asmTask *task);
 
-int clusterAsmSlotWritesPause(slotRangeArray *slot_ranges, sds *err);
-
 void clusterAsmInit(void) {
     asm_tasks = listCreate();
 }
@@ -710,7 +708,6 @@ void clusterSyncSlotsStreamEOF(client *c) {
     
     /* Iterate task->slot_range, and handoff the ownership of slots */
     task->state = ASM_SLOTS_HANDOFF;
-    clusterAsmImportCompleted(task->slot_ranges, NULL);
     clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_COMPLETED, NULL);
 
     /* Free the task */
@@ -885,7 +882,7 @@ void clusterSyncSlotsCommand(client *c) {
         task->state = ASM_WAIT_PAUSE_WRITE;
         task->c = c;
 
-        clusterAsmSlotWritesPause(task->slot_ranges, NULL);
+        clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_WAIT_PAUSE, NULL);
     } else if (!strcasecmp(c->argv[2]->ptr, "fail") && c->argc == 4) {
         /* CLUSTER SYNCSLOTS FAIL <err> */
         return; /* This is a no-op, just to handle the command syntax. */
@@ -1119,4 +1116,18 @@ int clusterAsmSlotWritesPaused(slotRangeArray *slot_ranges, sds *err) {
     return C_OK;
 }
 
+int clusterAsmRequest(slotRangeArray *slot_ranges, int request, void *arg, sds *err) {
+    (void) arg;
 
+    switch (request) {
+        case ASM_REQUEST_IMPORT_START:
+            return clusterAsmImport(slot_ranges, err);
+        case ASM_REQUEST_IMPORT_CANCEL:
+            return clusterAsmCancel(slot_ranges, err);
+        case ASM_REQUEST_IMPORT_PAUSED:
+            return clusterAsmSlotWritesPaused(slot_ranges, err);
+        default:
+            *err = sdscatprintf(sdsempty(), "Unknown request: %d", request);
+            return C_ERR;
+    }
+}
