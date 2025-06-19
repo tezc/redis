@@ -65,6 +65,7 @@ void clusterSyncSlotsCommand(client *c);
 #define ASM_EVENT_MIGRATE_FAILED       6 /* Migration failed */
 #define ASM_EVENT_MIGRATE_COMPLETED    7 /* Migration completed */
 
+/* Called by implementation to request an ASM operation. */
 int clusterAsmRequest(slotRangeArray *slot_ranges, int request, void *arg, sds *err);
 
 /* Called when an ASM event occurs to notify implementation/plugin. */
