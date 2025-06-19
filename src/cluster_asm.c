@@ -111,6 +111,7 @@ char *asmTaskStateToString(int state) {
         case ASM_WAIT_RDBCHANNEL: return "wait-rdbchannel";
         case ASM_WAIT_BGSAVE_START: return "wait-bgsave-start";
         case ASM_SEND_BULK_AND_STREAM: return "send-bulk-and-stream";
+        case ASM_WAIT_PAUSE_WRITE: return "wait-pause-write";
         case ASM_PAUSED_WRITE: return "paused-write";
         case ASM_STREAM_DONE: return "stream-done";
 
@@ -244,7 +245,7 @@ int asmStartImportTask(slotRangeArray *slot_ranges, sds *err) {
 
     sds slot_ranges_str = createSlotRangesStr(slot_ranges);
     serverLog(LL_NOTICE, "Migrate slots task created: source: %s, dest: %s, sync slot ranges: %s, operation: %s",
-              task->source, task->dest, slot_ranges_str, task->operation == ASM_IMPORT ? "importing" : "migrating");
+            task->source, task->dest, slot_ranges_str, task->operation == ASM_IMPORT ? "importing" : "migrating");
     sdsfree(slot_ranges_str);
 
     clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_STARTED, NULL);
@@ -1057,11 +1058,6 @@ static int asmSyncBufferStreamToDb(asmTask *task) {
     return replDataBufStreamToDb(&task->sync_buffer, &ctx);
 }
 
-#define ASM_ERROR              -1
-#define ASM_STABLE             0
-#define ASM_IMPORT_INPROGRESS  1
-#define ASM_MIGRATE_INPROGRESS 2
-
 int clusterAsmImport(slotRangeArray *slot_ranges, sds *err) {
     if (validateSlotRanges(slot_ranges, err) != C_OK ||
         asmStartImportTask(slot_ranges, err) != C_OK)
@@ -1084,12 +1080,6 @@ int clusterAsmCancel(slotRangeArray *slot_ranges, sds *err) {
         num_cancelled += cancelLinksForSlotRange(&slot_ranges->ranges[i]);
 
     return num_cancelled;
-}
-
-int clusterAsmStatus(slotRangeArray *migrating_ranges, slotRangeArray *importing_ranges) {
-    (void) migrating_ranges;
-    (void) importing_ranges;
-    return 0;
 }
 
 int clusterAsmSlotWritesPaused(slotRangeArray *slot_ranges, sds *err) {

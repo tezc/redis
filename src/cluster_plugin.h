@@ -64,9 +64,7 @@ typedef int (*clusterNodeTlsPortFunc)(clusterNode *node);
 
 typedef const char *(*clusterGetSecretFunc)(size_t *len);
 
-typedef int (*clusterAsmSlotWritesPauseFunc)(slotRangeArray *slot_ranges, sds *err);
-typedef int (*clusterAsmImportCompletedFunc)(slotRangeArray *slot_ranges, sds *err);
-typedef int (*clusterAsmOnEventFunc)(slotRangeArray *slot_ranges, int state, void *arg);
+typedef int (*clusterAsmOnEventFunc)(slotRangeArray *slot_ranges, int event, void *arg);
 
 typedef struct {
     clusterAllowFailoverCmdFunc clusterAllowFailoverCmd;
@@ -114,8 +112,6 @@ typedef struct {
     clusterNodeTcpPortFunc clusterNodeTcpPort;
     clusterNodeTlsPortFunc clusterNodeTlsPort;
     clusterGetSecretFunc clusterGetSecret;
-    clusterAsmSlotWritesPauseFunc clusterAsmSlotWritesPause;
-    clusterAsmImportCompletedFunc clusterAsmImportCompleted;
     clusterAsmOnEventFunc clusterAsmOnEvent;
 
 

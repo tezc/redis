@@ -338,14 +338,6 @@ const char *clusterGetSecret(size_t *len) {
     return clusterPlugin->clusterGetSecret(len);
 }
 
-int clusterAsmSlotWritesPause(slotRangeArray *slot_ranges, sds *err) {
-    return clusterPlugin->clusterAsmSlotWritesPause(slot_ranges, err);
-}
-
-int clusterAsmImportCompleted(slotRangeArray *slot_ranges, sds *err) {
-    return clusterPlugin->clusterAsmImportCompleted(slot_ranges, err);
-}
-
 int clusterAsmOnEvent(slotRangeArray *slot_ranges, int event, void *arg) {
     return clusterPlugin->clusterAsmOnEvent(slot_ranges, event, arg);
 }

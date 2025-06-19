@@ -165,5 +165,4 @@ clusterNode *clusterShardNodeFirst(void *shard);
 
 int clusterNodeTcpPort(clusterNode *node);
 int clusterNodeTlsPort(clusterNode *node);
-
 #endif /* __CLUSTER_H */
