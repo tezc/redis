@@ -6509,17 +6509,6 @@ void clusterPromoteSelfToMaster(void) {
     replicationUnsetMaster();
 }
 
-int clusterNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
-    UNUSED(err);
-    /* TODO: Validation, cancel asmTasks if required */
-
-    sds slot_ranges_str = createSlotRangesStr(slot_ranges);
-    serverLog(LL_NOTICE, "Slot ranges: %s handed off", slot_ranges_str);
-    sdsfree(slot_ranges_str);
-
-    return C_OK;
-}
-
 int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
     UNUSED(arg);
 
@@ -6536,7 +6525,7 @@ int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
             clusterAsmRequest(slot_ranges, ASM_REQUEST_IMPORT_PAUSED, NULL, NULL);
             serverLog(LL_NOTICE, "Import paused for slot ranges: %s", str);
             break;
-        case ASM_EVENT_IMPORT_COMPLETED:
+        case ASM_EVENT_IMPORT_WAIT_FINALIZE:
             serverLog(LL_NOTICE, "Import completed for slot ranges: %s", str);
 
             for (int i = 0; i < slot_ranges->num_ranges; i++) {
@@ -6550,8 +6539,7 @@ int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
             clusterBumpConfigEpochWithoutConsensus();
             clusterBroadcastPong(0);
             clusterSaveConfigOrDie(1);
-            clusterNotifyConfigUpdated(slot_ranges, NULL);
-
+            clusterAsmRequest(slot_ranges, ASM_REQUEST_CONFIG_UPDATED, NULL, NULL);
             break;
         case ASM_EVENT_MIGRATE_STARTED:
             serverLog(LL_NOTICE, "Migration started for slot ranges: %s", str);
@@ -6559,7 +6547,7 @@ int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
         case ASM_EVENT_MIGRATE_FAILED:
             serverLog(LL_NOTICE, "Migration failed for slot ranges: %s", str);
             break;
-        case ASM_EVENT_MIGRATE_COMPLETED:
+        case ASM_EVENT_MIGRATE_WAIT_FINALIZE:
             serverLog(LL_NOTICE, "Migration completed for slot ranges: %s", str);
             break;
         default:

@@ -709,7 +709,7 @@ void clusterSyncSlotsStreamEOF(client *c) {
     
     /* Iterate task->slot_range, and handoff the ownership of slots */
     task->state = ASM_SLOTS_HANDOFF;
-    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_COMPLETED, NULL);
+    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_WAIT_FINALIZE, NULL);
 
     /* Free the task */
     listDelNode(asm_tasks, listSearchKey(asm_tasks, task));
@@ -1095,13 +1095,24 @@ int clusterAsmSlotWritesPaused(slotRangeArray *slot_ranges, sds *err) {
     /* Send STREAM EOF */
     sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "STREAM-EOF", NULL);
 
-    /* Notify plugin */
-    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_COMPLETED, NULL);
+    /* Notify plugin import is completed */
+    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_WAIT_FINALIZE, NULL);
 
     listDelNode(asm_tasks, listFirst(asm_tasks));
     zfree(task->slot_ranges); /* Free the slot ranges list */
     zfree(task); /* Free the task itself */
     freeClientAsync(c); /* Free the client, it is no longer needed. */
+
+    return C_OK;
+}
+
+int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
+    UNUSED(err);
+    /* TODO: Validation, cancel asmTasks if required */
+
+    sds slot_ranges_str = createSlotRangesStr(slot_ranges);
+    serverLog(LL_NOTICE, "Slot ranges: %s handed off", slot_ranges_str);
+    sdsfree(slot_ranges_str);
 
     return C_OK;
 }
@@ -1116,6 +1127,8 @@ int clusterAsmRequest(slotRangeArray *slot_ranges, int request, void *arg, sds *
             return clusterAsmCancel(slot_ranges, err);
         case ASM_REQUEST_IMPORT_PAUSED:
             return clusterAsmSlotWritesPaused(slot_ranges, err);
+        case ASM_REQUEST_CONFIG_UPDATED:
+            return clusterAsmNotifyConfigUpdated(slot_ranges, err);
         default:
             *err = sdscatprintf(sdsempty(), "Unknown request: %d", request);
             return C_ERR;
