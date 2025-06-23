@@ -6521,8 +6521,8 @@ int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
         case ASM_EVENT_IMPORT_FAILED:
             serverLog(LL_NOTICE, "Import failed for slot ranges: %s", str);
             break;
-        case ASM_EVENT_IMPORT_WAIT_PAUSE:
-            clusterAsmRequest(slot_ranges, ASM_REQUEST_IMPORT_PAUSED, NULL, NULL);
+        case ASM_EVENT_MIGRATE_WAIT_PAUSE:
+            clusterAsmRequest(slot_ranges, ASM_REQUEST_MIGRATE_PAUSED, NULL, NULL);
             serverLog(LL_NOTICE, "Import paused for slot ranges: %s", str);
             break;
         case ASM_EVENT_IMPORT_WAIT_FINALIZE:

@@ -49,9 +49,9 @@ void clusterSyncSlotsCommand(client *c);
  *         │                              │◄────────────────────────┤                             │
  *         │                              │  Repl stream            │                             │
  *         │                              │◄────────────────────────┤                             │
- *         │                              │                         │ ASM_EVENT_IMPORT_WAIT_PAUSE │
+ *         │                              │                         │ASM_EVENT_MIGRATE_WAIT_PAUSE │
  *         │                              │                         ├────────────────────────────►│
- *         │                              │                         │  ASM_REQUEST_IMPORT_PAUSED  │
+ *         │                              │                         │ ASM_REQUEST_MIGRATE_PAUSED  │
  *         │                              │                         │◄────────────────────────────┤
  *         │                              │ Drain repl stream       │                             │
  *         │                              │◄────────────────────────┤                             │
@@ -66,7 +66,7 @@ void clusterSyncSlotsCommand(client *c);
 
 #define ASM_REQUEST_IMPORT_START        1  /* Start a new import operation (destination side) */
 #define ASM_REQUEST_IMPORT_CANCEL       2  /* Cancel an ongoing import operation (destination side) */
-#define ASM_REQUEST_IMPORT_PAUSED       3  /* Notify that slot writes are paused (source side) */
+#define ASM_REQUEST_MIGRATE_PAUSED      3  /* Notify that slot writes are paused (source side) */
 #define ASM_REQUEST_CONFIG_UPDATED      4  /* Notify that config is updated (source and destination side) */
 
 /* Called by implementation to request an ASM operation. */
@@ -74,12 +74,12 @@ int clusterAsmRequest(slotRangeArray *slot_ranges, int request, void *arg, sds *
 
 #define ASM_EVENT_IMPORT_STARTED        1 /* Import started */
 #define ASM_EVENT_IMPORT_FAILED         2 /* Import failed */
-#define ASM_EVENT_IMPORT_WAIT_PAUSE     3 /* Import waiting for slot writes to be paused */
-#define ASM_EVENT_IMPORT_WAIT_FINALIZE  4 /* Import completed, waiting for config change */
-#define ASM_EVENT_IMPORT_FINALIZED      5 /* TODO: decide if we need this to trigger when config is updated */
+#define ASM_EVENT_IMPORT_WAIT_FINALIZE  3 /* Import completed, waiting for config change */
+#define ASM_EVENT_IMPORT_FINALIZED      4 /* TODO: decide if we need this to trigger when config is updated */
 
-#define ASM_EVENT_MIGRATE_STARTED       6 /* Migration started */
-#define ASM_EVENT_MIGRATE_FAILED        7 /* Migration failed */
+#define ASM_EVENT_MIGRATE_STARTED       5 /* Migration started */
+#define ASM_EVENT_MIGRATE_FAILED        6 /* Migration failed */
+#define ASM_EVENT_MIGRATE_WAIT_PAUSE    7 /* Migrate operation waiting for slot writes to be paused */
 #define ASM_EVENT_MIGRATE_WAIT_FINALIZE 8 /* Migration completed */
 #define ASM_EVENT_MIGRATE_FINALIZED     9 /* TODO: decide if we need this to trigger when config is updated */
 

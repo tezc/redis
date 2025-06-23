@@ -32,7 +32,7 @@ typedef struct asmTask {
     long long dest_offset;              /* Destination offset */
     long long source_offset;            /* Source offset */
     replDataBuf sync_buffer;            /* Buffer for the stream */
-    client *c;                          /* Client for the main channel on the source side*/
+    client *main_channel_client;        /* Client for the main channel on the source side*/
 } asmTask;
 
 enum asmState {
@@ -881,9 +881,9 @@ void clusterSyncSlotsCommand(client *c) {
                   offset, task->dest_offset);
         /* Pause write if needed */
         task->state = ASM_WAIT_PAUSE_WRITE;
-        task->c = c;
+        task->main_channel_client = c;
 
-        clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_WAIT_PAUSE, NULL);
+        clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_WAIT_PAUSE, NULL);
     } else if (!strcasecmp(c->argv[2]->ptr, "fail") && c->argc == 4) {
         /* CLUSTER SYNCSLOTS FAIL <err> */
         return; /* This is a no-op, just to handle the command syntax. */
@@ -1083,11 +1083,11 @@ int clusterAsmCancel(slotRangeArray *slot_ranges, sds *err) {
 }
 
 int clusterAsmSlotWritesPaused(slotRangeArray *slot_ranges, sds *err) {
-    (void) slot_ranges;
-    (void) err;
+    UNUSED(slot_ranges);
+    UNUSED(err);
     /* find task matching slot ranges */
     asmTask *task = listNodeValue(listFirst(asm_tasks));
-    client *c = task->c;
+    client *c = task->main_channel_client;
 
     task->state = ASM_PAUSED_WRITE;
 
@@ -1118,14 +1118,14 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
 }
 
 int clusterAsmRequest(slotRangeArray *slot_ranges, int request, void *arg, sds *err) {
-    (void) arg;
+    UNUSED(arg);
 
     switch (request) {
         case ASM_REQUEST_IMPORT_START:
             return clusterAsmImport(slot_ranges, err);
         case ASM_REQUEST_IMPORT_CANCEL:
             return clusterAsmCancel(slot_ranges, err);
-        case ASM_REQUEST_IMPORT_PAUSED:
+        case ASM_REQUEST_MIGRATE_PAUSED:
             return clusterAsmSlotWritesPaused(slot_ranges, err);
         case ASM_REQUEST_CONFIG_UPDATED:
             return clusterAsmNotifyConfigUpdated(slot_ranges, err);
