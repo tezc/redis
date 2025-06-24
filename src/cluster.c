@@ -20,6 +20,7 @@
 
 #include "server.h"
 #include "cluster.h"
+#include "cluster_asm.h"
 #include "cluster_slot_stats.h"
 
 #include <ctype.h>
@@ -291,7 +292,7 @@ void restoreCommand(client *c) {
     objectSetLRUOrLFU(kv, lfu_freq, lru_idle, lru_clock, 1000);
     signalModifiedKey(c,c->db,key);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"restore",key,c->db->id);
- 
+
     /* If we deleted a key that means REPLACE parameter was passed and the
      * destination key existed. */
     if (deleted) {
@@ -1774,6 +1775,25 @@ void readwriteCommand(client *c) {
     c->flags &= ~CLIENT_READONLY;
     addReply(c,shared.ok);
 }
+
+void clusterCommonInit(void) {
+    clusterAsmInit();
+}
+
+/* Create a slot range string in the format of: "1000-2000 3000-4000 ..." */
+sds createSlotRangesStr(slotRangeArray *slot_ranges) {
+    sds s = sdsempty();
+
+    for (int i = 0; i < slot_ranges->num_ranges; i++) {
+        slotRange *sr = &slot_ranges->ranges[i];
+        s = sdscatprintf(s, "%d-%d ", sr->start, sr->end);
+    }
+    sdssetlen(s, sdslen(s) - 1);
+    s[sdslen(s)] = '\0';
+
+    return s;
+}
+
 
 /* Resets transient cluster stats that we expose via INFO or other means that we want
  * to reset via CONFIG RESETSTAT. The function is also used in order to
