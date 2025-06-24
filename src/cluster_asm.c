@@ -46,8 +46,8 @@ enum asmState {
     ASM_SEND_SYNCSLOTS,
     ASM_SYNCSLOTS_REPLY,
     ASM_INIT_RDBCHANNEL,
-    ASM_BUFFER_STREAM,
-    ASM_REPLAY_STREAM,
+    ASM_ACCUMULATE_BUF,
+    ASM_STREAMING_BUF,
     ASM_SLOTS_HANDOFF,
 
     /* Migrate state */
@@ -78,7 +78,7 @@ int startBgsaveForReplication(int mincapa, int req);
 void createReplicationBacklogIfNeeded(void);
 static sds createSlotRangesStr(slotRangeArray *slot_ranges);
 static void asmSyncBufferReadFromConn(connection *conn);
-static int  asmSyncBufferStreamToDb(asmTask *task);
+static void asmSyncBufferStreamToDb(asmTask *task);
 
 char *asmTaskStateToString(int state) {
     switch (state) {
@@ -95,8 +95,8 @@ char *asmTaskStateToString(int state) {
         case ASM_SEND_SYNCSLOTS: return "send-syncslots";
         case ASM_SYNCSLOTS_REPLY: return "syncslots-reply";
         case ASM_INIT_RDBCHANNEL: return "init-rdbchannel";
-        case ASM_BUFFER_STREAM: return "buffer-stream";
-        case ASM_REPLAY_STREAM: return "replay-stream";
+        case ASM_ACCUMULATE_BUF: return "accumulate-buffer";
+        case ASM_STREAMING_BUF: return "streaming-buffer";
         case ASM_SLOTS_HANDOFF: return "slots-handoff";
     
         /* Migrate state */
@@ -447,7 +447,7 @@ void asmRdbChannelSyncWithSource(connection *conn) {
 
         /* Check `+SLOTSSNAPSHOT` reply */
         if (!strncmp(err, "+SLOTSSNAPSHOT", strlen("+SLOTSSNAPSHOT"))) {
-            task->state = ASM_BUFFER_STREAM;
+            task->state = ASM_ACCUMULATE_BUF;
             /* The main channel buffers pending commands. */
             connSetReadHandler(task->main_channel_conn, asmSyncBufferReadFromConn);
 
@@ -670,20 +670,14 @@ void clusterSyncSlotsSnapshotEOF(client *c) {
     task->rdb_channel_state = ASM_RDBCHANNEL_DONE;
     serverLog(LL_NOTICE,
         "RDB channel snapshot transfer done for task");
-
-    task->state = ASM_REPLAY_STREAM;
-
-    /* Replay stream. */
-    asmSyncBufferStreamToDb(task);
-    serverLog(LL_NOTICE, "Replaying stream for task is done");
-    connSetReadHandler(task->main_channel_conn, readQueryFromClient);
-
-    /* ACK offset during replaying buffer stream, fake offset. */
-    sendCommand(task->main_channel_conn, "CLUSTER", "SYNCSLOTS", "ACK", "123", NULL);
     /* Free the RDB channel connection. */
     c->task = NULL;
     c->flags &= ~CLIENT_MASTER;
     freeClientAsync(c); /* Free the client, it is no longer needed. */
+    task->rdb_channel_conn = NULL;
+
+    /* Stream the sync buffer to DB. */
+    asmSyncBufferStreamToDb(task);
 }
 
 /* CLUSTER SYNCSLOTS STREAM-EOF
@@ -692,7 +686,7 @@ void clusterSyncSlotsSnapshotEOF(client *c) {
  * that the slot sync stream has ended and the slots can be handed off. */
 void clusterSyncSlotsStreamEOF(client *c) {
     asmTask *task = c->task;
-    if (task->state != ASM_REPLAY_STREAM) {
+    if (task->state != ASM_STREAMING_BUF) {
         serverLog(LL_WARNING, "Unexpected CLUSTER SYNCSLOTS STREAM-EOF state: %s",
                                asmTaskStateToString(task->state));
         return;
@@ -855,9 +849,9 @@ void clusterSyncSlotsCommand(client *c) {
             return;
         /* --- For destination ---- */
         if (c->task) {
-            /* This is a main channel connection, and we are replaying stream. */
+            /* This is a main channel connection, and we are streaming buffer. */
             asmTask *task = c->task;
-            if (task->state == ASM_REPLAY_STREAM) {
+            if (task->state == ASM_STREAMING_BUF) {
                 /* Update the source offset*/
                 if (task->source_offset > offset) {
                     serverLog(LL_WARNING, "CLUSTER SYNCSLOTS ACK received, but offset %lld is less than the current source offset %lld",
@@ -1029,7 +1023,14 @@ static void asmReadSyncBufferErrorHandler(connection *conn) {
 /* Read data from connection into sync buffer. */
 static void asmSyncBufferReadFromConn(connection *conn) {
     asmTask *task = connGetPrivateData(conn);
-    serverAssert(task && task->state == ASM_BUFFER_STREAM);
+
+    // if (task->state == ASM_STREAMING_BUF) {
+    //     /* Similar to rdbChannelBufferReplData, to make sure we consume
+    //      * faster than we read from the source node. */
+    //     if (listLength(task->sync_buffer.blocks) + 1 >= task->sync_buffer.last_num_blocks)
+    //         return;
+    //     task->sync_buffer.last_num_blocks = listLength(task->sync_buffer.blocks);
+    // }
 
     replDataBufReadFromConn(conn, &task->sync_buffer, asmReadSyncBufferErrorHandler);
 }
@@ -1044,12 +1045,23 @@ static void asmSyncBufferStreamYieldCallback(void *ctx) {
 
 static int asmSyncBufferStreamShouldContinue(void *ctx) {
     replDataBufToDbCtx *context = ctx;
-    UNUSED(context);
+    client *c = context->client;
+    asmTask *task = c->task;
+
+    /* Check if the client is still valid, maybe killed by `client kill`,
+     * or the task is no longer in the streaming state, maybe the task is
+     * failed. */
+    if (c->flags & CLIENT_CLOSE_ASAP || task->state != ASM_STREAMING_BUF)
+        return 0;
+
     return 1;
 }
 
 /* Stream the sync buffer to the database. */
-static int asmSyncBufferStreamToDb(asmTask *task) {
+static void asmSyncBufferStreamToDb(asmTask *task) {
+    task->state = ASM_STREAMING_BUF;
+    serverLog(LL_NOTICE, "Streaming buffer for task is started");
+
     /* The buffered stream from the main channel connection into
      * the database is processed by a fake client. */
     client *c = createClient(task->main_channel_conn);
@@ -1058,6 +1070,11 @@ static int asmSyncBufferStreamToDb(asmTask *task) {
     c->authenticated = 1;
     c->user = NULL;
     c->task = task;
+
+    // /* Mark the peek buffer block count. We'll use it to verify we consume
+    //  * faster than we read from the source node. */
+    // task->sync_buffer.last_num_blocks = listLength(task->sync_buffer.blocks);
+    // connSetReadHandler(c->conn, asmSyncBufferReadFromConn);
     connSetReadHandler(c->conn, NULL);
 
     replDataBufToDbCtx ctx = {
@@ -1067,5 +1084,33 @@ static int asmSyncBufferStreamToDb(asmTask *task) {
         .yield_callback = asmSyncBufferStreamYieldCallback,
     };
 
-    return replDataBufStreamToDb(&task->sync_buffer, &ctx);
+    /* Protect the client from being killed by `client kill` */
+    protectClient(c);
+    int ret = replDataBufStreamToDb(&task->sync_buffer, &ctx);
+    unprotectClient(c);
+
+    if (ret == C_OK) {
+        /* ACK offset during streaming buffer. */
+        sds offset = sdsfromlonglong(ctx.total_offset);
+        char *err = sendCommand(task->main_channel_conn, "CLUSTER", "SYNCSLOTS", "ACK", offset, NULL);
+        sdsfree(offset);
+        if (err == NULL) {
+            /* Wait STREAM-EOF from the source node. */
+            connSetReadHandler(task->main_channel_conn, readQueryFromClient);
+            serverLog(LL_NOTICE, "Streaming buffer for task is done");
+            return;
+        }
+        serverLog(LL_WARNING, "Error sending CLUSTER SYNCSLOTS ACK: %s", err);
+        sdsfree(err);
+    } else {
+        serverLog(LL_WARNING, "Streaming buffer for task failed");
+    }
+
+    /* Free the main channel connection. */
+    c->task = NULL;
+    c->flags &= ~CLIENT_MASTER;
+    freeClientAsync(c);
+    task->main_channel_conn = NULL;
+    task->state = ASM_FAILED;
+    replDataBufClear(&task->sync_buffer);
 }
