@@ -2421,32 +2421,32 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
     }
 
     /* Transform the bitmap to a list of slot ranges, and send a request to ASM. */
-    // slotRangeArray *sra = zmalloc(sizeof(*sra) + sizeof(slotRange) * CLUSTER_SLOTS);
-    // sra->num_ranges = 0;
-    // int start = -1;
-    // for (int i = 0; i < CLUSTER_SLOTS; i++) {
-    //     if (asm_detect_updated_slots[i]) {
-    //         if (start == -1) {
-    //             start = i;
-    //         }
-    //     } else {
-    //         if (start != -1) {
-    //             sra->ranges[sra->num_ranges].start = start;
-    //             sra->ranges[sra->num_ranges].end = i - 1;
-    //             sra->num_ranges++;
-    //             start = -1;
-    //         }
-    //     }
-    // }
-    // if (start != -1) {
-    //     sra->ranges[sra->num_ranges].start = start;
-    //     sra->ranges[sra->num_ranges].end = CLUSTER_SLOTS - 1;
-    //     sra->num_ranges++;
-    // }
-    // if (sra->num_ranges > 0) {
-    //     clusterAsmRequest(sra, ASM_REQUEST_CONFIG_UPDATED, NULL, NULL);
-    // }
-    // zfree(sra);
+    slotRangeArray *sra = zmalloc(sizeof(*sra) + sizeof(slotRange) * CLUSTER_SLOTS);
+    sra->num_ranges = 0;
+    int start = -1;
+    for (int i = 0; i < CLUSTER_SLOTS; i++) {
+        if (asm_detect_updated_slots[i]) {
+            if (start == -1) {
+                start = i;
+            }
+        } else {
+            if (start != -1) {
+                sra->ranges[sra->num_ranges].start = start;
+                sra->ranges[sra->num_ranges].end = i - 1;
+                sra->num_ranges++;
+                start = -1;
+            }
+        }
+    }
+    if (start != -1) {
+        sra->ranges[sra->num_ranges].start = start;
+        sra->ranges[sra->num_ranges].end = CLUSTER_SLOTS - 1;
+        sra->num_ranges++;
+    }
+    if (sra->num_ranges > 0) {
+        clusterAsmRequest(sra, ASM_REQUEST_CONFIG_UPDATED, NULL, NULL);
+    }
+    zfree(sra);
 
     /* After updating the slots configuration, don't do any actual change
      * in the state of the server if a module disabled Redis Cluster
@@ -6564,7 +6564,7 @@ int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
             break;
         case ASM_EVENT_MIGRATE_WAIT_PAUSE:
             clusterAsmRequest(slot_ranges, ASM_REQUEST_MIGRATE_PAUSED, NULL, NULL);
-            serverLog(LL_NOTICE, "Import paused for slot ranges: %s", str);
+            serverLog(LL_NOTICE, "Migrate paused for slot ranges: %s", str);
             break;
         case ASM_EVENT_IMPORT_WAIT_FINALIZE:
             serverLog(LL_NOTICE, "Import completed for slot ranges: %s", str);
