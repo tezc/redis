@@ -82,7 +82,6 @@ void createDumpPayload(rio *payload, robj *o, robj *key, int dbid);
 int startBgsaveForReplication(int mincapa, int req);
 void createReplicationBacklogIfNeeded(void);
 static void asmSyncBufferReadFromConn(connection *conn);
-static void asmSyncBufferStreamToDb(asmTask *task);
 
 void clusterAsmInit(void) {
     asm_tasks = listCreate();
@@ -667,6 +666,11 @@ write_error: /* Handle sendCommand() errors. */
     goto error;
 }
 
+void amsStartSendBulkAndStream(struct asmTask *task) {
+    serverAssert(task->state == ASM_WAIT_BGSAVE_START);
+    task->state = ASM_SEND_BULK_AND_STREAM;
+}
+
 /* CLUSTER SYNCSLOTS SNAPSHOT-EOF
  *
  * This command is sent by the source node to the destination node to indicate
@@ -684,8 +688,11 @@ void clusterSyncSlotsSnapshotEOF(client *c) {
     freeClientAsync(c); /* Free the client, it is no longer needed. */
     task->rdb_channel_conn = NULL;
 
-    /* Stream the sync buffer to DB. */
-    asmSyncBufferStreamToDb(task);
+    /* Will start streaming the buffer to DB, don't start here since now
+     * we are in the context of executing command, otherwise, redis will
+     * generate a big MULTI-EXEC including all the commands in the buffer.
+     * just update the state here, and do it in beforeSleep(). */
+    task->state = ASM_STREAMING_BUF;
 }
 
 /* CLUSTER SYNCSLOTS STREAM-EOF
@@ -780,6 +787,9 @@ void clusterSyncSlotsCommand(client *c) {
         memcpy(task->source, getMyClusterNode()->name, CLUSTER_NAMELEN);
         if (c->node_id) memcpy(task->dest, c->node_id, CLUSTER_NAMELEN);
         listAddNodeTail(asm_tasks, task);
+        c->task = task;
+        task->main_channel_client = c;
+        task->state = ASM_WAIT_RDBCHANNEL;
 
         clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_STARTED, NULL);
 
@@ -823,6 +833,17 @@ void clusterSyncSlotsCommand(client *c) {
         listAddNodeTail(server.slaves, c);
         /* Create the replication backlog if needed. */
         createReplicationBacklogIfNeeded();
+        c->main_ch_client_id = task->main_channel_id;
+        c->task = task;
+
+        /* Add main channel client to the list of slaves */
+        client *main_ch_client = task->main_channel_client;
+        main_ch_client->flags |= CLIENT_SLAVE;
+        main_ch_client->replstate = SLAVE_STATE_WAIT_RDB_CHANNEL;
+        listAddNodeTail(server.slaves, main_ch_client);
+
+        /* Wait for bgsave to start for slots sync */
+        task->state = ASM_WAIT_BGSAVE_START;
 
         if (!hasActiveChildProcess()) {
             startBgsaveForReplication(c->slave_capa, c->slave_req);
@@ -840,8 +861,8 @@ void clusterSyncSlotsCommand(client *c) {
         long long offset;
         if ((getLongLongFromObject(c->argv[3], &offset) != C_OK))
             return;
-        /* --- For destination ---- */
-        if (c->task) {
+
+        if (c->task && c->task->operation == ASM_IMPORT) {
             /* This is a main channel connection, and we are streaming buffer. */
             asmTask *task = c->task;
             if (task->state == ASM_STREAMING_BUF) {
@@ -855,29 +876,24 @@ void clusterSyncSlotsCommand(client *c) {
                 serverLog(LL_NOTICE, "CLUSTER SYNCSLOTS ACK received, offset: %lld, updated source offset to %lld",
                           offset, task->source_offset);
             }
-            return;
-        }
+        } else if (c->task && c->task->operation == ASM_MIGRATE) {
+            /* Update the ACKed offset from destination. */
+            asmTask *task = c->task;
+            if (task->dest_offset > offset) {
+                serverLog(LL_WARNING, "CLUSTER SYNCSLOTS ACK received, but offset %lld is less than the current destination offset %lld",
+                        offset, task->dest_offset);
+                return;
+            }
+            task->dest_offset = offset;
+            serverLog(LL_NOTICE, "CLUSTER SYNCSLOTS ACK received, offset: %lld, updated destination offset to %lld",
+                    offset, task->dest_offset);
 
-        /* --- For source ---- */
-        /* Update the destination offset*/
-        if (listLength(asm_tasks) == 0) {
-            serverLog(LL_WARNING, "CLUSTER SYNCSLOTS ACK received, but no task in progress");
-            return;
-        }
-        asmTask *task = listNodeValue(listFirst(asm_tasks));
-        if (task->dest_offset > offset) {
-            serverLog(LL_WARNING, "CLUSTER SYNCSLOTS ACK received, but offset %lld is less than the current destination offset %lld",
-                      offset, task->dest_offset);
-            return;
-        }
-        task->dest_offset = offset;
-        serverLog(LL_NOTICE, "CLUSTER SYNCSLOTS ACK received, offset: %lld, updated destination offset to %lld",
-                  offset, task->dest_offset);
-        /* Pause write if needed */
-        task->state = ASM_WAIT_PAUSE_WRITE;
-        task->main_channel_client = c;
+            /* Pause write if needed */
+            task->state = ASM_WAIT_PAUSE_WRITE;
+            task->main_channel_client = c;
 
-        clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_WAIT_PAUSE, NULL);
+            clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_WAIT_PAUSE, NULL);
+        }
     } else if (!strcasecmp(c->argv[2]->ptr, "fail") && c->argc == 4) {
         /* CLUSTER SYNCSLOTS FAIL <err> */
         return; /* This is a no-op, just to handle the command syntax. */
@@ -974,6 +990,10 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
 
                     /* Write ABSTTL */
                     if (rioWriteBulkString(rdb, "ABSTTL", 6) == 0) goto werr;
+
+                    /* Delay return if required (for testing) */
+                    if (unlikely(server.rdb_key_save_delay))
+                        debugDelay(server.rdb_key_save_delay);
                 }
                 kvstoreReleaseDictIterator(kvs_di);
                 kvs_di = NULL;
@@ -1011,14 +1031,7 @@ static void asmReadSyncBufferErrorHandler(connection *conn) {
 /* Read data from connection into sync buffer. */
 static void asmSyncBufferReadFromConn(connection *conn) {
     asmTask *task = connGetPrivateData(conn);
-
-    // if (task->state == ASM_STREAMING_BUF) {
-    //     /* Similar to rdbChannelBufferReplData, to make sure we consume
-    //      * faster than we read from the source node. */
-    //     if (listLength(task->sync_buffer.blocks) + 1 >= task->sync_buffer.last_num_blocks)
-    //         return;
-    //     task->sync_buffer.last_num_blocks = listLength(task->sync_buffer.blocks);
-    // }
+    serverAssert(task->state == ASM_ACCUMULATE_BUF);
 
     replDataBufReadFromConn(conn, &task->sync_buffer, asmReadSyncBufferErrorHandler);
 }
@@ -1046,8 +1059,10 @@ static int asmSyncBufferStreamShouldContinue(void *ctx) {
 }
 
 /* Stream the sync buffer to the database. */
-static void asmSyncBufferStreamToDb(asmTask *task) {
-    task->state = ASM_STREAMING_BUF;
+void asmSyncBufferStreamToDb(void) {
+    if (!asm_tasks || listLength(asm_tasks) == 0) return;
+    asmTask *task = listNodeValue(listFirst(asm_tasks));
+    if (task->state != ASM_STREAMING_BUF) return;
     serverLog(LL_NOTICE, "Streaming buffer for task is started");
 
     /* The buffered stream from the main channel connection into
@@ -1058,11 +1073,6 @@ static void asmSyncBufferStreamToDb(asmTask *task) {
     c->authenticated = 1;
     c->user = NULL;
     c->task = task;
-
-    // /* Mark the peek buffer block count. We'll use it to verify we consume
-    //  * faster than we read from the source node. */
-    // task->sync_buffer.last_num_blocks = listLength(task->sync_buffer.blocks);
-    // connSetReadHandler(c->conn, asmSyncBufferReadFromConn);
     connSetReadHandler(c->conn, NULL);
 
     replDataBufToDbCtx ctx = {
@@ -1085,7 +1095,7 @@ static void asmSyncBufferStreamToDb(asmTask *task) {
         if (err == NULL) {
             /* Wait STREAM-EOF from the source node. */
             connSetReadHandler(task->main_channel_conn, readQueryFromClient);
-            serverLog(LL_NOTICE, "Streaming buffer for task is done");
+            serverLog(LL_NOTICE, "Streaming buffer for task is done, size: %zu", ctx.total_offset);
             return;
         }
         serverLog(LL_WARNING, "Error sending CLUSTER SYNCSLOTS ACK: %s", err);
