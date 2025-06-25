@@ -804,7 +804,7 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
             /* TODO: error handler: No main channel for slots sync */
         }
         /* Start to deliver the commands stream on exporting slots. */
-        amsStartSendBulkAndStream(slave->task);
+        asmStartSendBulkAndStream(slave->task);
 
         buflen = snprintf(buf, sizeof(buf), "+SLOTSSNAPSHOT\r\n");
         if (connWrite(slave->conn, buf, buflen) != buflen) {

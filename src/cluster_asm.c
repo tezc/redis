@@ -666,7 +666,7 @@ write_error: /* Handle sendCommand() errors. */
     goto error;
 }
 
-void amsStartSendBulkAndStream(struct asmTask *task) {
+void asmStartSendBulkAndStream(struct asmTask *task) {
     serverAssert(task->state == ASM_WAIT_BGSAVE_START);
     task->state = ASM_SEND_BULK_AND_STREAM;
 }
