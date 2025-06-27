@@ -4954,7 +4954,7 @@ void clusterBeforeSleep(void) {
         clusterSaveConfigOrDie(fsync);
     }
 
-    asmSyncBufferStreamToDb();
+    asmBeforeSleep();
 }
 
 void clusterDoBeforeSleep(int flags) {
