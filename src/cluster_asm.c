@@ -883,6 +883,9 @@ void clusterSyncSlotsCommand(client *c) {
         task->operation = ASM_MIGRATE;
         memcpy(task->source, getMyClusterNode()->name, CLUSTER_NAMELEN);
         if (c->node_id) memcpy(task->dest, c->node_id, CLUSTER_NAMELEN);
+        c->task = task;
+
+        /* Add the task to the list of active tasks */
         listAddNodeTail(asmManager->tasks, task);
 
         /* Wait for RDB channel to be ready */
@@ -897,7 +900,6 @@ void clusterSyncSlotsCommand(client *c) {
                               task->source, task->dest, slot_ranges_str);
         sdsfree(slot_ranges_str);
 
-        c->task = task;
         addReplyStatusFormat(c, "RDBCHANNELSYNCSLOTS %llu",
                                (unsigned long long) c->id);
     } else if (!strcasecmp(c->argv[2]->ptr, "rdbchannel") && c->argc == 4) {
