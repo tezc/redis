@@ -156,9 +156,22 @@ asmTask *asmTaskCreate(void) {
     return task;
 }
 
+static int compareSlotRange(const void *a, const void *b) {
+    const slotRange *sa = a;
+    const slotRange *sb = b;
+    if (sa->start < sb->start) return -1;
+    if (sa->start > sb->start) return 1;
+    return 0;
+}
+
 /* Compare two slot range arrays, return 1 if equal, 0 otherwise */
 static int slotRangeArrayIsEqual(slotRangeArray *sra1, slotRangeArray *sra2) {
     if (sra1->num_ranges != sra2->num_ranges) return 0;
+
+    /* Sort slot ranges first */
+    qsort(sra1->ranges, sra1->num_ranges, sizeof(slotRange), compareSlotRange);
+    qsort(sra2->ranges, sra2->num_ranges, sizeof(slotRange), compareSlotRange);
+
     for (int i = 0; i < sra1->num_ranges; i++) {
         if (sra1->ranges[i].start != sra2->ranges[i].start ||
             sra1->ranges[i].end != sra2->ranges[i].end) {
@@ -776,6 +789,9 @@ void clusterSyncSlotsSnapshotEOF(client *c) {
         c->conn != task->rdb_channel_conn)
     {
         /* Unexpected SNAPSHOT-EOF command */
+        serverLog(LL_WARNING, "Unexpected CLUSTER SYNCSLOTS SNAPSHOT-EOF command: "
+                              "rdb channel state: %s",
+                              asmTaskStateToString(task ? task->rdb_channel_state : ASM_NONE));
         freeClientAsync(c);
         return;
     }
