@@ -156,6 +156,18 @@ asmTask *asmTaskCreate(void) {
     return task;
 }
 
+/* Compare two slot range arrays, return 1 if equal, 0 otherwise */
+static int slotRangeArrayIsEqual(slotRangeArray *sra1, slotRangeArray *sra2) {
+    if (sra1->num_ranges != sra2->num_ranges) return 0;
+    for (int i = 0; i < sra1->num_ranges; i++) {
+        if (sra1->ranges[i].start != sra2->ranges[i].start ||
+            sra1->ranges[i].end != sra2->ranges[i].end) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* Returns C_OK if there is no overlapping import operation in progress for the
  * given slot range. Otherwise, returns C_ERR */
 static int checkOverlappingImport(slotRange *req) {
@@ -865,25 +877,27 @@ void clusterSyncSlotsCommand(client *c) {
         }
 
         /* Create the migrate slots task */
-        asmTask *task = zcalloc(sizeof(*task));
+        asmTask *task = asmTaskCreate();
         task->slot_ranges = slot_ranges;
         task->main_channel_id = c->id;
-        task->state = ASM_NONE;
         task->operation = ASM_MIGRATE;
         memcpy(task->source, getMyClusterNode()->name, CLUSTER_NAMELEN);
         if (c->node_id) memcpy(task->dest, c->node_id, CLUSTER_NAMELEN);
         listAddNodeTail(asmManager->tasks, task);
-        c->task = task;
+
+        /* Wait for RDB channel to be ready */
         task->main_channel_client = c;
+        task->start_time = server.mstime;
         task->state = ASM_WAIT_RDBCHANNEL;
 
         clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_STARTED, NULL);
 
         sds slot_ranges_str = createSlotRangesStr(slot_ranges);
-        serverLog(LL_NOTICE, "Migrate slots task created: source: %s, dest: %s, sync slot ranges: %s, operation: %s",
-                task->source, task->dest, slot_ranges_str, task->operation == ASM_IMPORT ? "importing" : "migrating");
+        serverLog(LL_NOTICE, "Migrate slots task created: source: %s, dest: %s, sync slot ranges: %s",
+                              task->source, task->dest, slot_ranges_str);
         sdsfree(slot_ranges_str);
 
+        c->task = task;
         addReplyStatusFormat(c, "RDBCHANNELSYNCSLOTS %llu",
                                (unsigned long long) c->id);
     } else if (!strcasecmp(c->argv[2]->ptr, "rdbchannel") && c->argc == 4) {
@@ -1260,13 +1274,10 @@ int clusterAsmSlotWritesPaused(slotRangeArray *slot_ranges, sds *err) {
     /* Send STREAM EOF */
     sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "STREAM-EOF", NULL);
 
+    task->state = ASM_STREAM_DONE;
+
     /* Notify plugin import is completed */
     clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_WAIT_FINALIZE, NULL);
-
-    listDelNode(asmManager->tasks, listFirst(asmManager->tasks));
-    zfree(task->slot_ranges); /* Free the slot ranges list */
-    zfree(task); /* Free the task itself */
-    freeClientAsync(c); /* Free the client, it is no longer needed. */
 
     return C_OK;
 }
@@ -1282,6 +1293,13 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
     if (listLength(asmManager->tasks) == 0) return C_ERR;
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
 
+    /* The config updated slot_ranges validation, it must match the current ASM task */
+    if (slotRangeArrayIsEqual(task->slot_ranges, slot_ranges) != 1) {
+        serverLog(LL_WARNING, "Slot ranges mismatch: %s != %s",
+                  createSlotRangesStr(task->slot_ranges), createSlotRangesStr(slot_ranges));
+        return C_ERR;
+    }
+
     if (task->operation == ASM_IMPORT && task->state == ASM_SLOTS_HANDOFF) {
         task->state = ASM_DONE;
         task->done_time = server.mstime;
@@ -1289,6 +1307,18 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
         replDataBufClear(&task->sync_buffer); /* To save memory */
 
         /* Move the task to completed tasks */
+        listNode *ln = listFirst(asmManager->tasks);
+        listUnlinkNode(asmManager->tasks, ln);
+        listLinkNodeHead(asmManager->done_tasks, ln);
+        return C_OK;
+    } else if (task->operation == ASM_MIGRATE && task->state == ASM_STREAM_DONE) {
+        task->state = ASM_DONE;
+        task->done_time = server.mstime;
+
+        /* TODO: for plugin, we need to clean up the data of slot ranges
+         * such as slotsflush */
+
+        /* Migrate task is done, just remove it from the list */
         listNode *ln = listFirst(asmManager->tasks);
         listUnlinkNode(asmManager->tasks, ln);
         listLinkNodeHead(asmManager->done_tasks, ln);
