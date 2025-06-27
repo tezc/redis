@@ -430,7 +430,7 @@ void asmImportFailed(asmTask *task) {
 
     /* If we are in the RDB channel transfer state, we need to
      * close the client that was created for the RDB channel. */
-    if (task->rdb_channel_state == ASM_RDBCHANNEL_TRANSFER) {
+    if (task->rdb_channel_conn && task->rdb_channel_state == ASM_RDBCHANNEL_TRANSFER) {
         client *c = connGetPrivateData(task->rdb_channel_conn);
         serverAssert(c->task == task);
         task->rdb_channel_conn = NULL;
@@ -465,7 +465,7 @@ void asmCallbackOnFreeClient(client *c) {
     if (c->conn && task->rdb_channel_conn == c->conn) {
         /* We create the client only when transferring data on the RDB channel */
         serverAssert(task->rdb_channel_state == ASM_RDBCHANNEL_TRANSFER);
-        task->rdb_channel_conn = NULL;
+        task->rdb_channel_conn = NULL; /* Wil be freed by freeClient */
         asmImportFailed(task);
         return;
     }
