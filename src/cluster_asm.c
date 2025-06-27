@@ -465,7 +465,7 @@ void asmCallbackOnFreeClient(client *c) {
     if (c->conn && task->rdb_channel_conn == c->conn) {
         /* We create the client only when transferring data on the RDB channel */
         serverAssert(task->rdb_channel_state == ASM_RDBCHANNEL_TRANSFER);
-        task->rdb_channel_conn = NULL; /* Wil be freed by freeClient */
+        task->rdb_channel_conn = NULL; /* Will be freed by freeClient */
         asmImportFailed(task);
         return;
     }
