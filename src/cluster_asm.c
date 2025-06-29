@@ -362,7 +362,7 @@ int asmStartImportTask(slotRangeArray *slot_ranges, sds *err) {
     }
 
     if (listLength(asmManager->tasks) != 0) {
-        *err = sdsnew("import task already in progress");
+        *err = sdsnew("another asm task is already in progress");
         zfree(slot_ranges);
         return C_ERR;
     }
@@ -392,7 +392,7 @@ int asmStartImportTask(slotRangeArray *slot_ranges, sds *err) {
 /* CLUSTER MIGRATION IMPORT <start-slot end-slot [start-slot end-slot ...]>
  *
  * Sent by operator to the destination node to start the migration. */
-static void clusterCommandMigrationImport(client *c) {
+static void clusterMigrationCommandImport(client *c) {
     /* Validate slot range arg count */
     int remaining = c->argc - 3;
     if (remaining == 0 || remaining % 2 != 0) {
@@ -446,7 +446,7 @@ static int cancelLinksForSlotRange(slotRange *req_range) {
  *
  * Cancels import operations that overlap with the specified slot ranges.
  * Multiple operations may be cancelled. */
-static void clusterCommandMigrationCancel(client *c) {
+static void clusterMigrationCommandCancel(client *c) {
     int remaining, num_cancelled = 0;
     slotRangeArray *slot_ranges;
 
@@ -492,7 +492,7 @@ static void replyTaskStatus(client *c, asmTask *task) {
 
 /* CLUSTER MIGRATION STATUS
  *  - Reply: Array of atomic slot migration links */
-static void clusterCommandMigrationStatus(client *c) {
+static void clusterMigrationCommandStatus(client *c) {
     listIter li;
     listNode *ln;
 
@@ -519,11 +519,11 @@ void clusterMigrationCommand(client *c) {
     }
 
     if (strcasecmp(c->argv[2]->ptr, "import") == 0) {
-        clusterCommandMigrationImport(c);
+        clusterMigrationCommandImport(c);
     } else if (strcasecmp(c->argv[2]->ptr, "status") == 0) {
-        clusterCommandMigrationStatus(c);
+        clusterMigrationCommandStatus(c);
     } else if (strcasecmp(c->argv[2]->ptr, "cancel") == 0) {
-        clusterCommandMigrationCancel(c);
+        clusterMigrationCommandCancel(c);
     } else {
         addReplyError(c, "unknown argument");
     }
