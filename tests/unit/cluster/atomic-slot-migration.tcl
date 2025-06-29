@@ -92,10 +92,10 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 6000 7000}
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 6500 7500}
         wait_for_condition 1000 50 {
-            [llength [R 0 cluster migration status]] == 1 &&
-            [llength [R 1 cluster migration status]] == 1
+            [string match {*done*} [migration_status 0 state 7000-8000]] &&
+            [string match {*done*} [migration_status 1 state 7000-8000]]
         } else {
-            fail "ASM task did not complete"
+            fail "ASM task did not start"
         }
     }
 
