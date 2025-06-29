@@ -313,6 +313,8 @@ void asmFeedMigrationClient(robj **argv, int argc) {
     listNode *ln;
     asmTask *task = NULL;
 
+    if (server.cluster_enabled == 0) return;
+
     /* Quick check if there is a migrate task in progress. */
     listRewind(asmManager->tasks, &li);
     while ((ln = listNext(&li)) != NULL) {
