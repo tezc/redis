@@ -171,10 +171,10 @@ int clusterNodeTlsPort(clusterNode *node);
  * - On destination side, implementation calls clusterAsmRequest(ASM_REQUEST_IMPORT_START)
  *   to start the import operation
  * - Redis calls clusterAsmOnEvent() when an event occurs.
- * - On the source side, Redis will call clusterAsmOnEvent(ASM_EVENT_IMPORT_WAIT_PAUSE)
+ * - On the source side, Redis will call clusterAsmOnEvent(ASM_EVENT_MIGRATE_WAIT_PAUSE)
  *   when the write pause is needed.
- * - Implementation stops the traffic to the slots and calls clusterAsmRequest(ASM_REQUEST_IMPORT_PAUSED)
- * - On the destination side, Redis calls clusterAsmOnEvent(ASM_EVENT_IMPORT_COMPLETED)
+ * - Implementation stops the traffic to the slots and calls clusterAsmRequest(ASM_REQUEST_MIGRATE_PAUSED)
+ * - On the destination side, Redis calls clusterAsmOnEvent(ASM_EVENT_IMPORT_WAIT_FINALIZE)
  *   when the import is completed.
  * - Plugin calls clusterAsmRequest(ASM_REQUEST_CONFIG_UPDATED) to notify Redis
  *   that the config is updated.
