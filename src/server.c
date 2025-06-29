@@ -3463,10 +3463,6 @@ static void propagateNow(int dbid, robj **argv, int argc, int target) {
 
     /* This needs to be unreachable since the dataset should be fixed during
      * replica pause (otherwise data may be lost during a failover) */
-    printf("ozan %d %d %d \n", isPausedActions(PAUSE_ACTION_REPLICA), server.client_pause_in_transaction, !(isPausedActions(PAUSE_ACTION_REPLICA) &&
-                                                                                                            (!server.client_pause_in_transaction)));
-    serverAssert(!isPausedActions(PAUSE_ACTION_REPLICA));
-    serverAssert(!server.client_pause_in_transaction);
     serverAssert(!(isPausedActions(PAUSE_ACTION_REPLICA) &&
                    (!server.client_pause_in_transaction)));
 
