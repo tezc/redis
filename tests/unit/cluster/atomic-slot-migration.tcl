@@ -1,3 +1,31 @@
+proc migration_status {node_id field slots_range} {
+    set status [R $node_id CLUSTER MIGRATION STATUS]
+
+    # Iterate through each migration operation
+    foreach operation $status {
+        set slots_found ""
+        set field_value ""
+
+        # Parse the key-value pairs in the operation
+        for {set i 0} {$i < [llength $operation]} {incr i 2} {
+            set key [lindex $operation $i]
+            set value [lindex $operation [expr $i + 1]]
+
+            if {$key eq "slots_range"} {
+                set slots_found $value
+            } elseif {$key eq $field} {
+                set field_value $value
+            }
+        }
+        # Check if this operation matches the requested slots_range
+        if {$slots_found eq $slots_range} {
+            return $field_value
+        }
+    }
+    # Return empty string if slots_range not found or field not found
+    return ""
+}
+
 start_cluster 3 3 {tags {external:skip cluster}} {
     test "Test IMPORT input validation" {
         # Invalid slot range
@@ -64,8 +92,8 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 6000 7000}
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 6500 7500}
         wait_for_condition 1000 50 {
-            [llength [R 0 cluster migration status]] == 0 &&
-            [llength [R 1 cluster migration status]] == 0
+            [llength [R 0 cluster migration status]] == 1 &&
+            [llength [R 1 cluster migration status]] == 1
         } else {
             fail "ASM task did not complete"
         }
@@ -94,11 +122,13 @@ start_cluster 3 3 {tags {external:skip cluster}} {
             R 0 append $slot0_key "a"
             R 0 append $slot1_key "b"
         }
+
+        # wait until migration of 0-100 successful
         wait_for_condition 1000 50 {
-            [llength [R 0 cluster migration status]] == 0 &&
-            [llength [R 1 cluster migration status]] == 0
+            [string match {*done*} [migration_status 0 state 0-100]] &&
+            [string match {*done*} [migration_status 1 state 0-100]]
         } else {
-            fail "ASM task did not complete"
+            fail "ASM task did not start"
         }
 
         # the appended 99 times should also be migrated
