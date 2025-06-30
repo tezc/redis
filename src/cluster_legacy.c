@@ -6585,7 +6585,7 @@ int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
             serverLog(LL_NOTICE, "Migrate operation started for slot ranges: %s", str);
             break;
         case ASM_EVENT_MIGRATE_FAILED:
-            serverLog(LL_NOTICE, "Migration operation failed for slot ranges: %s", str);
+            serverLog(LL_NOTICE, "Migrate operation failed for slot ranges: %s", str);
             unpauseActions(PAUSE_DURING_SLOT_HANDOFF);
             break;
         case ASM_EVENT_MIGRATE_WAIT_PAUSE:

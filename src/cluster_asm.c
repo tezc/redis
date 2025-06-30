@@ -118,7 +118,7 @@ char *asmTaskStateToString(int state) {
         case ASM_INIT_RDBCHANNEL: return "init-rdbchannel";
         case ASM_ACCUMULATE_BUF: return "accumulate-buffer";
         case ASM_STREAMING_BUF: return "streaming-buffer";
-        case ASM_WAIT_STREAM_EOF: return "asm-wait-stream-eof";
+        case ASM_WAIT_STREAM_EOF: return "wait-stream-eof";
         case ASM_SLOTS_HANDOFF: return "slots-handoff";
     
         /* Migrate state */
@@ -309,20 +309,14 @@ int asmCanFeedMigrationClient(asmTask *task) {
 
 /* Feed the migration client with the replication stream for the slot range. */
 void asmFeedMigrationClient(robj **argv, int argc) {
-    listIter li;
-    listNode *ln;
     asmTask *task = NULL;
 
-    if (server.cluster_enabled == 0) return;
+    if (server.cluster_enabled == 0 || listLength(asmManager->tasks) == 0)
+        return;
 
     /* Quick check if there is a migrate task in progress. */
-    listRewind(asmManager->tasks, &li);
-    while ((ln = listNext(&li)) != NULL) {
-        task = listNodeValue(ln);
-        if (task->operation == ASM_MIGRATE)
-            break;
-    }
-    if (!task) return;
+    task = listNodeValue(listFirst(asmManager->tasks));
+    if (task->operation != ASM_MIGRATE) return;
 
     /* Check if the command belongs to the slot range. */
     struct redisCommand *cmd = lookupCommandBySds(argv[0]->ptr);
@@ -1433,6 +1427,7 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
     } else {
         serverLog(LL_WARNING, "ASM task is not in the correct state for new config update: %s",
                   asmTaskStateToString(task->state));
+        return C_ERR;
     }
 
     return C_OK;
