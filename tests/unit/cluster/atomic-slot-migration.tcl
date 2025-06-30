@@ -1,4 +1,4 @@
-proc migration_status {node_id field slots_range} {
+proc migration_status {node_id slots_range field} {
     set status [R $node_id CLUSTER MIGRATION STATUS]
 
     # Iterate through each migration operation
@@ -92,8 +92,8 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 6000 7000}
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 6500 7500}
         wait_for_condition 1000 50 {
-            [string match {*done*} [migration_status 0 state 7000-8000]] &&
-            [string match {*done*} [migration_status 1 state 7000-8000]]
+            [string match {*done*} [migration_status 0 7000-8000 state]] &&
+            [string match {*done*} [migration_status 1 7000-8000 state]]
         } else {
             fail "ASM task did not start"
         }
@@ -128,8 +128,8 @@ start_cluster 3 3 {tags {external:skip cluster}} {
 
         # wait until migration of 0-100 successful
         wait_for_condition 1000 50 {
-            [string match {*done*} [migration_status 0 state 0-100]] &&
-            [string match {*done*} [migration_status 1 state 0-100]]
+            [string match {*done*} [migration_status 0 0-100 state]] &&
+            [string match {*done*} [migration_status 1 0-100 state]]
         } else {
             fail "ASM task did not start"
         }
