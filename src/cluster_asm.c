@@ -199,6 +199,15 @@ asmTask *lookupAsmTaskBySlotRangeArray(slotRangeArray *sra) {
     return NULL;
 }
 
+/* Returns 1 if the array contains the given slot range, 0 otherwise */
+static int slotArrayContains(slotRangeArray *sra, slotRange *req) {
+    for (int i = 0; i < sra->num_ranges; i++) {
+        slotRange *sr = &sra->ranges[i];
+        if (sr->start <= req->end && sr->end >= req->start)
+            return 1;
+    }
+    return 0;
+}
 
 /* Returns the ASM task that overlaps with the given slot range, or NULL if
  * no such task exists. */
@@ -209,11 +218,8 @@ static asmTask *lookupAsmTaskBySlotRange(slotRange *req) {
     listRewind(asmManager->tasks, &li);
     while ((ln = listNext(&li)) != NULL) {
         asmTask *task = listNodeValue(ln);
-        for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
-            slotRange *sr = &task->slot_ranges->ranges[i];
-            if (sr->start <= req->end && sr->end >= req->start)
-                return task;
-        }
+        if (slotArrayContains(task->slot_ranges, req))
+            return task;
     }
     return NULL;
 }
@@ -327,10 +333,13 @@ void asmFeedMigrationClient(robj **argv, int argc) {
      * TODO: revisit this to see if we are okay with this. */
     if (slot == GETSLOT_NOKEYS || slot == GETSLOT_CROSSSLOT) return;
 
-    /* Find the task that owns the slot. */
+    /* Check if the slot belongs to the task's slot range. */
     slotRange sr = {slot, slot};
-    task = lookupAsmTaskBySlotRange(&sr);
-    if (!task || !asmCanFeedMigrationClient(task)) return;
+    if (!slotArrayContains(task->slot_ranges, &sr) ||
+        !asmCanFeedMigrationClient(task))
+    {
+        return;
+    }
 
     /* Feed main channel with the command. */
     client *c = task->main_channel_client;
