@@ -104,7 +104,9 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         R 0 set $slot0_key "a"
         set slot1_key "Qi"
         R 0 set $slot1_key "b"
-        # 2 keys cost 2s to save
+        set slot101_key "1j2"
+        R 0 set $slot101_key "c"
+        # 3 keys cost 3s to save
         R 0 config set rdb-key-save-delay 1000000
     
         # migrate slot 0-100 to R 1
@@ -121,6 +123,7 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         for {set i 0} {$i < 99} {incr i} {
             R 0 append $slot0_key "a"
             R 0 append $slot1_key "b"
+            R 0 append $slot101_key "c"
         }
 
         # wait until migration of 0-100 successful
@@ -139,5 +142,11 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         R 4 readonly
         assert_equal [string repeat a 100] [R 4 get $slot0_key]
         assert_equal [string repeat b 100] [R 4 get $slot1_key]
+
+        # verify key that was not in the slot range is not migrated
+        assert_equal [string repeat c 100] [R 0 get $slot101_key]
+        # verify changes in replica
+        R 3 readonly
+        assert_equal [string repeat c 100] [R 3 get $slot101_key]
     }
 }
