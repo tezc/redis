@@ -158,14 +158,15 @@ char *asmTaskStateToString(int state) {
     return NULL; /* Unreachable */
 }
 
-int asmTaskSetFailPoint(const char *channel, const char *state) {
+int asmTaskSetFailPoint(sds channel, sds state) {
     if (!asmManager) {
         serverLog(LL_WARNING, "ASM manager is not initialized");
         return C_ERR;
     }
     asmManager->failed_channel = 0;
     asmManager->failed_state = 0;
-    if (!channel && !state) {
+    if (!channel && !state) return C_ERR;
+    if (sdslen(channel) == 0 && sdslen(state) == 0) {
         serverLog(LL_WARNING, "Fail point is cleared");
         return C_OK;
     }
@@ -186,7 +187,6 @@ int asmTaskSetFailPoint(const char *channel, const char *state) {
     else if (!strcasecmp(state, "wait-rdbchannel")) asmManager->failed_state = ASM_WAIT_RDBCHANNEL;
     else if (!strcasecmp(state, "wait-bgsave-start")) asmManager->failed_state = ASM_WAIT_BGSAVE_START;
     else if (!strcasecmp(state, "send-bulk-and-stream")) asmManager->failed_state = ASM_SEND_BULK_AND_STREAM;
-    else if (!strcasecmp(state, "wait-pause-write")) asmManager->failed_state = ASM_WAIT_PAUSE_WRITE;
     else if (!strcasecmp(state, "paused-write")) asmManager->failed_state = ASM_PAUSED_WRITE;
     else if (!strcasecmp(state, "rdbchannel-reply")) asmManager->failed_state = ASM_RDBCHANNEL_REPLY;
     else if (!strcasecmp(state, "rdbchannel-transfer")) asmManager->failed_state = ASM_RDBCHANNEL_TRANSFER;
@@ -208,10 +208,9 @@ const char *asmChannelToString(int channel) {
 
 int asmIsFailPointActive(int channel, int state) {
     if (!asmManager) return 0; /* No ASM manager initialized */
-    if (asmManager->failed_channel == channel &&
-            asmManager->failed_state == state) {
-        serverLog(LL_NOTICE, "ASM fail point active: channel=%d, state=%d",
-                  channel, state);
+    if (asmManager->failed_channel == channel && asmManager->failed_state == state) {
+        serverLog(LL_NOTICE, "ASM fail point active: channel=%s, state=%s",
+                  asmChannelToString(channel), asmTaskStateToString(state));
         return 1;
     }
     return 0;
@@ -227,7 +226,7 @@ void asmTaskReset(asmTask *task) {
     task->source_offset = 0;
     replDataBufInit(&task->sync_buffer);
     sdsfree(task->error);
-    task->error = sdsempty();    
+    task->error = sdsempty();
 }
 
 asmTask *asmTaskCreate(void) {
@@ -441,6 +440,9 @@ void asmFeedMigrationClient(robj **argv, int argc) {
     {
         return;
     }
+
+    if (unlikely(asmIsFailPointActive(ASM_MIGRATE_MAIN_CHANNEL, task->state)))
+        freeClientAsync(task->main_channel_client);
 
     /* Feed main channel with the command. */
     client *c = task->main_channel_client;
@@ -656,6 +658,7 @@ void asmTaskSetError(asmTask *task, const char *fmt, ...) {
 
 void asmImportFailed(asmTask *task) {
     serverAssert(task->operation == ASM_IMPORT);
+    serverAssert(task->state != ASM_FAILED);
 
     /* If we are in the RDB channel transfer state, we need to
      * close the client that was created for the RDB channel. */
@@ -699,6 +702,7 @@ void asmImportFailed(asmTask *task) {
 
 void asmMigrateFailed(asmTask *task) {
     serverAssert(task->operation == ASM_MIGRATE);
+    serverAssert(task->state != ASM_FAILED);
 
     /* Clients cleanup */
     asmMigrateCloseClients(task);
@@ -747,16 +751,16 @@ void asmCallbackOnFreeClient(client *c) {
          * the destination side will also close the main channel.
          * So here we just reset the RDB channel client of task. */
         task->rdb_channel_client = NULL;
-        c->task = NULL; /* Clear the task reference */
         return;
     }
 
     /* If the main channel client is closed, we need to mark the task as failed
      * and clean up the RDB channel client if it exists. */
     if (c == task->main_channel_client) {
-        asmTaskSetError(task, "Migrate main channel client is closed, state: %s",
+        task->main_channel_client = NULL;
+        asmTaskSetError(task, "Migrate main and rdb channel client is closed, state: %s",
                               asmTaskStateToString(task->state));
-        asmMigrateFailed(task);
+        asmMigrateFailed(task); /* The rdb channel client will be cleaned up */
         return;
     }
 }
@@ -792,8 +796,12 @@ void asmRdbChannelSyncWithSource(connection *conn) {
 
     /* Check if the task is in a fail point state */
     if (unlikely(asmIsFailPointActive(ASM_IMPORT_RDB_CHANNEL, task->rdb_channel_state))) {
-        /* Simulate a failure */
+        char *buf[1];
+        /* Simulate a failure by shutting down the connection. On some operating systems
+         * (e.g. Linux), the socket’s receive buffer is not flushed immediately, so we
+         * issue a dummy read to drain any pending data and surface the error condition. */
         connShutdown(conn);
+        connRead(conn, buf, 1);
     }
 
     if (task->rdb_channel_state == ASM_CONNECTING) {
@@ -941,8 +949,12 @@ void asmSyncWithSource(connection *conn) {
 
     /* Check if the fail point is active for this channel and state */
     if (unlikely(asmIsFailPointActive(ASM_IMPORT_MAIN_CHANNEL, task->state))) {
-        /* Simulate a failure */
+        char *buf[1];
+        /* Simulate a failure by shutting down the connection. On some operating systems
+         * (e.g. Linux), the socket’s receive buffer is not flushed immediately, so we
+         * issue a dummy read to drain any pending data and surface the error condition. */
         connShutdown(conn);
+        connRead(conn, buf, 1);
     }
 
     if (task->state == ASM_CONNECTING) {
@@ -1103,6 +1115,12 @@ void asmImportSendACK(asmTask *task) {
 
 void asmStartSendBulkAndStream(struct asmTask *task) {
     serverAssert(task->state == ASM_WAIT_BGSAVE_START);
+
+    if (unlikely(asmIsFailPointActive(ASM_MIGRATE_RDB_CHANNEL, task->state))) {
+        connShutdown(task->rdb_channel_client->conn);
+        return;
+    }
+
     task->state = ASM_SEND_BULK_AND_STREAM;
 }
 
@@ -1290,7 +1308,13 @@ void clusterSyncSlotsCommand(client *c) {
             return;
         }
 
-        if (task->main_channel_client == NULL) {
+        if (unlikely(asmIsFailPointActive(ASM_MIGRATE_MAIN_CHANNEL, task->state))) {
+            /* Close the main channel client before establishing rdb channel client */
+            if (task->main_channel_client)
+                freeClient(task->main_channel_client);
+        }
+
+        if (task->state != ASM_WAIT_RDBCHANNEL || task->main_channel_client == NULL) {
             /* The main channel connection is closed. */
             addReplyError(c, "Main channel connection is not established");
             return;
@@ -1414,6 +1438,9 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
 
     dictEntry *de;
     kvstoreDictIterator *kvs_di = NULL;
+
+    if (unlikely(asmIsFailPointActive(ASM_MIGRATE_RDB_CHANNEL, ASM_SEND_BULK_AND_STREAM)))
+        rioAbort(rdb); /* Simulate a failure */
 
     for (int i = 0; i < server.dbnum; i++) {
         char selectcmd[] = "*2\r\n$6\r\nSELECT\r\n";
@@ -1585,13 +1612,13 @@ void asmSyncBufferStreamToDb(asmTask *task) {
         asmImportSendACK(task);
     } else {
         /* If the streaming buffer failed, we need to clean up the task and
-         * the main channel connection, to avoid client exposure not in
+         * the main channel connection, to avoid client exposure when not in
          * ASM_WAIT_STREAM_EOF state */
-        // task->main_channel_conn = NULL;
-        // c->task = NULL;
-        // c->flags &= ~CLIENT_MASTER;
-        // freeClientAsync(c);
-    
+        task->main_channel_conn = NULL;
+        c->task = NULL;
+        c->flags &= ~CLIENT_MASTER;
+        freeClientAsync(c);
+
         serverLog(LL_WARNING, "Streaming buffer for task failed");
         asmTaskSetError(task, "Import main channel streaming to DB failed, state: %s",
                               asmTaskStateToString(task->state));
@@ -1623,6 +1650,10 @@ void asmBeforeSleep(void) {
             client *c = task->main_channel_client;
             /* All slot ranges command stream drained */
             if (!clientHasPendingReplies(c)) {
+
+                if (unlikely(asmIsFailPointActive(ASM_MIGRATE_MAIN_CHANNEL, task->state)))
+                    connShutdown(c->conn);
+
                 /* Send STREAM EOF, must use this approach to guarantee this command delivery */
                 char *err = sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "STREAM-EOF", NULL);
                 if (err) {

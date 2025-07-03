@@ -19,7 +19,7 @@ void asmStartSendBulkAndStream(struct asmTask *task);
 void asmCallbackOnFreeClient(client *c);
 int asmMigrateInProgress(void);
 void asmFeedMigrationClient(robj **argv, int argc);
-int asmTaskSetFailPoint(const char *channel, const char *state);
+int asmTaskSetFailPoint(sds channel, sds state);
 void asmImportIncrAppliedBytes(struct asmTask *task, size_t bytes);
 
 void clusterMigrationCommand(client *c);

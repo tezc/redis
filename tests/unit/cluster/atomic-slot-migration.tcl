@@ -154,11 +154,11 @@ start_cluster 3 3 {tags {external:skip cluster}} {
 
     global send_migration_import_0_100
     set send_migration_import_0_100 0
-    proc test_destination_node_handshake_failure {channel all_states} {
+    proc asm_basic_error_handling_test {operation channel all_states} {
         global send_migration_import_0_100
 
         foreach state $all_states {
-            if {$::verbose} { puts "Testing $channel channel with state: $state"}
+            if {$::verbose} { puts "Testing $operation $channel channel with state: $state"}
 
             # for streaming-buffer state, we need to set a longer delay to write
             # incremental data to the main channel
@@ -170,7 +170,15 @@ start_cluster 3 3 {tags {external:skip cluster}} {
             set load_handle [start_write_load "127.0.0.1" $port 100 "06S"]
 
             # Set the fail point for the main channel
-            assert_equal {OK} [R 0 debug asm-failpoint "import-$channel-channel" $state]
+            if {$operation eq "import"} {
+                assert_equal {OK} [R 0 debug asm-failpoint "import-$channel-channel" $state]
+                assert_equal {OK} [R 1 debug asm-failpoint "" ""] ;# Clear migrate node fail point
+            } elseif {$operation eq "migrate"} {
+                assert_equal {OK} [R 0 debug asm-failpoint "" ""] ;# Clear import node fail point
+                assert_equal {OK} [R 1 debug asm-failpoint "migrate-$channel-channel" $state]
+            } else {
+                fail "Unknown operation: $operation"
+            }
 
             # Migrate slot 0-100 to R 0 if this is the first time,
             # otherwise, import will retry automatically
@@ -181,7 +189,8 @@ start_cluster 3 3 {tags {external:skip cluster}} {
 
             # The task should be failed due to the fail point
             wait_for_condition 1000 50 {
-                [string match "*$channel channel*${state}*" [migration_status 0 0-100 error]]
+                [string match "*$channel*${state}*" [migration_status 0 0-100 error]] ||
+                [string match "*$channel*${state}*" [migration_status 1 0-100 error]]
             } else {
                 fail "ASM task did not fail"
             }
@@ -191,12 +200,22 @@ start_cluster 3 3 {tags {external:skip cluster}} {
     }
 
     test "Destination node main channel basic error-handling tests " {
-        set all_states [list "connecting" "auth-reply" "handshake-reply" "syncslots-reply" "accumulate-buffer" "wait-stream-eof" "streaming-buffer"]
-        test_destination_node_handshake_failure "main" $all_states
+        set all_states [list "connecting" "auth-reply" "handshake-reply" "syncslots-reply" "accumulate-buffer" "streaming-buffer" "wait-stream-eof"]
+        asm_basic_error_handling_test "import" "main" $all_states
     }
 
     test "Destination node rdb channel basic error-handling tests" {
         set all_states [list "connecting" "auth-reply" "rdbchannel-reply" "rdbchannel-transfer"]
-        test_destination_node_handshake_failure "rdb" $all_states
+        asm_basic_error_handling_test "import" "rdb" $all_states
+    }
+
+    test "Source node main channel basic error-handling tests " {
+        set all_states [list "wait-rdbchannel" "send-bulk-and-stream" "paused-write"]
+        asm_basic_error_handling_test "migrate" "main" $all_states
+    }
+
+    test "Source node rdb channel basic error-handling tests" {
+        set all_states [list "wait-bgsave-start" "send-bulk-and-stream"]
+        asm_basic_error_handling_test "migrate" "rdb" $all_states
     }
 }
