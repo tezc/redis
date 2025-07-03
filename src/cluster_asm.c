@@ -107,7 +107,6 @@ void createDumpPayload(rio *payload, robj *o, robj *key, int dbid);
 int startBgsaveForReplication(int mincapa, int req);
 void createReplicationBacklogIfNeeded(void);
 static void asmSyncBufferReadFromConn(connection *conn);
-unsigned int delKeysInSlot(unsigned int hashslot);
 
 void clusterAsmInit(void) {
     asmManager = zcalloc(sizeof(*asmManager));
@@ -1201,13 +1200,7 @@ void asmStartSyncSlots(asmTask *task) {
     if (task->operation != ASM_IMPORT || task->state != ASM_NONE) return;
 
     /* TODO: async clean up slots data, and propagate to replica */
-    for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
-        slotRange *sr = &task->slot_ranges->ranges[i];
-        for (int j = sr->start; j <= sr->end; j++) {
-            /* Clear the slot data */
-            delKeysInSlot(j);
-        }
-    }
+    clusterDelKeysInSlotRangeArray(task->slot_ranges, CLUSTER_DELKEYS_ASYNC);
 
     task->start_time = server.mstime;
 
