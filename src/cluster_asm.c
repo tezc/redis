@@ -15,7 +15,7 @@
 #define ASM_IMPORT  (1 << 1)
 #define ASM_MIGRATE (1 << 2)
 
-#define ASM_PAUSE_WRITE_MAX_GAP_BYTES (1024 * 1024) /* 1MB */
+#define ASM_PAUSE_WRITE_MAX_GAP_BYTES (1024 * 1024) /* 1MB, TODO: a new config */
 
 typedef struct asmTask {
     int operation;                      /* Either ASM_IMPORT or ASM_MIGRATE */
@@ -1100,6 +1100,7 @@ write_error: /* Handle sendCommand() errors. */
 
 void asmImportSendACK(asmTask *task) {
     serverAssert(task->operation == ASM_IMPORT && task->state == ASM_WAIT_STREAM_EOF);
+    serverLog(LL_NOTICE, "Destination node applied offset is %lld", task->dest_offset);
 
     sds offset = sdsfromlonglong(task->dest_offset);
     char *err = sendCommand(task->main_channel_conn, "CLUSTER", "SYNCSLOTS", "ACK", offset, NULL);
@@ -1387,6 +1388,8 @@ void clusterSyncSlotsCommand(client *c) {
                 /* Pause the write on the main channel connection if the gap is less
                  * than the desired threshold. */
                 if (task->dest_offset + ASM_PAUSE_WRITE_MAX_GAP_BYTES >= task->source_offset) {
+                    serverLog(LL_NOTICE, "The applied offset gap %lld is less than the threshold %d, pausing write",
+                                         task->source_offset - task->dest_offset, (int)ASM_PAUSE_WRITE_MAX_GAP_BYTES);
                     task->state = ASM_WAIT_PAUSE_WRITE;
                     clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_WAIT_PAUSE, NULL);
                 }
@@ -1650,6 +1653,7 @@ void asmBeforeSleep(void) {
             client *c = task->main_channel_client;
             /* All slot ranges command stream drained */
             if (!clientHasPendingReplies(c)) {
+                serverLog(LL_NOTICE, "All slot ranges command stream drained, sending STREAM-EOF");
 
                 if (unlikely(asmIsFailPointActive(ASM_MIGRATE_MAIN_CHANNEL, task->state)))
                     connShutdown(c->conn);

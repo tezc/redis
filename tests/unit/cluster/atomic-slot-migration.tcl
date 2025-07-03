@@ -192,7 +192,7 @@ start_cluster 3 3 {tags {external:skip cluster}} {
                 [string match "*$channel*${state}*" [migration_status 0 0-100 error]] ||
                 [string match "*$channel*${state}*" [migration_status 1 0-100 error]]
             } else {
-                fail "ASM task did not fail"
+                fail "ASM task did not fail with expected error"
             }
             R 1 config set rdb-key-save-delay 0
             stop_write_load $load_handle
@@ -217,5 +217,38 @@ start_cluster 3 3 {tags {external:skip cluster}} {
     test "Source node rdb channel basic error-handling tests" {
         set all_states [list "wait-bgsave-start" "send-bulk-and-stream"]
         asm_basic_error_handling_test "migrate" "rdb" $all_states
+    }
+
+    test "Migration will be successful after fail points are cleared" {
+        # we set a delay to write incremental data
+        R 1 config set rdb-key-save-delay 1000000
+
+        # Start the slot 0 write load on the R 1
+        if {$::tls} { set port [lindex [R 1 config get tls-port] 1]
+        } else { set port [lindex [R 1 config get port] 1] }
+        set load_handle [start_write_load "127.0.0.1" $port 100 "06S"]
+
+        # Clear all fail points
+        assert_equal {OK} [R 0 debug asm-failpoint "" ""]
+        assert_equal {OK} [R 1 debug asm-failpoint "" ""]
+
+        # Wait for the migration to complete
+        wait_for_condition 1000 50 {
+            [string match {*done*} [migration_status 0 0-100 state]] &&
+            [string match {*done*} [migration_status 1 0-100 state]]
+        } else {
+            fail "ASM task did not complete successfully"
+        }
+
+        stop_write_load $load_handle
+
+        # Verify the data is migrated, slot 0 and 1 should belong to R 1
+        # slot 0 key should be changed by the write load
+        assert_not_equal [string repeat a 100] [R 0 get "06S"]
+        assert_equal [string repeat b 100] [R 0 get "Qi"]
+        # Slave should also get the data
+        after 100
+        R 3 readonly
+        assert_equal [string repeat b 100] [R 3 get "Qi"]
     }
 }
