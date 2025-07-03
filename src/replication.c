@@ -793,18 +793,6 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
     if (slave->flags & CLIENT_REPL_RDB_CHANNEL &&
         slave->slave_req & SLAVE_REQ_SLOTS_SNAPSHOT)
     {
-        uint64_t id = slave->main_ch_client_id;
-        client *c = lookupClientByID(id);
-        if (c && c->replstate == SLAVE_STATE_WAIT_RDB_CHANNEL) {
-            c->replstate = SLAVE_STATE_SEND_BULK_AND_STREAM;
-            serverLog(LL_NOTICE, "Starting to deliver RDB and slots stream to replica: %s",
-                        replicationGetSlaveName(c));
-        } else {
-            serverLog(LL_WARNING, "Starting to deliver RDB to replica %s"
-                                    " but it has no associated main channel",
-                                    replicationGetSlaveName(slave));
-            /* TODO: error handler: No main channel for slots sync */
-        }
         /* Start to deliver the commands stream on exporting slots. */
         asmStartSendBulkAndStream(slave->task);
 
@@ -980,8 +968,9 @@ int startBgsaveForReplication(int mincapa, int req) {
     /* `SYNC` should have failed with error if we don't support socket and require a filter, assert this here */
     serverAssert(socket_target || !(req & SLAVE_REQ_RDB_MASK));
 
+    int slots_req = req & SLAVE_REQ_SLOTS_SNAPSHOT;
     serverLog(LL_NOTICE,"Starting BGSAVE for SYNC with target: %s%s",
-        socket_target ? "replicas sockets" : "disk",
+        socket_target ? (slots_req ? "import node" : "replicas sockets") : "disk",
         (req & SLAVE_REQ_RDB_CHANNEL) ? " (rdb-channel)" : "");
 
     rdbSaveInfo rsi, *rsiptr;

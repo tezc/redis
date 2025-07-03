@@ -148,5 +148,55 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         # verify changes in replica
         R 3 readonly
         assert_equal [string repeat c 100] [R 3 get $slot101_key]
+
+        R 0 config set rdb-key-save-delay 1000000
+    }
+
+    global send_migration_import_0_100
+    set send_migration_import_0_100 0
+    proc test_destination_node_handshake_failure {channel all_states} {
+        global send_migration_import_0_100
+
+        foreach state $all_states {
+            if {$::verbose} { puts "Testing $channel channel with state: $state"}
+
+            # for streaming-buffer state, we need to set a longer delay to write
+            # incremental data to the main channel
+            if {$state eq "streaming-buffer"} { R 1 config set rdb-key-save-delay 1000000 }
+
+            # Start the slot 0 write load on the R 1
+            if {$::tls} { set port [lindex [R 1 config get tls-port] 1]
+            } else { set port [lindex [R 1 config get port] 1] }
+            set load_handle [start_write_load "127.0.0.1" $port 100 "06S"]
+
+            # Set the fail point for the main channel
+            assert_equal {OK} [R 0 debug asm-failpoint "import-$channel-channel" $state]
+
+            # Migrate slot 0-100 to R 0 if this is the first time,
+            # otherwise, import will retry automatically
+            if {$send_migration_import_0_100 == 0} {
+                assert_equal {OK} [R 0 CLUSTER MIGRATION IMPORT 0 100]
+                set send_migration_import_0_100 1
+            }
+
+            # The task should be failed due to the fail point
+            wait_for_condition 1000 50 {
+                [string match "*$channel channel*${state}*" [migration_status 0 0-100 error]]
+            } else {
+                fail "ASM task did not fail"
+            }
+            R 1 config set rdb-key-save-delay 0
+            stop_write_load $load_handle
+        }
+    }
+
+    test "Destination node main channel basic error-handling tests " {
+        set all_states [list "connecting" "auth-reply" "handshake-reply" "syncslots-reply" "accumulate-buffer" "wait-stream-eof" "streaming-buffer"]
+        test_destination_node_handshake_failure "main" $all_states
+    }
+
+    test "Destination node rdb channel basic error-handling tests" {
+        set all_states [list "connecting" "auth-reply" "rdbchannel-reply" "rdbchannel-transfer"]
+        test_destination_node_handshake_failure "rdb" $all_states
     }
 }
