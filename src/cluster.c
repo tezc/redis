@@ -1616,9 +1616,9 @@ unsigned int clusterDelKeysInSlot(unsigned int hashslot, int flags) {
     return j;
 }
 
+/* Delete the keys in the slot ranges. Returns the number of deleted items */
 unsigned int clusterDelKeysInSlotRangeArray(slotRangeArray *sra, int flags) {
     unsigned int j = 0;
-
     for (int i = 0; i < sra->num_ranges; i++) {
         for (int slot = sra->ranges[i].start; slot <= sra->ranges[i].end; slot++) {
             j += clusterDelKeysInSlot(slot, flags);
