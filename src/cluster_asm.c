@@ -166,7 +166,7 @@ int asmTaskSetFailPoint(sds channel, sds state) {
     asmManager->failed_state = 0;
     if (!channel && !state) return C_ERR;
     if (sdslen(channel) == 0 && sdslen(state) == 0) {
-        serverLog(LL_WARNING, "Fail point is cleared");
+        serverLog(LL_WARNING, "ASM fail point is cleared");
         return C_OK;
     }
 
@@ -191,7 +191,7 @@ int asmTaskSetFailPoint(sds channel, sds state) {
     else if (!strcasecmp(state, "rdbchannel-transfer")) asmManager->failed_state = ASM_RDBCHANNEL_TRANSFER;
     else return C_ERR;
 
-    serverLog(LL_NOTICE, "Fail point set: channel=%s, state=%s", channel, state);
+    serverLog(LL_NOTICE, "ASM fail point set: channel=%s, state=%s", channel, state);
     return C_OK;
 }
 
@@ -1080,7 +1080,7 @@ void asmSyncWithSource(connection *conn) {
     return;
 
 no_response_error:
-    serverLog(LL_WARNING, "Source node did not respond to command during SYNC handshake");
+    serverLog(LL_WARNING, "Source node did not respond to command during SYNCSLOTS handshake");
     /* Fall through to regular error handling */
 
 error:
@@ -1520,8 +1520,8 @@ werr:
 
 /* Read error handler for sync buffer */
 static void asmReadSyncBufferErrorHandler(connection *conn) {
-    serverLog(LL_WARNING, "ASM buffer stream: error while reading from source: %s",
-              connGetLastError(conn));
+    serverLog(LL_WARNING, "Import main channel buffer stream read error: %s",
+                          connGetLastError(conn));
     asmTask *task = connGetPrivateData(conn);
     asmTaskSetError(task, "Import main channel buffer stream read error: %s, state: %s",
                           connGetLastError(conn), asmTaskStateToString(task->state));
@@ -1540,7 +1540,7 @@ static void asmSyncBufferStreamYieldCallback(void *ctx) {
     replDataBufToDbCtx *context = ctx;
     client *c = context->client;
 
-    sds offset = sdsfromlonglong(context->total_offset);
+    sds offset = sdsfromlonglong(context->applied_offset);
     char *err = sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "ACK", offset, NULL);
     sdsfree(offset);
     if (!err) return;
@@ -1548,9 +1548,8 @@ static void asmSyncBufferStreamYieldCallback(void *ctx) {
     serverLog(LL_WARNING, "Error sending CLUSTER SYNCSLOTS ACK: %s", err);
     sdsfree(err);
 
-    /* Mask this client as closed, and then asmSyncBufferStreamShouldContinue
-     * will this error, and then stop this task. */
-    c->flags |= CLIENT_CLOSE_ASAP;
+    /* Since this client is protected, freeClient just masks it as closed */
+    freeClientAsync(c);
 }
 
 static int asmSyncBufferStreamShouldContinue(void *ctx) {
@@ -1589,7 +1588,7 @@ void asmSyncBufferStreamToDb(asmTask *task) {
 
     replDataBufToDbCtx ctx = {
         .client = c,
-        .total_offset = 0,
+        .applied_offset = 0,
         .should_continue = asmSyncBufferStreamShouldContinue,
         .yield_callback = asmSyncBufferStreamYieldCallback,
     };
@@ -1601,11 +1600,13 @@ void asmSyncBufferStreamToDb(asmTask *task) {
 
     if (ret == C_OK) {
         /* Update the dest offset according to applied bytes. */
-        task->dest_offset = ctx.total_offset;
+        task->dest_offset = ctx.applied_offset;
         /* Wait STREAM-EOF from the source node. */
         task->state = ASM_WAIT_STREAM_EOF;
         connSetReadHandler(task->main_channel_conn, readQueryFromClient);
-        serverLog(LL_NOTICE, "Streaming buffer for task is done, size: %lld", task->dest_offset);
+        serverLog(LL_NOTICE, "Streaming buffer for task is done, applied offset: %lld",
+                             task->dest_offset);
+
         if (unlikely(asmIsFailPointActive(ASM_IMPORT_MAIN_CHANNEL, task->state)))
             connShutdown(task->main_channel_conn); /* Simulate a failure */
 
@@ -1649,9 +1650,9 @@ void asmBeforeSleep(void) {
     if (task->operation == ASM_MIGRATE) {
         if (task->state == ASM_PAUSED_WRITE) {
             client *c = task->main_channel_client;
-            /* All slot ranges command stream drained */
+            /* The command streams for slot ranges have been drained. */
             if (!clientHasPendingReplies(c)) {
-                serverLog(LL_NOTICE, "All slot ranges command stream drained, sending STREAM-EOF");
+                serverLog(LL_NOTICE, "The command streams for slot ranges have been drained, sending STREAM-EOF");
 
                 if (unlikely(asmIsFailPointActive(ASM_MIGRATE_MAIN_CHANNEL, task->state)))
                     connShutdown(c->conn);
@@ -1667,8 +1668,12 @@ void asmBeforeSleep(void) {
                     return;
                 }
 
-                /* Free clients since they are no longer needed */
-                asmMigrateCloseClients(task);
+               /* Even though the main channel client is no longer needed, we can't
+                * close it directly because the destination may still be sending ACKs
+                * over this connection. Instead, we leave it to the destination to
+                * close it. We just clear the task and client references */
+                task->main_channel_client->task = NULL;
+                task->main_channel_client = NULL;
 
                 task->state = ASM_STREAM_DONE;
                 /* Notify plugin import is completed */

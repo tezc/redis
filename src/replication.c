@@ -3870,7 +3870,6 @@ static void rdbChannelBufferReplData(connection *conn) {
 int replDataBufStreamToDb(replDataBuf *buf, replDataBufToDbCtx *ctx) {
     listNode *n;
     int ret = C_OK;
-    size_t offset = 0;
     client *c = ctx->client;
 
     blockingOperationStarts();
@@ -3897,13 +3896,13 @@ int replDataBufStreamToDb(replDataBuf *buf, replDataBufToDbCtx *ctx) {
 
             /* Check if we should yield back to the event loop */
             if (server.loading_process_events_interval_bytes &&
-                ((offset + bytes) / server.loading_process_events_interval_bytes >
-                  offset / server.loading_process_events_interval_bytes))
+                ((ctx->applied_offset + bytes) / server.loading_process_events_interval_bytes >
+                  ctx->applied_offset / server.loading_process_events_interval_bytes))
             {
                 ctx->yield_callback(ctx);
                 processEventsWhileBlocked();
             }
-            offset += bytes;
+            ctx->applied_offset += bytes;
 
             /* Check if we should continue processing */
             if (!ctx->should_continue(ctx)) {
@@ -3923,7 +3922,6 @@ int replDataBufStreamToDb(replDataBuf *buf, replDataBufToDbCtx *ctx) {
     }
     blockingOperationEnds();
 
-    ctx->total_offset = offset;
     return ret;
 }
 
@@ -3980,7 +3978,7 @@ static void rdbChannelStreamReplDataToDb(void) {
 
     replDataBufToDbCtx ctx = {
         .client = c,
-        .total_offset = 0,
+        .applied_offset = 0,
         .should_continue = rdbChannelStreamShouldContinue,
         .yield_callback = rdbChannelStreamYieldCallback,
     };
@@ -3997,7 +3995,7 @@ out:
 
     if (ret == C_OK) {
         serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Successfully streamed replication buffer into the db (%zu bytes in total)",
-                             ctx.total_offset);
+                             ctx.applied_offset);
         /* Revert the read handler */
         if (!close_asap && connSetReadHandler(c->conn, readQueryFromClient) != C_OK) {
             serverLog(LL_WARNING,
