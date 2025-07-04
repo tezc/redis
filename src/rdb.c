@@ -4014,7 +4014,8 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
             }
         } else {
             serverLog(LL_NOTICE, "Background RDB transfer started by pid %ld to %s", (long)childpid,
-                rdb_channel ? (slots_req ? "import node" : "replica socket") : "parent process pipe");
+                rdb_channel ? (slots_req ? "slot migration destination socket" : "replica socket") :
+                              "parent process pipe");
             server.rdb_save_time_start = time(NULL);
             server.rdb_child_type = RDB_CHILD_TYPE_SOCKET;
             if (!rdb_channel) {

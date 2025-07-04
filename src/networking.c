@@ -4249,8 +4249,7 @@ static inline int clientTypeIsSlave(client *c) {
     /* Even though MONITOR clients and ASM destination RDB/main channels are marked
      * as replicas, we want the expose them as normal clients. */
     if (unlikely((c->flags & CLIENT_SLAVE) &&
-        !(c->flags & (CLIENT_MONITOR | CLIENT_REPL_MIGRATION_DEST))) &&
-        !(c->slave_req & SLAVE_REQ_SLOTS_SNAPSHOT))
+        !(c->flags & (CLIENT_MONITOR | CLIENT_REPL_MIGRATION_DEST))))
     {
         return 1;
     }

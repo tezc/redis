@@ -970,7 +970,7 @@ int startBgsaveForReplication(int mincapa, int req) {
 
     int slots_req = req & SLAVE_REQ_SLOTS_SNAPSHOT;
     serverLog(LL_NOTICE,"Starting BGSAVE for SYNC with target: %s%s",
-        socket_target ? (slots_req ? "import node" : "replicas sockets") : "disk",
+        socket_target ? (slots_req ? "slot migration destination socket" : "replicas sockets") : "disk",
         (req & SLAVE_REQ_RDB_CHANNEL) ? " (rdb-channel)" : "");
 
     rdbSaveInfo rsi, *rsiptr;
