@@ -4916,6 +4916,9 @@ void clusterCron(void) {
 
     if (update_state || server.cluster->state == CLUSTER_FAIL)
         clusterUpdateState();
+
+    /* Atomic slot migration cron */
+    asmCron();
 }
 
 /* This function is called before the event handler returns to sleep for

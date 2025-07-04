@@ -1791,7 +1791,7 @@ void freeClient(client *c) {
     }
 
     /* Log link disconnection with slave */
-    if (clientTypeIsSlave(c) && !(c->slave_req & SLAVE_REQ_SLOTS_SNAPSHOT)) {
+    if (clientTypeIsSlave(c)) {
         const char *type = c->flags & CLIENT_REPL_RDB_CHANNEL ? " (rdbchannel)" : "";
         serverLog(LL_NOTICE,"Connection with replica%s %s lost.", type,
             replicationGetSlaveName(c));
@@ -2757,6 +2757,9 @@ void commandProcessed(client *c) {
         if (applied) {
             replicationFeedStreamFromMasterStream(c->querybuf+c->repl_applied,applied);
             c->repl_applied += applied;
+
+            /* Update the atomic slot migration task's applied bytes. */
+            if (c->task) asmImportIncrAppliedBytes(c->task, applied);
         }
     }
 }
@@ -4273,6 +4276,14 @@ size_t getClientOutputBufferMemoryUsage(client *c) {
     }
 }
 
+size_t getNormalClientPendingReplyBytes(client *c) {
+    serverAssert(!(c->flags & CLIENT_SLAVE));
+    if (listLength(c->reply) == 0) return c->bufpos;
+
+    clientReplyBlock *block = listNodeValue(listLast(c->reply));
+    return (c->reply_bytes - block->size + block->used) + c->bufpos;
+}
+
 /* Returns the total client's memory usage.
  * Optionally, if output_buffer_mem_usage is not NULL, it fills it with
  * the client output buffer memory usage portion of the total. */
@@ -4321,10 +4332,13 @@ int getClientType(client *c) {
 }
 
 static inline int clientTypeIsSlave(client *c) {
-    /* Even though MONITOR clients and ASM destination main channels are marked
+    /* Even though MONITOR clients and ASM destination RDB/main channels are marked
      * as replicas, we want the expose them as normal clients. */
-    if (unlikely((c->flags & CLIENT_SLAVE) && !(c->flags & (CLIENT_MONITOR | CLIENT_REPL_MIGRATION_DEST))))
+    if (unlikely((c->flags & CLIENT_SLAVE) &&
+        !(c->flags & (CLIENT_MONITOR | CLIENT_REPL_MIGRATION_DEST))))
+    {
         return 1;
+    }
     return 0;
 }
 

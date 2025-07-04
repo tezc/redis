@@ -801,18 +801,6 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
     if (slave->flags & CLIENT_REPL_RDB_CHANNEL &&
         slave->slave_req & SLAVE_REQ_SLOTS_SNAPSHOT)
     {
-        uint64_t id = slave->main_ch_client_id;
-        client *c = lookupClientByID(id);
-        if (c && c->replstate == SLAVE_STATE_WAIT_RDB_CHANNEL) {
-            c->replstate = SLAVE_STATE_SEND_BULK_AND_STREAM;
-            serverLog(LL_NOTICE, "Starting to deliver RDB and slots stream to replica: %s",
-                        replicationGetSlaveName(c));
-        } else {
-            serverLog(LL_WARNING, "Starting to deliver RDB to replica %s"
-                                    " but it has no associated main channel",
-                                    replicationGetSlaveName(slave));
-            /* TODO: error handler: No main channel for slots sync */
-        }
         /* Start to deliver the commands stream on exporting slots. */
         asmStartSendBulkAndStream(slave->task);
 
@@ -988,8 +976,9 @@ int startBgsaveForReplication(int mincapa, int req) {
     /* `SYNC` should have failed with error if we don't support socket and require a filter, assert this here */
     serverAssert(socket_target || !(req & SLAVE_REQ_RDB_MASK));
 
+    int slots_req = req & SLAVE_REQ_SLOTS_SNAPSHOT;
     serverLog(LL_NOTICE,"Starting BGSAVE for SYNC with target: %s%s",
-        socket_target ? "replicas sockets" : "disk",
+        socket_target ? (slots_req ? "slot migration destination socket" : "replicas sockets") : "disk",
         (req & SLAVE_REQ_RDB_CHANNEL) ? " (rdb-channel)" : "");
 
     rdbSaveInfo rsi, *rsiptr;
@@ -3913,7 +3902,6 @@ static void rdbChannelBufferReplData(connection *conn) {
 int replDataBufStreamToDb(replDataBuf *buf, replDataBufToDbCtx *ctx) {
     listNode *n;
     int ret = C_OK;
-    size_t offset = 0;
     client *c = ctx->client;
 
     blockingOperationStarts();
@@ -3940,13 +3928,13 @@ int replDataBufStreamToDb(replDataBuf *buf, replDataBufToDbCtx *ctx) {
 
             /* Check if we should yield back to the event loop */
             if (server.loading_process_events_interval_bytes &&
-                ((offset + bytes) / server.loading_process_events_interval_bytes >
-                  offset / server.loading_process_events_interval_bytes))
+                ((ctx->applied_offset + bytes) / server.loading_process_events_interval_bytes >
+                  ctx->applied_offset / server.loading_process_events_interval_bytes))
             {
                 ctx->yield_callback(ctx);
                 processEventsWhileBlocked();
             }
-            offset += bytes;
+            ctx->applied_offset += bytes;
 
             /* Check if we should continue processing */
             if (!ctx->should_continue(ctx)) {
@@ -3966,7 +3954,6 @@ int replDataBufStreamToDb(replDataBuf *buf, replDataBufToDbCtx *ctx) {
     }
     blockingOperationEnds();
 
-    ctx->total_offset = offset;
     return ret;
 }
 
@@ -4023,7 +4010,7 @@ static void rdbChannelStreamReplDataToDb(void) {
 
     replDataBufToDbCtx ctx = {
         .client = c,
-        .total_offset = 0,
+        .applied_offset = 0,
         .should_continue = rdbChannelStreamShouldContinue,
         .yield_callback = rdbChannelStreamYieldCallback,
     };
@@ -4040,7 +4027,7 @@ out:
 
     if (ret == C_OK) {
         serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Successfully streamed replication buffer into the db (%zu bytes in total)",
-                             ctx.total_offset);
+                             ctx.applied_offset);
         /* Revert the read handler */
         if (!close_asap && connSetReadHandler(c->conn, readQueryFromClient) != C_OK) {
             serverLog(LL_WARNING,
