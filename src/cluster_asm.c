@@ -1051,10 +1051,12 @@ void asmSyncWithSource(connection *conn) {
 
     if (task->state == ASM_INIT_RDBCHANNEL) {
         /* Create RDB channel connection */
+        char *ip = clusterNodeIp(task->source_node);
+        int port = server.tls_replication ? clusterNodeTlsPort(task->source_node) :
+                                            clusterNodeTcpPort(task->source_node);
         task->rdb_channel_conn = connCreate(server.el, connTypeOfReplication());
-        if (connConnect(task->rdb_channel_conn, task->source_node->ip,
-                server.tls_replication ? task->source_node->tls_port : task->source_node->tcp_port,
-                server.bind_source_addr, asmRdbChannelSyncWithSource) == C_ERR)
+        if (connConnect(task->rdb_channel_conn, ip, port,
+                        server.bind_source_addr, asmRdbChannelSyncWithSource) == C_ERR)
         {
             serverLog(LL_WARNING, "Unable to connect to the source node: %s",
                       connGetLastError(task->rdb_channel_conn));
@@ -1064,7 +1066,7 @@ void asmSyncWithSource(connection *conn) {
         connSetPrivateData(task->rdb_channel_conn, task);
         serverLog(LL_NOTICE,
             "RDB channel connection to source node %.40s established, waiting for AUTH reply...",
-            task->source_node->name);
+            clusterNodeGetName(task->source_node));
 
         /* Main channel waits for the new event */
         connSetReadHandler(conn, NULL);
@@ -1200,9 +1202,11 @@ void asmStartImportTask(asmTask *task) {
 
     /* TODO: tls support tests */
     task->main_channel_conn = connCreate(server.el, connTypeOfReplication());
-    if (connConnect(task->main_channel_conn, task->source_node->ip,
-            server.tls_replication ? task->source_node->tls_port : task->source_node->tcp_port,
-            server.bind_source_addr, asmSyncWithSource) == C_ERR)
+    char *ip = clusterNodeIp(task->source_node);
+    int port = server.tls_replication ? clusterNodeTlsPort(task->source_node) :
+                                        clusterNodeTcpPort(task->source_node);
+    if (connConnect(task->main_channel_conn, ip, port, server.bind_source_addr,
+                    asmSyncWithSource) == C_ERR)
     {
         asmTaskSetFailed(task, "main channel - Failed to connect to source node: %s",
                          connGetLastError(task->main_channel_conn));
