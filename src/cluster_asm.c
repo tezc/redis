@@ -19,25 +19,25 @@
 
 typedef struct asmTask {
     int operation;                      /* Either ASM_IMPORT or ASM_MIGRATE */
-    slotRangeArray *slot_ranges;        /* List of slot ranges for this migration operation */
+    slotRangeArray *slot_ranges;        /* List of slot ranges for this migration task */
     int state;                          /* Current state of the task */
     char source[CLUSTER_NAMELEN];       /* Source node name */
     char dest[CLUSTER_NAMELEN];         /* Destination node name */
     clusterNode *source_node;           /* Source node */
     connection *main_channel_conn;      /* Main channel connection */
-    long long main_channel_id;          /* Main channel ID for the task */
+    unsigned long long main_channel_id; /* Main channel ID for the task */
     connection *rdb_channel_conn;       /* RDB channel connection */
     int rdb_channel_state;              /* State of the RDB channel */
-    long long dest_offset;              /* Destination offset */
-    long long source_offset;            /* Source offset */
+    unsigned long long dest_offset;     /* Destination offset */
+    unsigned long long source_offset;   /* Source offset */
     replDataBuf sync_buffer;            /* Buffer for the stream */
     client *main_channel_client;        /* Client for the main channel on the source side */
     client *rdb_channel_client;         /* Client for the RDB channel on the source side */
     long long retry_count;              /* Number of retries for this task */
-    mstime_t create_time;               /* The time of creating this task */
-    mstime_t start_time;                /* The start time of this task */
-    mstime_t done_time;                 /* The completed time of this task */
-    mstime_t paused_time;               /* The time when the slot writes are paused */
+    mstime_t create_time;               /* Task creation time */
+    mstime_t start_time;                /* Task start time */
+    mstime_t done_time;                 /* Task completion time */
+    mstime_t paused_time;               /* The time when the slot writes were paused */
     sds error;                          /* Error message for this task */
 } asmTask;
 
@@ -48,8 +48,8 @@ struct asmManager {
     long long total_done_tasks;   /* Total number of completed tasks */
 
     /* Fail point injection for debugging */
-    int debug_failed_channel;     /* Channel in which the task failed */
-    int debug_failed_state;       /* State in which the task failed */
+    int debug_failed_channel;     /* Channel where the task failed */
+    int debug_failed_state;       /* State where the task failed */
 };
 
 enum asmState {
@@ -97,7 +97,7 @@ enum asmChannel {
 /* Global ASM manager */
 struct asmManager *asmManager = NULL;
 
-void asmStartSyncSlots(asmTask *task);
+void asmStartImportTask(asmTask *task);
 
 char *sendCommand(connection *conn, ...);
 char *sendCommandArgv(connection *conn, int argc, char **argv, size_t *argv_lens);
@@ -107,6 +107,7 @@ void createDumpPayload(rio *payload, robj *o, robj *key, int dbid);
 int startBgsaveForReplication(int mincapa, int req);
 void createReplicationBacklogIfNeeded(void);
 static void asmSyncBufferReadFromConn(connection *conn);
+void asmTaskSetFailed(asmTask *task, const char *fmt, ...);
 
 void clusterAsmInit(void) {
     asmManager = zcalloc(sizeof(*asmManager));
@@ -154,7 +155,7 @@ char *asmTaskStateToString(int state) {
 
         default: return "unknown";
     }
-    return NULL; /* Unreachable */
+    serverAssert(0); /* Unreachable */
 }
 
 int asmDebugSetFailPoint(char * channel, char *state) {
@@ -206,7 +207,7 @@ const char *asmChannelToString(int channel) {
 }
 
 int asmDebugIsFailPointActive(int channel, int state) {
-    if (!asmManager) return 0; /* No ASM manager initialized */
+    if (!asmManager) return 0; /* ASM manager not initialized */
     if (asmManager->debug_failed_channel == channel && asmManager->debug_failed_state == state) {
         serverLog(LL_NOTICE, "ASM fail point active: channel=%s, state=%s",
                   asmChannelToString(channel), asmTaskStateToString(state));
@@ -240,6 +241,8 @@ asmTask *asmTaskCreate(void) {
     task->create_time = server.mstime;
     task->start_time = 0;
     task->done_time = 0;
+    task->dest_offset = 0;
+    task->source_offset = 0;
 
     return task;
 }
@@ -299,8 +302,8 @@ asmTask *lookupAsmTaskBySlotRangeArray(slotRangeArray *sra) {
     return NULL;
 }
 
-/* Returns 1 if the array contains the given slot range, 0 otherwise */
-static int slotArrayContains(slotRangeArray *sra, slotRange *req) {
+/* Returns 1 if the slot range array overlaps with the given slot range. */
+static int slotRangeArrayOverlaps(slotRangeArray *sra, slotRange *req) {
     for (int i = 0; i < sra->num_ranges; i++) {
         slotRange *sr = &sra->ranges[i];
         if (sr->start <= req->end && sr->end >= req->start)
@@ -318,18 +321,18 @@ static asmTask *lookupAsmTaskBySlotRange(slotRange *req) {
     listRewind(asmManager->tasks, &li);
     while ((ln = listNext(&li)) != NULL) {
         asmTask *task = listNodeValue(ln);
-        if (slotArrayContains(task->slot_ranges, req))
+        if (slotRangeArrayOverlaps(task->slot_ranges, req))
             return task;
     }
     return NULL;
 }
 
-/* Validates the given slot ranges for a migration operation:
+/* Validates the given slot ranges for a migration task:
  * - Ensures the current node is a master.
  * - Verifies all slots are in a STABLE state.
  * - Checks that slot ranges are well-formed and non-overlapping.
  * - Confirms all slots belong to a single source node.
- * - Confirms no ongoing import operation that overlaps with the slot ranges.
+ * - Confirms no ongoing import task that overlaps with the slot ranges.
  *
  * Returns the source node if validation succeeds.
  * Otherwise, returns NULL and sets 'err' variable. */
@@ -350,7 +353,7 @@ static clusterNode *validateImportSlotRanges(slotRangeArray *slot_ranges, sds *e
         if (getImportingSlotSource(i) != NULL ||
             getMigratingSlotDest(i) != NULL)
         {
-            *err = sdsnew("Slot states must be STABLE to start a slot migration operation.");
+            *err = sdsnew("All slot states must be STABLE to start a slot migration task.");
             goto out;
         }
     }
@@ -358,7 +361,7 @@ static clusterNode *validateImportSlotRanges(slotRangeArray *slot_ranges, sds *e
     for (int i = 0; i < slot_ranges->num_ranges; i++) {
         slotRange *sr = &slot_ranges->ranges[i];
 
-        /* Ensure no import operation overlaps with this slot range. */
+        /* Ensure no import task overlaps with this slot range. */
         asmTask *task = lookupAsmTaskBySlotRange(sr);
         if (task && task->operation == ASM_IMPORT) {
             *err = sdscatprintf(sdsempty(),
@@ -367,7 +370,7 @@ static clusterNode *validateImportSlotRanges(slotRangeArray *slot_ranges, sds *e
             goto out;
         }
 
-        /* Validate if we can start migration operation for this slot range. */
+        /* Validate if we can start migration task for this slot range. */
         for (int j = sr->start; j <= sr->end; j++) {
             clusterNode *node = getNodeBySlot(j);
             if (node == NULL) {
@@ -389,7 +392,7 @@ out:
     return *err ? NULL : source;
 }
 
-/* Returns 1 if a migrate operation is in progress, 0 otherwise. */
+/* Returns 1 if a migrate task is in progress, 0 otherwise. */
 int asmMigrateInProgress(void) {
     listIter li;
     listNode *ln;
@@ -435,7 +438,7 @@ void asmFeedMigrationClient(robj **argv, int argc) {
 
     /* Check if the slot belongs to the task's slot range. */
     slotRange sr = {slot, slot};
-    if (!slotArrayContains(task->slot_ranges, &sr) ||
+    if (!slotRangeArrayOverlaps(task->slot_ranges, &sr) ||
         !asmCanFeedMigrationClient(task))
     {
         return;
@@ -456,7 +459,7 @@ void asmFeedMigrationClient(robj **argv, int argc) {
     task->source_offset += (getNormalClientPendingReplyBytes(c) - prev_bytes);
 }
 
-int asmStartImportTask(slotRangeArray *slot_ranges, sds *err) {
+int asmCreateImportTask(slotRangeArray *slot_ranges, sds *err) {
     clusterNode *source;
 
     *err = NULL;
@@ -475,7 +478,7 @@ int asmStartImportTask(slotRangeArray *slot_ranges, sds *err) {
     }
 
     if (listLength(asmManager->tasks) != 0) {
-        *err = sdsnew("another asm task is already in progress");
+        *err = sdsnew("another ASM task is already in progress");
         zfree(slot_ranges);
         return C_ERR;
     }
@@ -491,13 +494,12 @@ int asmStartImportTask(slotRangeArray *slot_ranges, sds *err) {
 
     listAddNodeTail(asmManager->tasks, task);
     sds slot_ranges_str = createSlotRangesStr(slot_ranges);
-    serverLog(LL_NOTICE, "Import slots task created: source: %s, dest: %s, sync slot ranges: %s",
-                          task->source, task->dest, slot_ranges_str);
+    serverLog(LL_NOTICE, "Import task created: src=%.40s, dest=%.40s, slots=%s",
+                         task->source, task->dest, slot_ranges_str);
     sdsfree(slot_ranges_str);
 
     /* Start the import task */
-    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_STARTED, NULL);
-    asmStartSyncSlots(task);
+    asmStartImportTask(task);
 
     return C_OK;
 }
@@ -517,7 +519,7 @@ static void clusterMigrationCommandImport(client *c) {
     if (!slot_ranges) return;
 
     sds err = NULL;
-    if (asmStartImportTask(slot_ranges, &err) != C_OK) {
+    if (asmCreateImportTask(slot_ranges, &err) != C_OK) {
         addReplyErrorSds(c, err);
         return;
     }
@@ -525,9 +527,9 @@ static void clusterMigrationCommandImport(client *c) {
     addReply(c, shared.ok);
 }
 
-/* Cancel atomic slot migration operations that overlap with the given slot
- * range. Returns the number of cancelled operations. */
-static int cancelLinksForSlotRange(slotRange *req_range) {
+/* Cancel atomic slot migration tasks that overlap with the given slot
+ * range. Returns the number of cancelled tasks. */
+static int cancelTasksForSlotRange(slotRange *req_range) {
     int num_cancelled = 0;
     listIter li;
     listNode *ln;
@@ -536,29 +538,25 @@ static int cancelLinksForSlotRange(slotRange *req_range) {
     while ((ln = listNext(&li)) != NULL) {
         asmTask *task = listNodeValue(ln);
 
-        /* Only import operations on the destination side can be cancelled. */
-        if (task->operation != ASM_IMPORT || task->state == ASM_DONE) {
+        if (task->state == ASM_DONE || task->state == ASM_CANCELED)
             continue;
-        }
 
-        for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
-            slotRange *sr = &task->slot_ranges->ranges[i];
-            /* Cancel if any slot range overlaps with the requested range. */
-            if (sr->start <= req_range->end && sr->end >= req_range->start) {
-                task->state = ASM_CANCELED;
-                num_cancelled++;
-                break;
-            }
+        /* Cancel the task if it overlaps with the slot ranges of the task. */
+        if (slotRangeArrayOverlaps(task->slot_ranges, req_range)) {
+            asmTaskSetFailed(task, "Cancelled by user");
+            task->state = ASM_CANCELED;
+            num_cancelled++;
+            continue;
         }
     }
     return num_cancelled;
 }
 
 /* CLUSTER MIGRATION CANCEL <start-slot end-slot [start-slot end-slot ...]>
- *   - Reply: Number of cancelled operations
+ *   - Reply: Number of cancelled tasks
  *
- * Cancels import operations that overlap with the specified slot ranges.
- * Multiple operations may be cancelled. */
+ * Cancels import tasks that overlap with the specified slot ranges.
+ * Multiple tasks may be cancelled. */
 static void clusterMigrationCommandCancel(client *c) {
     int remaining, num_cancelled = 0;
     slotRangeArray *slot_ranges;
@@ -573,9 +571,9 @@ static void clusterMigrationCommandCancel(client *c) {
     slot_ranges = parseSlotRangesOrReply(c, c->argc, 3);
     if (!slot_ranges) return;
 
-    /* Cancel asm operations that overlaps with the slot ranges. */
+    /* Cancel ASM tasks that overlap with the slot ranges. */
     for (int i = 0; i < slot_ranges->num_ranges; i++)
-        num_cancelled += cancelLinksForSlotRange(&slot_ranges->ranges[i]);
+        num_cancelled += cancelTasksForSlotRange(&slot_ranges->ranges[i]);
 
     addReplyLongLong(c, num_cancelled);
     zfree(slot_ranges);
@@ -646,21 +644,9 @@ void clusterMigrationCommand(client *c) {
     }
 }
 
-void asmTaskSetError(asmTask *task, const char *fmt, ...) {
-    va_list ap;
-    sds error = sdsempty();
-
-    va_start(ap, fmt);
-    error = sdscatvprintf(error, fmt, ap);
-    va_end(ap);
-
-    if (task->error) sdsfree(task->error);
-    task->error = error;
-}
-
-void asmImportFailed(asmTask *task) {
+void asmImportSetFailed(asmTask *task) {
     serverAssert(task->operation == ASM_IMPORT);
-    serverAssert(task->state != ASM_FAILED);
+    if (task->state == ASM_FAILED) return;
 
     /* If we are in the RDB channel transfer state, we need to
      * close the client that was created for the RDB channel. */
@@ -692,27 +678,17 @@ void asmImportFailed(asmTask *task) {
     asmManager->sync_buffer_peak = max(asmManager->sync_buffer_peak, task->sync_buffer.peak);
     replDataBufClear(&task->sync_buffer);
 
-    sds slot_ranges_str = createSlotRangesStr(task->slot_ranges);
-    serverLog(LL_WARNING, "Import operation failed for source: %s, dest: %s, slots: %s",
-              task->source, task->dest, slot_ranges_str);
-    sdsfree(slot_ranges_str);
-
     /* Mark the task as failed and notify the cluster */
     task->state = ASM_FAILED;
     clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_FAILED, NULL);
 }
 
-void asmMigrateFailed(asmTask *task) {
+void asmMigrateSetFailed(asmTask *task) {
     serverAssert(task->operation == ASM_MIGRATE);
-    serverAssert(task->state != ASM_FAILED);
+    if (task->state == ASM_FAILED) return;
 
     /* Clients cleanup */
     asmMigrateCloseClients(task);
-
-    sds slot_ranges_str = createSlotRangesStr(task->slot_ranges);
-    serverLog(LL_WARNING, "Migrate operation failed for source: %s, dest: %s, slots: %s",
-              task->source, task->dest, slot_ranges_str);
-    sdsfree(slot_ranges_str);
 
     /* Actually it is not necessary to clear the sync buffer here,
      * to make asmTaskReset work properly after migrate task failed  */
@@ -721,6 +697,33 @@ void asmMigrateFailed(asmTask *task) {
     /* Mark the task as failed and notify the cluster */
     task->state = ASM_FAILED;
     clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_FAILED, NULL);
+}
+
+void asmTaskSetFailed(asmTask *task, const char *fmt, ...) {
+    va_list ap;
+    sds error = sdsempty();
+
+    /* Set the error message */
+    va_start(ap, fmt);
+    error = sdscatvprintf(error, fmt, ap);
+    va_end(ap);
+    error = sdscatprintf(error, " (state: %s, rdb_channel_state: %s)",
+                         asmTaskStateToString(task->state),
+                         asmTaskStateToString(task->rdb_channel_state));
+    sdsfree(task->error);
+    task->error = error;
+
+    /* Log the error */
+    sds slot_ranges_str = createSlotRangesStr(task->slot_ranges);
+    serverLog(LL_WARNING, "%s task failed. slots=%s, err=%s",
+              task->operation == ASM_IMPORT ? "Import" : "Migrate",
+              slot_ranges_str, task->error);
+    sdsfree(slot_ranges_str);
+
+    if (task->operation == ASM_IMPORT)
+        asmImportSetFailed(task);
+    else
+        asmMigrateSetFailed(task);
 }
 
 void asmCallbackOnFreeClient(client *c) {
@@ -733,9 +736,7 @@ void asmCallbackOnFreeClient(client *c) {
         serverAssert(task->rdb_channel_state == ASM_RDBCHANNEL_TRANSFER);
         task->rdb_channel_conn = NULL; /* Will be freed by freeClient */
         c->flags &= ~CLIENT_MASTER;
-        asmTaskSetError(task, "Import rdb channel connection is closed, state: %s",
-                              asmTaskStateToString(task->rdb_channel_state));
-        asmImportFailed(task);
+        asmTaskSetFailed(task, "rdb channel - Connection is closed");
         return;
     }
 
@@ -744,9 +745,7 @@ void asmCallbackOnFreeClient(client *c) {
         serverAssert(task->state == ASM_WAIT_STREAM_EOF);
         task->main_channel_conn = NULL; /* Will be freed by freeClient */
         c->flags &= ~CLIENT_MASTER;
-        asmTaskSetError(task, "Import main channel connection is closed, state: %s",
-                              asmTaskStateToString(task->state));
-        asmImportFailed(task);
+        asmTaskSetFailed(task, "main channel - Connection is closed");
         return;
     }
 
@@ -764,9 +763,8 @@ void asmCallbackOnFreeClient(client *c) {
      * and clean up the RDB channel client if it exists. */
     if (c == task->main_channel_client) {
         task->main_channel_client = NULL;
-        asmTaskSetError(task, "Migrate main and rdb channel client are closed, state: %s",
-                              asmTaskStateToString(task->state));
-        asmMigrateFailed(task); /* The rdb channel client will be cleaned up */
+        /* The rdb channel client will be cleaned up */
+        asmTaskSetFailed(task, "main and rdb channel clients are disconnected.");
         return;
     }
 }
@@ -794,18 +792,16 @@ void asmRdbChannelSyncWithSource(connection *conn) {
 
     /* Check for errors in the socket: after a non blocking connect() we
      * may find that the socket is in error state. */
-    if (connGetState(conn) != CONN_STATE_CONNECTED) {
-        serverLog(LL_WARNING, "Error condition on socket for establishing rdb channel: %s",
-                connGetLastError(conn));
+    if (connGetState(conn) != CONN_STATE_CONNECTED)
         goto error;
-    }
 
     /* Check if the task is in a fail point state */
     if (unlikely(asmDebugIsFailPointActive(ASM_IMPORT_RDB_CHANNEL, task->rdb_channel_state))) {
         char buf[1];
-        /* Simulate a failure by shutting down the connection. On some operating systems
-         * (e.g. Linux), the socket’s receive buffer is not flushed immediately, so we
-         * issue a dummy read to drain any pending data and surface the error condition. */
+        /* Simulate a failure by shutting down the connection. On some operating
+         * systems (e.g. Linux), the socket’s receive buffer is not flushed
+         * immediately, so we issue a dummy read to drain any pending data and
+         * surface the error condition. */
         connShutdown(conn);
         connRead(conn, buf, 1);
     }
@@ -831,11 +827,10 @@ void asmRdbChannelSyncWithSource(connection *conn) {
             sdsfree(err);
             err = NULL;
             task->rdb_channel_state = ASM_SEND_RDBCHANNEL;
-            serverLog(LL_NOTICE, "Source node replied to AUTH command, slots rdb channel sync can continue...");
+            serverLog(LL_NOTICE, "Source node replied to AUTH command, syncslots rdb channel operation can continue...");
         } else {
             task_error_msg = sdscatprintf(sdsempty(),
                 "Error reply to AUTH from source: %s", err);
-            serverLog(LL_WARNING, "Error reply to AUTH from source: %s", err);
             sdsfree(err);
             goto error;
         }
@@ -870,12 +865,11 @@ void asmRdbChannelSyncWithSource(connection *conn) {
             c->user = NULL;
             c->task = task;
             serverLog(LL_NOTICE,
-                "Source node replied to SLOTSSNAPSHOT, sync slots snapshot can continue...");
+                "Source node replied to SLOTSSNAPSHOT, syncslots snapshot can continue...");
             sdsfree(err);
         } else {
             task_error_msg = sdscatprintf(sdsempty(),
                 "Error reply to CLUSTER SYNCSLOTS RDBCHANNEL from the source: %s", err);
-            serverLog(LL_WARNING,"Error reply to CLUSTER SYNCSLOTS RDBCHANNEL from the source: %s", err);
             sdsfree(err);
             goto error;
         }
@@ -884,26 +878,25 @@ void asmRdbChannelSyncWithSource(connection *conn) {
     return;
 
 no_response_error:
-    serverLog(LL_WARNING, "Source node did not respond to command during RDBCHANNELSYNCSLOTS handshake");
+    task_error_msg = sdsnew("Source node did not respond to command during RDBCHANNELSYNCSLOTS handshake");
     /* Fall through to regular error handling */
 
 error:
-    asmTaskSetError(task, "Import rdb channel failed to sync with source node: %s, state: %s",
-                          task_error_msg ? task_error_msg : connGetLastError(conn),
-                          asmTaskStateToString(task->rdb_channel_state));
-    asmImportFailed(task);
+    asmTaskSetFailed(task, "rdb channel - Failed to sync with the source node: %s",
+                     task_error_msg ? task_error_msg : connGetLastError(conn));
     sdsfree(task_error_msg);
     return;
 
 write_error: /* Handle sendCommand() errors. */
-    serverLog(LL_WARNING, "Failed sending command to the source: %s", err);
+    task_error_msg = sdscatprintf(sdsempty(), "Failed to send command to the source node: %s", err);
     sdsfree(err);
     goto error;
 }
 
 char *asmSendSlotRangesSync(connection *conn, asmTask *task) {
     /* Prepare CLUSTER SYNCSLOTS RANGES command */
-    size_t argc = task->slot_ranges->num_ranges*2 + 3;
+    serverAssert(task->slot_ranges->num_ranges <= CLUSTER_SLOTS);
+    int argc = task->slot_ranges->num_ranges*2 + 3;
     char **args = zcalloc(sizeof(char*) * argc);
     size_t *lens = zcalloc(sizeof(size_t) * argc);
 
@@ -914,7 +907,7 @@ char *asmSendSlotRangesSync(connection *conn, asmTask *task) {
     lens[1] = strlen("SYNCSLOTS");
     lens[2] = strlen("RANGES");
 
-    size_t i = 3;
+    int i = 3;
     for (int j = 0; j < task->slot_ranges->num_ranges; j++) {
         slotRange *sr = &task->slot_ranges->ranges[j];
         args[i] = sdscatprintf(sdsempty(), "%d", sr->start);
@@ -929,7 +922,7 @@ char *asmSendSlotRangesSync(connection *conn, asmTask *task) {
     char *err = sendCommandArgv(conn, argc, args, lens);
 
     /* Free allocated memory */
-    for (size_t j = 3; j < argc; j++) {
+    for (int j = 3; j < argc; j++) {
         sdsfree(args[j]);
     }
     zfree(args);
@@ -947,18 +940,16 @@ void asmSyncWithSource(connection *conn) {
 
     /* Check for errors in the socket: after a non blocking connect() we
      * may find that the socket is in error state. */
-    if (connGetState(conn) != CONN_STATE_CONNECTED) {
-        serverLog(LL_WARNING, "Error condition on socket for sync slots: %s",
-                connGetLastError(conn));
+    if (connGetState(conn) != CONN_STATE_CONNECTED)
         goto error;
-    }
 
     /* Check if the fail point is active for this channel and state */
     if (unlikely(asmDebugIsFailPointActive(ASM_IMPORT_MAIN_CHANNEL, task->state))) {
         char buf[1];
-        /* Simulate a failure by shutting down the connection. On some operating systems
-         * (e.g. Linux), the socket’s receive buffer is not flushed immediately, so we
-         * issue a dummy read to drain any pending data and surface the error condition. */
+        /* Simulate a failure by shutting down the connection. On some operating
+         * systems (e.g. Linux), the socket’s receive buffer is not flushed
+         * immediately, so we issue a dummy read to drain any pending data and
+         * surface the error condition. */
         connShutdown(conn);
         connRead(conn, buf, 1);
     }
@@ -983,11 +974,10 @@ void asmSyncWithSource(connection *conn) {
             sdsfree(err);
             err = NULL;
             task->state = ASM_SEND_HANDSHAKE;
-            serverLog(LL_NOTICE, "Source node replied to AUTH command, sync slots can continue...");
+            serverLog(LL_NOTICE, "Source node replied to AUTH command, syncslots can continue...");
         } else {
             task_error_msg = sdscatprintf(sdsempty(),
                 "Error reply to AUTH from the source: %s", err);
-            serverLog(LL_WARNING, "Error reply to AUTH from the source: %s", err);
             sdsfree(err);
             goto error;
         }
@@ -1012,11 +1002,10 @@ void asmSyncWithSource(connection *conn) {
             sdsfree(err);
             err = NULL;
             task->state = ASM_SEND_SYNCSLOTS;
-            serverLog(LL_NOTICE, "Source node replied to SYNCSLOTS CONF command, sync slots can continue...");
+            serverLog(LL_NOTICE, "Source node replied to SYNCSLOTS CONF command, syncslots can continue...");
         } else {
             task_error_msg = sdscatprintf(sdsempty(),
                 "Error reply to CLUSTER SYNCSLOTS CONF from the source: %s", err);
-            serverLog(LL_WARNING, "Error reply to SYNCSLOTS CONF from the source: %s", err);
             sdsfree(err);
             goto error;
         }
@@ -1043,21 +1032,18 @@ void asmSyncWithSource(connection *conn) {
             if (!client_id) {
                 task_error_msg = sdscatprintf(sdsempty(),
                     "Source node replied with wrong +RDBCHANNELSYNCSLOTS syntax: %s", err);
-                serverLog(LL_WARNING,
-                            "Source node replied with wrong +RDBCHANNELSYNC syntax: %s", err);
                 sdsfree(err);
                 goto error;
             }
-            task->main_channel_id = strtoll(client_id, NULL, 10);
+            task->main_channel_id = strtoull(client_id, NULL, 10);
             serverLog(LL_NOTICE,
-                "Source node replied to RDBCHANNELSYNCSLOTS, sync slots can continue...");
+                "Source node replied to RDBCHANNELSYNCSLOTS, syncslots can continue...");
             sdsfree(err);
             err = NULL;
             task->state = ASM_INIT_RDBCHANNEL;
         } else {
             task_error_msg = sdscatprintf(sdsempty(),
                 "Error reply to CLUSTER SYNCSLOTS RANGES from the source: %s", err);
-            serverLog(LL_WARNING, "Error reply to SYNCSLOTS RANGES from the source: %s", err);
             sdsfree(err);
             goto error;
         }
@@ -1091,15 +1077,13 @@ no_response_error:
     /* Fall through to regular error handling */
 
 error:
-    asmTaskSetError(task, "Import main channel failed to sync with source node: %s, state: %s",
-                          task_error_msg ? task_error_msg : connGetLastError(conn),
-                          asmTaskStateToString(task->state));
-    asmImportFailed(task);
+    asmTaskSetFailed(task, "main channel - Failed to sync with source node: %s",
+                     task_error_msg ? task_error_msg : connGetLastError(conn));
     sdsfree(task_error_msg);
     return;
 
 write_error: /* Handle sendCommand() errors. */
-    serverLog(LL_WARNING, "Failed sending command to source: %s", err);
+    serverLog(LL_WARNING, "Failed to send command to source node: %s", err);
     sdsfree(err);
     goto error;
 }
@@ -1108,16 +1092,14 @@ void asmImportSendACK(asmTask *task) {
     serverAssert(task->operation == ASM_IMPORT && task->state == ASM_WAIT_STREAM_EOF);
     serverLog(LL_NOTICE, "Destination node applied offset is %lld", task->dest_offset);
 
-    sds offset = sdsfromlonglong(task->dest_offset);
-    char *err = sendCommand(task->main_channel_conn, "CLUSTER", "SYNCSLOTS", "ACK", offset, NULL);
-    sdsfree(offset);
-    if (err == NULL) return;
+    char offset[64];
+    ull2string(offset, sizeof(offset), task->dest_offset);
 
-    serverLog(LL_WARNING, "Error sending CLUSTER SYNCSLOTS ACK: %s", err);
-    asmTaskSetError(task, "Import main channel sending ACK failed: %s, state: %s",
-                            err, asmTaskStateToString(task->state));
-    asmImportFailed(task);
-    sdsfree(err);
+    char *err = sendCommand(task->main_channel_conn, "CLUSTER", "SYNCSLOTS", "ACK", offset, NULL);
+    if (err) {
+        asmTaskSetFailed(task, "main channel - Failed to send ACK: %s", err);
+        sdsfree(err);
+    }
 }
 
 void asmStartSendBulkAndStream(struct asmTask *task) {
@@ -1143,7 +1125,7 @@ void clusterSyncSlotsSnapshotEOF(client *c) {
     {
         /* Unexpected SNAPSHOT-EOF command */
         serverLog(LL_WARNING, "Unexpected CLUSTER SYNCSLOTS SNAPSHOT-EOF command: "
-                              "rdb channel state: %s",
+                              "rdb_channel_state=%s",
                               asmTaskStateToString(task ? task->rdb_channel_state : ASM_NONE));
         freeClientAsync(c);
         return;
@@ -1163,7 +1145,7 @@ void clusterSyncSlotsSnapshotEOF(client *c) {
     /* Clear the RDB channel connection */
     task->rdb_channel_conn = NULL;
     task->rdb_channel_state = ASM_RDBCHANNEL_DONE;
-    serverLog(LL_NOTICE, "RDB channel snapshot transfer done for task");
+    serverLog(LL_NOTICE, "RDB channel snapshot transfer completed for the import task.");
 
     /* Free the RDB channel connection. */
     c->task = NULL;
@@ -1201,10 +1183,16 @@ void clusterSyncSlotsStreamEOF(client *c) {
     clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_WAIT_FINALIZE, NULL);
 }
 
-/* Start the sync slots task. */
-void asmStartSyncSlots(asmTask *task) {
+/* Start the import task. */
+void asmStartImportTask(asmTask *task) {
     if (task->operation != ASM_IMPORT || task->state != ASM_NONE) return;
 
+    sds slot_ranges_str = createSlotRangesStr(task->slot_ranges);
+    serverLog(LL_NOTICE, "Import task starting: src=%.40s, dest=%.40s, slots=%s",
+              task->source, task->dest, slot_ranges_str);
+    sdsfree(slot_ranges_str);
+
+    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_STARTED, NULL);
     /* TODO: async clean up slots data, and propagate to replica */
     clusterDelKeysInSlotRangeArray(task->slot_ranges, CLUSTER_DELKEYS_ASYNC);
 
@@ -1216,11 +1204,8 @@ void asmStartSyncSlots(asmTask *task) {
             server.tls_replication ? task->source_node->tls_port : task->source_node->tcp_port,
             server.bind_source_addr, asmSyncWithSource) == C_ERR)
     {
-        serverLog(LL_WARNING,"Unable to connect to source node: %s",
-                    connGetLastError(task->main_channel_conn));
-        asmTaskSetError(task, "Import main channel failed to connect to source node: %s",
-                        connGetLastError(task->main_channel_conn));
-        asmImportFailed(task);
+        asmTaskSetFailed(task, "main channel - Failed to connect to source node: %s",
+                         connGetLastError(task->main_channel_conn));
         return;
     }
     connSetPrivateData(task->main_channel_conn, task);
@@ -1257,7 +1242,8 @@ void clusterSyncSlotsCommand(client *c) {
 
         asmTask *task = listLength(asmManager->tasks) == 0 ? NULL :
                             listNodeValue(listFirst(asmManager->tasks));
-        if (task && task->operation == ASM_MIGRATE && task->state == ASM_FAILED &&
+        if (task && task->operation == ASM_MIGRATE &&
+            (task->state == ASM_FAILED  || task->state == ASM_CANCELED) &&
             slotRangeArrayIsEqual(slot_ranges, task->slot_ranges) &&
             memcmp(task->dest, c->node_id, CLUSTER_NAMELEN) == 0)
         {
@@ -1266,7 +1252,7 @@ void clusterSyncSlotsCommand(client *c) {
             zfree(task->slot_ranges); /* Will be set again later */
             task->retry_count++;
         } else if (task) {
-            addReplyError(c, "SYNCSLOTS RANGES already in progress");
+            addReplyError(c, "Another migration task is already in progress");
             zfree(slot_ranges);
             return;
         }
@@ -1297,13 +1283,12 @@ void clusterSyncSlotsCommand(client *c) {
         /* Wait for RDB channel to be ready */
         task->state = ASM_WAIT_RDBCHANNEL;
 
-        clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_STARTED, NULL);
-
         sds slot_ranges_str = createSlotRangesStr(slot_ranges);
-        serverLog(LL_NOTICE, "Migrate slots task created: source: %s, dest: %s, sync slot ranges: %s",
+        serverLog(LL_NOTICE, "Migrate task created: src=%.40s, dest=%.40s, slots=%s",
                               task->source, task->dest, slot_ranges_str);
         sdsfree(slot_ranges_str);
 
+        clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_STARTED, NULL);
         addReplyStatusFormat(c, "RDBCHANNELSYNCSLOTS %llu",
                                (unsigned long long) c->id);
     } else if (!strcasecmp(c->argv[2]->ptr, "rdbchannel") && c->argc == 4) {
@@ -1315,19 +1300,19 @@ void clusterSyncSlotsCommand(client *c) {
         }
 
         if (listLength(asmManager->tasks) == 0) {
-            addReplyError(c, "No migrate slots task in progress");
+            addReplyError(c, "No slot migration task in progress");
             return;
         }
 
         asmTask *task = listNodeValue(listFirst(asmManager->tasks));
         serverAssert(task->operation == ASM_MIGRATE);
-        if (task->main_channel_id != client_id) {
-            addReplyErrorFormat(c, "Export slots task client id mismatch");
+        if (task->main_channel_id != (unsigned long long) client_id) {
+            addReplyErrorFormat(c, "Slot migration task client ID mismatch");
             return;
         }
 
         if (unlikely(asmDebugIsFailPointActive(ASM_MIGRATE_MAIN_CHANNEL, task->state))) {
-            /* Close the main channel client before establishing rdb channel client */
+            /* Close the main channel client before rdb channel client connects */
             if (task->main_channel_client)
                 freeClient(task->main_channel_client);
         }
@@ -1380,7 +1365,7 @@ void clusterSyncSlotsCommand(client *c) {
             asmTask *task = c->task;
             if (task->state == ASM_STREAMING_BUF) {
                 /* Update the source offset*/
-                if (task->source_offset > offset) {
+                if (task->source_offset > (unsigned long long) offset) {
                     serverLog(LL_WARNING, "CLUSTER SYNCSLOTS ACK received, but offset %lld is less than the current source offset %lld",
                               offset, task->source_offset);
                     return;
@@ -1392,7 +1377,7 @@ void clusterSyncSlotsCommand(client *c) {
         } else if (c->task && c->task->operation == ASM_MIGRATE) {
             /* Update the ACKed offset from destination. */
             asmTask *task = c->task;
-            if (task->dest_offset > offset) {
+            if (task->dest_offset > (unsigned long long) offset) {
                 serverLog(LL_WARNING, "CLUSTER SYNCSLOTS ACK received, but offset %lld is less than the current destination offset %lld",
                         offset, task->dest_offset);
                 return;
@@ -1403,11 +1388,13 @@ void clusterSyncSlotsCommand(client *c) {
 
             /* Pause write if needed */
             if (task->state == ASM_SEND_BULK_AND_STREAM) {
-                /* Pause the write on the main channel connection if the gap is less
-                 * than the desired threshold. */
+                /* Pause writes on the main channel connection if the gap is
+                 * less than the desired threshold. */
                 if (task->dest_offset + ASM_PAUSE_WRITE_MAX_GAP_BYTES >= task->source_offset) {
-                    serverLog(LL_NOTICE, "The applied offset gap %lld is less than the threshold %d, pausing write",
-                                         task->source_offset - task->dest_offset, (int)ASM_PAUSE_WRITE_MAX_GAP_BYTES);
+                    serverLog(LL_NOTICE, "The applied offset gap %lld is less than the threshold %d, "
+                                         "pausing writes for slot handoff",
+                                         task->source_offset - task->dest_offset,
+                                         (int)ASM_PAUSE_WRITE_MAX_GAP_BYTES);
                     task->state = ASM_WAIT_PAUSE_WRITE;
                     clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_WAIT_PAUSE, NULL);
                 }
@@ -1426,13 +1413,14 @@ void clusterSyncSlotsCommand(client *c) {
             /* Handle each option here */
             if (!strcasecmp(c->argv[j]->ptr, "node-id")) {
                 sds node_id = c->argv[j + 1]->ptr;
-                if (sdslen(node_id) != CLUSTER_NAMELEN) {
-                    addReplyErrorFormat(c, "Invalid node id length %d", (int)sdslen(node_id));
+                int node_id_len = (int) sdslen(node_id);
+                if (node_id_len != CLUSTER_NAMELEN) {
+                    addReplyErrorFormat(c, "Invalid node id length %d", node_id_len);
                     return;
                 }
 
                 /* Lookup the node in the cluster. */
-                clusterNode *node = clusterLookupNode(node_id, sdslen(node_id));
+                clusterNode *node = clusterLookupNode(node_id, node_id_len);
                 if (node == NULL) {
                     addReplyErrorFormat(c, "Node %s not found in cluster", node_id);
                     return;
@@ -1540,12 +1528,8 @@ werr:
 
 /* Read error handler for sync buffer */
 static void asmReadSyncBufferErrorHandler(connection *conn) {
-    serverLog(LL_WARNING, "Import main channel buffer stream read error: %s",
-                          connGetLastError(conn));
     asmTask *task = connGetPrivateData(conn);
-    asmTaskSetError(task, "Import main channel buffer stream read error: %s, state: %s",
-                          connGetLastError(conn), asmTaskStateToString(task->state));
-    asmImportFailed(task);
+    asmTaskSetFailed(task, "main channel - Read error: %s", connGetLastError(conn));
 }
 
 /* Read data from connection into sync buffer. */
@@ -1560,16 +1544,16 @@ static void asmSyncBufferStreamYieldCallback(void *ctx) {
     replDataBufToDbCtx *context = ctx;
     client *c = context->client;
 
-    sds offset = sdsfromlonglong(context->applied_offset);
+    char offset[64];
+    ull2string(offset, sizeof(offset), context->applied_offset);
+
     char *err = sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "ACK", offset, NULL);
-    sdsfree(offset);
-    if (!err) return;
-
-    serverLog(LL_WARNING, "Error sending CLUSTER SYNCSLOTS ACK: %s", err);
-    sdsfree(err);
-
-    /* Since this client is protected, freeClient just masks it as closed */
-    freeClientAsync(c);
+    if (err) {
+        serverLog(LL_WARNING, "Error sending CLUSTER SYNCSLOTS ACK: %s", err);
+        sdsfree(err);
+        /* Since this client is protected, freeClient just masks it as closed */
+        freeClientAsync(c);
+    }
 }
 
 static int asmSyncBufferStreamShouldContinue(void *ctx) {
@@ -1594,7 +1578,8 @@ static int asmSyncBufferStreamShouldContinue(void *ctx) {
 /* Stream the sync buffer to the database. */
 void asmSyncBufferStreamToDb(asmTask *task) {
     serverAssert(task->state == ASM_STREAMING_BUF);
-    serverLog(LL_NOTICE, "Streaming buffer for task is started");
+    serverLog(LL_NOTICE, "Starting to stream accumulated buffer for the import task (%zu bytes)",
+                         task->sync_buffer.used);
 
     /* The buffered stream from the main channel connection into
      * the database is processed by a fake client. */
@@ -1624,7 +1609,7 @@ void asmSyncBufferStreamToDb(asmTask *task) {
         /* Wait STREAM-EOF from the source node. */
         task->state = ASM_WAIT_STREAM_EOF;
         connSetReadHandler(task->main_channel_conn, readQueryFromClient);
-        serverLog(LL_NOTICE, "Streaming buffer for task is done, applied offset: %lld",
+        serverLog(LL_NOTICE, "Successfully streamed accumulated buffer for the import task, applied offset: %lld",
                              task->dest_offset);
 
         if (unlikely(asmDebugIsFailPointActive(ASM_IMPORT_MAIN_CHANNEL, task->state)))
@@ -1640,11 +1625,7 @@ void asmSyncBufferStreamToDb(asmTask *task) {
         c->task = NULL;
         c->flags &= ~CLIENT_MASTER;
         freeClientAsync(c);
-
-        serverLog(LL_WARNING, "Streaming buffer for task failed");
-        asmTaskSetError(task, "Import main channel streaming to DB failed, state: %s",
-                              asmTaskStateToString(task->state));
-        asmImportFailed(task);
+        asmTaskSetFailed(task, "main channel - Failed to stream into the DB");
     }
 }
 
@@ -1659,12 +1640,10 @@ void asmBeforeSleep(void) {
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
 
     if (task->operation == ASM_IMPORT) {
-        if (task->state == ASM_NONE) {
-            clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_STARTED, NULL);
-            asmStartSyncSlots(task);
-        } else if (task->state == ASM_STREAMING_BUF) {
+        if (task->state == ASM_NONE)
+            asmStartImportTask(task);
+        else if (task->state == ASM_STREAMING_BUF)
             asmSyncBufferStreamToDb(task);
-        }
     }
 
     if (task->operation == ASM_MIGRATE) {
@@ -1672,31 +1651,29 @@ void asmBeforeSleep(void) {
             client *c = task->main_channel_client;
             /* The command streams for slot ranges have been drained. */
             if (!clientHasPendingReplies(c)) {
-                serverLog(LL_NOTICE, "The command streams for slot ranges have been drained, sending STREAM-EOF");
+                serverLog(LL_NOTICE, "Slot migration command stream drained, sending STREAM-EOF to the destination");
 
                 if (unlikely(asmDebugIsFailPointActive(ASM_MIGRATE_MAIN_CHANNEL, task->state)))
                     connShutdown(c->conn);
 
-                /* Send STREAM EOF, must use this approach to guarantee this command delivery */
+                /* Send STREAM-EOF to indicate the end of the stream. */
                 char *err = sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "STREAM-EOF", NULL);
                 if (err) {
-                    serverLog(LL_WARNING, "Error sending CLUSTER SYNCSLOTS STREAM-EOF: %s", err);
-                    asmTaskSetError(task, "Migrate main channel sending STREAM-EOF failed: %s, state: %s",
-                                          err, asmTaskStateToString(task->state));
-                    asmMigrateFailed(task);
+                    asmTaskSetFailed(task, "main channel - Failed to send STREAM-EOF: %s", err);
                     sdsfree(err);
                     return;
                 }
 
-               /* Even though the main channel client is no longer needed, we can't
-                * close it directly because the destination may still be sending ACKs
-                * over this connection. Instead, we leave it to the destination to
-                * close it. We just clear the task and client references */
+               /* Even though the main channel client is no longer needed, we
+                * can't close it directly because the destination may still be
+                * sending ACKs over this connection. Instead, we leave it to the
+                * destination to close it. We just clear the task and client
+                * references */
                 task->main_channel_client->task = NULL;
                 task->main_channel_client = NULL;
 
                 task->state = ASM_STREAM_DONE;
-                /* Notify plugin import is completed */
+                /* Notify plugin that import is completed */
                 clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_WAIT_FINALIZE, NULL);
             }
         }
@@ -1711,13 +1688,13 @@ void asmCron(void) {
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
 
     if (task->operation == ASM_IMPORT) {
-        if (task->state == ASM_FAILED) {
+        if (task->state == ASM_FAILED && task->state != ASM_CANCELED) {
             /* Retry every 1 second */
             if (asm_cron_runs % 10 == 0) {
                 asmTaskReset(task);
                 task->retry_count++;
                 serverAssert(task->state == ASM_NONE);
-                asmStartSyncSlots(task);
+                asmStartImportTask(task);
             }
         } else if (task->state == ASM_WAIT_STREAM_EOF) {
             asmImportSendACK(task);
@@ -1727,7 +1704,7 @@ void asmCron(void) {
 
 int clusterAsmImport(slotRangeArray *slot_ranges, sds *err) {
     if (validateSlotRanges(slot_ranges, err) != C_OK ||
-        asmStartImportTask(slot_ranges, err) != C_OK)
+        asmCreateImportTask(slot_ranges, err) != C_OK)
     {
         return C_ERR;
     }
@@ -1738,13 +1715,11 @@ int clusterAsmImport(slotRangeArray *slot_ranges, sds *err) {
 int clusterAsmCancel(slotRangeArray *slot_ranges, sds *err) {
     int num_cancelled = 0;
 
-    if (validateSlotRanges(slot_ranges, err) != C_OK) {
-        return -1;
-    }
+    if (validateSlotRanges(slot_ranges, err) != C_OK) return -1;
 
-    /* Cancel asm operations that overlaps with the slot ranges. */
+    /* Cancel ASM tasks that overlaps with the slot ranges. */
     for (int i = 0; i < slot_ranges->num_ranges; i++)
-        num_cancelled += cancelLinksForSlotRange(&slot_ranges->ranges[i]);
+        num_cancelled += cancelTasksForSlotRange(&slot_ranges->ranges[i]);
 
     return num_cancelled;
 }
@@ -1769,7 +1744,7 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
     asmTask *task = lookupAsmTaskBySlotRangeArray(slot_ranges);
     if (!task) {
         sds slot_ranges_str = createSlotRangesStr(slot_ranges);
-        serverLog(LL_WARNING, "No ASM task found for slot ranges: %s", slot_ranges_str);
+        serverLog(LL_WARNING, "No ASM task found for slots: %s", slot_ranges_str);
         sdsfree(slot_ranges_str);
         return C_ERR;
     }
@@ -1802,25 +1777,25 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
         clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_FINALIZED, NULL);
         return C_OK;
     } else {
-        serverLog(LL_WARNING, "ASM task is not in the correct state for new config update: %s",
+        serverLog(LL_WARNING, "ASM task is not in the correct state for config update: %s",
                   asmTaskStateToString(task->state));
         return C_ERR;
     }
 
-    return C_OK;
+    serverAssert(0); /* Unreachable */
 }
 
 int clusterAsmRequest(slotRangeArray *slot_ranges, int request, void *arg, sds *err) {
     UNUSED(arg);
 
     switch (request) {
-        case ASM_REQUEST_IMPORT_START:
+        case ASM_REQ_IMPORT_START:
             return clusterAsmImport(slot_ranges, err);
-        case ASM_REQUEST_IMPORT_CANCEL:
+        case ASM_REQ_IMPORT_CANCEL:
             return clusterAsmCancel(slot_ranges, err);
-        case ASM_REQUEST_MIGRATE_PAUSED:
+        case ASM_REQ_MIGRATE_NOTIFY_PAUSED:
             return clusterAsmSlotWritesPaused(slot_ranges, err);
-        case ASM_REQUEST_CONFIG_UPDATED:
+        case ASM_REQ_NOTIFY_CONFIG_UPDATED:
             return clusterAsmNotifyConfigUpdated(slot_ranges, err);
         default:
             *err = sdscatprintf(sdsempty(), "Unknown request: %d", request);
