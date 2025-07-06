@@ -188,11 +188,14 @@ start_cluster 3 3 {tags {external:skip cluster}} {
             }
 
             # The task should be failed due to the fail point
-            wait_for_condition 1000 50 {
+            wait_for_condition 1000 5 {
                 [string match "*$channel*${state}*" [migration_status 0 0-100 error]] ||
                 [string match "*$channel*${state}*" [migration_status 1 0-100 error]]
             } else {
-                fail "ASM task did not fail with expected error"
+                fail "ASM task did not fail with expected error -
+                     (src: [migration_status 0 0-100 error],
+                      dst: [migration_status 0 0-100 error],
+                      expected: $channel $state)"
             }
             R 1 config set rdb-key-save-delay 0
             stop_write_load $load_handle
