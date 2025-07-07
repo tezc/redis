@@ -2444,7 +2444,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
         sra->num_ranges++;
     }
     if (sra->num_ranges > 0 && server.masterhost == NULL) {
-        clusterAsmRequest(sra, ASM_REQ_NOTIFY_CONFIG_UPDATED, NULL, NULL);
+        clusterAsmProcess(sra, ASM_OP_NOTIFY_CONFIG_UPDATED, NULL, NULL);
     }
     zfree(sra);
 
@@ -6546,7 +6546,7 @@ int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
             clusterBumpConfigEpochWithoutConsensus();
             clusterBroadcastPong(CLUSTER_BROADCAST_ALL);
             clusterSaveConfigOrDie(1);
-            clusterAsmRequest(slot_ranges, ASM_REQ_NOTIFY_CONFIG_UPDATED, NULL, NULL);
+            clusterAsmProcess(slot_ranges, ASM_OP_NOTIFY_CONFIG_UPDATED, NULL, NULL);
             break;
         case ASM_EVENT_IMPORT_FINALIZED:
             serverLog(LL_NOTICE, "Import task finalized for slots: %s", str);
@@ -6563,7 +6563,7 @@ int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
             pauseActions(PAUSE_DURING_SLOT_HANDOFF,
                          LLONG_MAX,
                          PAUSE_ACTIONS_CLIENT_WRITE_SET);
-            clusterAsmRequest(slot_ranges, ASM_REQ_MIGRATE_NOTIFY_PAUSED, NULL, NULL);
+            clusterAsmProcess(slot_ranges, ASM_OP_NOTIFY_PAUSED, NULL, NULL);
             break;
         case ASM_EVENT_MIGRATE_WAIT_FINALIZE:
             serverLog(LL_NOTICE, "Migrate task is waiting to be finalized for slots: %s", str);

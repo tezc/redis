@@ -189,8 +189,8 @@ start_cluster 3 3 {tags {external:skip cluster}} {
 
             # The task should be failed due to the fail point
             wait_for_condition 1000 50 {
-                [string match "*$channel*${state}*" [migration_status 0 0-100 error]] ||
-                [string match "*$channel*${state}*" [migration_status 1 0-100 error]]
+                [string match -nocase "*$channel*${state}*" [migration_status 0 0-100 error]] ||
+                [string match -nocase "*$channel*${state}*" [migration_status 1 0-100 error]]
             } else {
                 fail "ASM task did not fail with expected error -
                      (dst: [migration_status 0 0-100 error],

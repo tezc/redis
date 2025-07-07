@@ -241,8 +241,6 @@ asmTask *asmTaskCreate(void) {
     task->create_time = server.mstime;
     task->start_time = 0;
     task->done_time = 0;
-    task->dest_offset = 0;
-    task->source_offset = 0;
 
     return task;
 }
@@ -260,6 +258,14 @@ static void asmMigrateCloseClients(asmTask *task) {
         task->rdb_channel_client->task = NULL;
         task->rdb_channel_client = NULL;
     }
+}
+
+/* Move the task to completed tasks list */
+void asmTaskComplete(asmTask *task) {
+    listNode *ln = listFirst(asmManager->tasks);
+    serverAssert(ln->value == task);
+    listUnlinkNode(asmManager->tasks, ln);
+    listLinkNodeHead(asmManager->done_tasks, ln);
 }
 
 static int compareSlotRange(const void *a, const void *b) {
@@ -538,13 +544,14 @@ static int cancelTasksForSlotRange(slotRange *req_range) {
     while ((ln = listNext(&li)) != NULL) {
         asmTask *task = listNodeValue(ln);
 
-        if (task->state == ASM_DONE || task->state == ASM_CANCELED)
+        if (task->state == ASM_DONE)
             continue;
 
         /* Cancel the task if it overlaps with the slot ranges of the task. */
         if (slotRangeArrayOverlaps(task->slot_ranges, req_range)) {
             asmTaskSetFailed(task, "Cancelled by user");
             task->state = ASM_CANCELED;
+            asmTaskComplete(task);
             num_cancelled++;
             continue;
         }
@@ -736,7 +743,7 @@ void asmCallbackOnFreeClient(client *c) {
         serverAssert(task->rdb_channel_state == ASM_RDBCHANNEL_TRANSFER);
         task->rdb_channel_conn = NULL; /* Will be freed by freeClient */
         c->flags &= ~CLIENT_MASTER;
-        asmTaskSetFailed(task, "rdb channel - Connection is closed");
+        asmTaskSetFailed(task, "RDB channel - Connection is closed");
         return;
     }
 
@@ -745,11 +752,14 @@ void asmCallbackOnFreeClient(client *c) {
         serverAssert(task->state == ASM_WAIT_STREAM_EOF);
         task->main_channel_conn = NULL; /* Will be freed by freeClient */
         c->flags &= ~CLIENT_MASTER;
-        asmTaskSetFailed(task, "main channel - Connection is closed");
+        asmTaskSetFailed(task, "Main channel - Connection is closed");
         return;
     }
 
     if (c == task->rdb_channel_client) {
+        /* TODO: Detect whether the bgsave is completed successfully and
+         * update the state properly. */
+        task->rdb_channel_state = ASM_RDBCHANNEL_DONE;
         /* We may not have detected whether the child process has exited yet,
          * so we can’t determine whether the client has completed the slots
          * snapshot transfer. If the RDB channel is interrupted unexpectedly,
@@ -764,7 +774,7 @@ void asmCallbackOnFreeClient(client *c) {
     if (c == task->main_channel_client) {
         task->main_channel_client = NULL;
         /* The rdb channel client will be cleaned up */
-        asmTaskSetFailed(task, "main and rdb channel clients are disconnected.");
+        asmTaskSetFailed(task, "Main and RDB channel clients are disconnected.");
         return;
     }
 }
@@ -882,7 +892,7 @@ no_response_error:
     /* Fall through to regular error handling */
 
 error:
-    asmTaskSetFailed(task, "rdb channel - Failed to sync with the source node: %s",
+    asmTaskSetFailed(task, "RDB channel - Failed to sync with the source node: %s",
                      task_error_msg ? task_error_msg : connGetLastError(conn));
     sdsfree(task_error_msg);
     return;
@@ -1079,7 +1089,7 @@ no_response_error:
     /* Fall through to regular error handling */
 
 error:
-    asmTaskSetFailed(task, "main channel - Failed to sync with source node: %s",
+    asmTaskSetFailed(task, "Main channel - Failed to sync with source node: %s",
                      task_error_msg ? task_error_msg : connGetLastError(conn));
     sdsfree(task_error_msg);
     return;
@@ -1099,7 +1109,7 @@ void asmImportSendACK(asmTask *task) {
 
     char *err = sendCommand(task->main_channel_conn, "CLUSTER", "SYNCSLOTS", "ACK", offset, NULL);
     if (err) {
-        asmTaskSetFailed(task, "main channel - Failed to send ACK: %s", err);
+        asmTaskSetFailed(task, "Main channel - Failed to send ACK: %s", err);
         sdsfree(err);
     }
 }
@@ -1113,6 +1123,7 @@ void asmStartSendBulkAndStream(struct asmTask *task) {
     }
 
     task->state = ASM_SEND_BULK_AND_STREAM;
+    task->rdb_channel_state = ASM_RDBCHANNEL_TRANSFER;
 }
 
 /* CLUSTER SYNCSLOTS SNAPSHOT-EOF
@@ -1208,7 +1219,7 @@ void asmStartImportTask(asmTask *task) {
     if (connConnect(task->main_channel_conn, ip, port, server.bind_source_addr,
                     asmSyncWithSource) == C_ERR)
     {
-        asmTaskSetFailed(task, "main channel - Failed to connect to source node: %s",
+        asmTaskSetFailed(task, "Main channel - Failed to connect to source node: %s",
                          connGetLastError(task->main_channel_conn));
         return;
     }
@@ -1246,8 +1257,7 @@ void clusterSyncSlotsCommand(client *c) {
 
         asmTask *task = listLength(asmManager->tasks) == 0 ? NULL :
                             listNodeValue(listFirst(asmManager->tasks));
-        if (task && task->operation == ASM_MIGRATE &&
-            (task->state == ASM_FAILED  || task->state == ASM_CANCELED) &&
+        if (task && task->operation == ASM_MIGRATE && task->state == ASM_FAILED &&
             slotRangeArrayIsEqual(slot_ranges, task->slot_ranges) &&
             memcmp(task->dest, c->node_id, CLUSTER_NAMELEN) == 0)
         {
@@ -1533,7 +1543,7 @@ werr:
 /* Read error handler for sync buffer */
 static void asmReadSyncBufferErrorHandler(connection *conn) {
     asmTask *task = connGetPrivateData(conn);
-    asmTaskSetFailed(task, "main channel - Read error: %s", connGetLastError(conn));
+    asmTaskSetFailed(task, "Main channel - Read error: %s", connGetLastError(conn));
 }
 
 /* Read data from connection into sync buffer. */
@@ -1629,7 +1639,7 @@ void asmSyncBufferStreamToDb(asmTask *task) {
         c->task = NULL;
         c->flags &= ~CLIENT_MASTER;
         freeClientAsync(c);
-        asmTaskSetFailed(task, "main channel - Failed to stream into the DB");
+        asmTaskSetFailed(task, "Main channel - Failed to stream into the DB");
     }
 }
 
@@ -1663,7 +1673,7 @@ void asmBeforeSleep(void) {
                 /* Send STREAM-EOF to indicate the end of the stream. */
                 char *err = sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "STREAM-EOF", NULL);
                 if (err) {
-                    asmTaskSetFailed(task, "main channel - Failed to send STREAM-EOF: %s", err);
+                    asmTaskSetFailed(task, "Main channel - Failed to send STREAM-EOF: %s", err);
                     sdsfree(err);
                     return;
                 }
@@ -1692,7 +1702,7 @@ void asmCron(void) {
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
 
     if (task->operation == ASM_IMPORT) {
-        if (task->state == ASM_FAILED && task->state != ASM_CANCELED) {
+        if (task->state == ASM_FAILED) {
             /* Retry every 1 second */
             if (asm_cron_runs % 10 == 0) {
                 asmTaskReset(task);
@@ -1761,9 +1771,7 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
         replDataBufClear(&task->sync_buffer); /* To save memory */
 
         /* Move the task to completed tasks */
-        listNode *ln = listFirst(asmManager->tasks);
-        listUnlinkNode(asmManager->tasks, ln);
-        listLinkNodeHead(asmManager->done_tasks, ln);
+        asmTaskComplete(task);
         clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_FINALIZED, NULL);
         return C_OK;
     } else if (task->operation == ASM_MIGRATE && task->state == ASM_STREAM_DONE) {
@@ -1774,10 +1782,8 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
         /* TODO: for plugin, we need to clean up the data of slot ranges
          * such as slotsflush */
 
-        /* Migrate task is done, just remove it from the list */
-        listNode *ln = listFirst(asmManager->tasks);
-        listUnlinkNode(asmManager->tasks, ln);
-        listLinkNodeHead(asmManager->done_tasks, ln);
+        /* Migrate task is done, move it to the completed tasks list */
+        asmTaskComplete(task);
         clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_FINALIZED, NULL);
         return C_OK;
     } else {
@@ -1789,20 +1795,20 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
     serverAssert(0); /* Unreachable */
 }
 
-int clusterAsmRequest(slotRangeArray *slot_ranges, int request, void *arg, sds *err) {
+int clusterAsmProcess(slotRangeArray *slot_ranges, int op, void *arg, sds *err) {
     UNUSED(arg);
 
-    switch (request) {
-        case ASM_REQ_IMPORT_START:
+    switch (op) {
+        case ASM_OP_IMPORT_START:
             return clusterAsmImport(slot_ranges, err);
-        case ASM_REQ_IMPORT_CANCEL:
+        case ASM_OP_IMPORT_CANCEL:
             return clusterAsmCancel(slot_ranges, err);
-        case ASM_REQ_MIGRATE_NOTIFY_PAUSED:
+        case ASM_OP_NOTIFY_PAUSED:
             return clusterAsmSlotWritesPaused(slot_ranges, err);
-        case ASM_REQ_NOTIFY_CONFIG_UPDATED:
+        case ASM_OP_NOTIFY_CONFIG_UPDATED:
             return clusterAsmNotifyConfigUpdated(slot_ranges, err);
         default:
-            *err = sdscatprintf(sdsempty(), "Unknown request: %d", request);
+            *err = sdscatprintf(sdsempty(), "Unknown operation: %d", op);
             return C_ERR;
     }
 }
