@@ -1677,7 +1677,7 @@ void asmBeforeSleep(void) {
                 task->main_channel_client = NULL;
 
                 task->state = ASM_STREAM_DONE;
-                /* Notify plugin that import is completed */
+                /* Notify plugin that migrate is completed */
                 clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_WAIT_FINALIZE, NULL);
             }
         }
