@@ -6558,12 +6558,12 @@ int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
             serverLog(LL_NOTICE, "Migrate task failed for slots: %s", str);
             unpauseActions(PAUSE_DURING_SLOT_HANDOFF);
             break;
-        case ASM_EVENT_FINALIZE_REQ:
-            serverLog(LL_NOTICE, "Migrate task is pausing writes for slots: %s", str);
+        case ASM_EVENT_HANDOFF_PREP:
+            serverLog(LL_NOTICE, "Migrate task preparing to handoff for slots: %s", str);
             pauseActions(PAUSE_DURING_SLOT_HANDOFF,
                          LLONG_MAX,
                          PAUSE_ACTIONS_CLIENT_WRITE_SET);
-            clusterAsmProcess(slot_ranges, ASM_EVENT_FINALIZE, NULL, NULL);
+            clusterAsmProcess(slot_ranges, ASM_EVENT_HANDOFF, NULL, NULL);
             break;
         case ASM_EVENT_MIGRATE_COMPLETED:
             serverLog(LL_NOTICE, "Migrate task finalized for slots: %s", str);

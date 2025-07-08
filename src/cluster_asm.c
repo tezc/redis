@@ -1410,7 +1410,7 @@ void clusterSyncSlotsCommand(client *c) {
                                          task->source_offset - task->dest_offset,
                                          (int)ASM_PAUSE_WRITE_MAX_GAP_BYTES);
                     task->state = ASM_WAIT_PAUSE_WRITE;
-                    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_FINALIZE_REQ, NULL);
+                    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_HANDOFF_PREP, NULL);
                 }
             }
         }
@@ -1736,7 +1736,7 @@ int clusterAsmCancel(slotRangeArray *slot_ranges, sds *err) {
     return num_cancelled;
 }
 
-int clusterAsmSlotWritesPaused(slotRangeArray *slot_ranges, sds *err) {
+int clusterAsmHandoff(slotRangeArray *slot_ranges, sds *err) {
     UNUSED(slot_ranges);
     UNUSED(err);
     /* find task matching slot ranges */
@@ -1801,8 +1801,8 @@ int clusterAsmProcess(slotRangeArray *slot_ranges, int event, void *arg, sds *er
             return clusterAsmImport(slot_ranges, err);
         case ASM_EVENT_IMPORT_CANCEL:
             return clusterAsmCancel(slot_ranges, err);
-        case ASM_EVENT_FINALIZE:
-            return clusterAsmSlotWritesPaused(slot_ranges, err);
+        case ASM_EVENT_HANDOFF:
+            return clusterAsmHandoff(slot_ranges, err);
         case ASM_EVENT_DONE:
             return clusterAsmNotifyConfigUpdated(slot_ranges, err);
         default:

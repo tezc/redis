@@ -177,9 +177,9 @@ int clusterNodeTlsPort(clusterNode *node);
  * - On destination side, implementation calls clusterAsmProcess(ASM_EVENT_IMPORT_START)
  *   to start the import operation.
  * - Redis calls clusterAsmOnEvent() when an event occurs.
- * - On the source side, Redis will call clusterAsmOnEvent(ASM_EVENT_FINALIZE_REQ)
+ * - On the source side, Redis will call clusterAsmOnEvent(ASM_EVENT_HANDOFF_PREP)
  *   when slots are ready to be handed off  and the write pause is needed.
- * - Implementation stops the traffic to the slots and calls clusterAsmProcess(ASM_EVENT_FINALIZE)
+ * - Implementation stops the traffic to the slots and calls clusterAsmProcess(ASM_EVENT_HANDOFF)
  * - On the destination side, Redis calls clusterAsmOnEvent(ASM_EVENT_AWAIT_FINALIZE)
  *   when destination node is ready to take over the slot, waiting for config change.
  * - Plugin updates the config and calls clusterAsmProcess(ASM_EVENT_DONE)
@@ -202,9 +202,9 @@ int clusterNodeTlsPort(clusterNode *node);
  *         │                              │◄────────────────────────┤                             │
  *         │                              │  Repl stream            │                             │
  *         │                              │◄────────────────────────┤                             │
- *         │                              │                         │   ASM_EVENT_FINALIZE_REQ    │
+ *         │                              │                         │   ASM_EVENT_HANDOFF_PREP    │
  *         │                              │                         ├────────────────────────────►│
- *         │                              │                         │     ASM_EVENT_FINALIZE      │
+ *         │                              │                         │     ASM_EVENT_HANDOFF       │
  *         │                              │                         │◄────────────────────────────┤
  *         │                              │ Drain repl stream       │                             │
  *         │                              │◄────────────────────────┤                             │
@@ -219,8 +219,8 @@ int clusterNodeTlsPort(clusterNode *node);
 
 #define ASM_EVENT_IMPORT_START      1  /* Start a new import operation (destination side) */
 #define ASM_EVENT_IMPORT_CANCEL     2  /* Cancel an ongoing import operation (destination side) */
-#define ASM_EVENT_FINALIZE_REQ      3  /* Slot is ready to be handed off to the destination shard (source side) */
-#define ASM_EVENT_FINALIZE          4  /* Notify that the slot can be handed off (source side) */
+#define ASM_EVENT_HANDOFF_PREP      3  /* Slot is ready to be handed off to the destination shard (source side) */
+#define ASM_EVENT_HANDOFF           4  /* Notify that the slot can be handed off (source side) */
 #define ASM_EVENT_AWAIT_FINALIZE    5  /* Ready to take over the slot, waiting for config change (destination side) */
 #define ASM_EVENT_DONE              6  /* Notify that config is updated (source and destination side) */
 
