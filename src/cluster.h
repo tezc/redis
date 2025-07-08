@@ -174,15 +174,15 @@ int clusterNodeTlsPort(clusterNode *node);
 
 /* API for implementation/plugin
  *
- * - On destination side, implementation calls clusterAsmProcess(ASM_OP_IMPORT_START)
- *   to start the import operation
+ * - On destination side, implementation calls clusterAsmProcess(ASM_EVENT_IMPORT_START)
+ *   to start the import operation.
  * - Redis calls clusterAsmOnEvent() when an event occurs.
- * - On the source side, Redis will call clusterAsmOnEvent(ASM_EVENT_MIGRATE_WAIT_PAUSE)
- *   when the write pause is needed.
- * - Implementation stops the traffic to the slots and calls clusterAsmProcess(ASM_OP_NOTIFY_PAUSED)
- * - On the destination side, Redis calls clusterAsmOnEvent(ASM_EVENT_IMPORT_WAIT_FINALIZE)
- *   when the import is completed.
- * - Plugin updates the config and calls clusterAsmProcess(ASM_OP_NOTIFY_CONFIG_UPDATED)
+ * - On the source side, Redis will call clusterAsmOnEvent(ASM_EVENT_FINALIZE_REQ)
+ *   when slots are ready to be handed off  and the write pause is needed.
+ * - Implementation stops the traffic to the slots and calls clusterAsmProcess(ASM_EVENT_FINALIZE)
+ * - On the destination side, Redis calls clusterAsmOnEvent(ASM_EVENT_AWAIT_FINALIZE)
+ *   when destination node is ready to take over the slot, waiting for config change.
+ * - Plugin updates the config and calls clusterAsmProcess(ASM_EVENT_DONE)
  *   to notify Redis that the config is updated.
  *
  * Sequence diagram for import:
@@ -193,7 +193,7 @@ int clusterNodeTlsPort(clusterNode *node);
  * │ Cluster plugin│              │ Master        │         │    Master     │             │ Cluster plugin│
  * └───────┬───────┘              └───────┬───────┘         └───────┬───────┘             └───────┬───────┘
  *         │                              │                         │                             │
- *         │     ASM_OP_IMPORT_START      │                         │                             │
+ *         │     ASM_EVENT_IMPORT_START   │                         │                             │
  *         ├─────────────────────────────►│                         │                             │
  *         │                              │ CLUSTER SYNCSLOTS <arg> │                             │
  *         │                              ├────────────────────────►│                             │
