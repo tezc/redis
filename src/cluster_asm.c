@@ -1193,7 +1193,7 @@ void clusterSyncSlotsStreamEOF(client *c) {
     freeClientAsync(c);
 
     task->state = ASM_SLOTS_HANDOFF;
-    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_WAIT_FINALIZE, NULL);
+    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_AWAIT_FINALIZE, NULL);
 }
 
 /* Start the import task. */
@@ -1410,7 +1410,7 @@ void clusterSyncSlotsCommand(client *c) {
                                          task->source_offset - task->dest_offset,
                                          (int)ASM_PAUSE_WRITE_MAX_GAP_BYTES);
                     task->state = ASM_WAIT_PAUSE_WRITE;
-                    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_WAIT_PAUSE, NULL);
+                    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_FINALIZE_REQ, NULL);
                 }
             }
         }
@@ -1687,8 +1687,6 @@ void asmBeforeSleep(void) {
                 task->main_channel_client = NULL;
 
                 task->state = ASM_STREAM_DONE;
-                /* Notify plugin that migrate is completed */
-                clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_WAIT_FINALIZE, NULL);
             }
         }
     }
@@ -1772,7 +1770,7 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
 
         /* Move the task to completed tasks */
         asmTaskComplete(task);
-        clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_FINALIZED, NULL);
+        clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_COMPLETED, NULL);
         return C_OK;
     } else if (task->operation == ASM_MIGRATE && task->state == ASM_STREAM_DONE) {
         task->state = ASM_DONE;
@@ -1784,7 +1782,7 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
 
         /* Migrate task is done, move it to the completed tasks list */
         asmTaskComplete(task);
-        clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_FINALIZED, NULL);
+        clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_COMPLETED, NULL);
         return C_OK;
     } else {
         serverLog(LL_WARNING, "ASM task is not in the correct state for config update: %s",
@@ -1795,20 +1793,20 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
     serverAssert(0); /* Unreachable */
 }
 
-int clusterAsmProcess(slotRangeArray *slot_ranges, int op, void *arg, sds *err) {
+int clusterAsmProcess(slotRangeArray *slot_ranges, int event, void *arg, sds *err) {
     UNUSED(arg);
 
-    switch (op) {
-        case ASM_OP_IMPORT_START:
+    switch (event) {
+        case ASM_EVENT_IMPORT_START:
             return clusterAsmImport(slot_ranges, err);
-        case ASM_OP_IMPORT_CANCEL:
+        case ASM_EVENT_IMPORT_CANCEL:
             return clusterAsmCancel(slot_ranges, err);
-        case ASM_OP_NOTIFY_PAUSED:
+        case ASM_EVENT_FINALIZE:
             return clusterAsmSlotWritesPaused(slot_ranges, err);
-        case ASM_OP_NOTIFY_CONFIG_UPDATED:
+        case ASM_EVENT_DONE:
             return clusterAsmNotifyConfigUpdated(slot_ranges, err);
         default:
-            *err = sdscatprintf(sdsempty(), "Unknown operation: %d", op);
+            *err = sdscatprintf(sdsempty(), "Unknown operation: %d", event);
             return C_ERR;
     }
 }

@@ -193,51 +193,55 @@ int clusterNodeTlsPort(clusterNode *node);
  * │ Cluster plugin│              │ Master        │         │    Master     │             │ Cluster plugin│
  * └───────┬───────┘              └───────┬───────┘         └───────┬───────┘             └───────┬───────┘
  *         │                              │                         │                             │
- *         │ ASM_OP_IMPORT_START          │                         │                             │
+ *         │     ASM_OP_IMPORT_START      │                         │                             │
  *         ├─────────────────────────────►│                         │                             │
- *         │                              │CLUSTER SYNCSLOTS <arg>  │                             │
+ *         │                              │ CLUSTER SYNCSLOTS <arg> │                             │
  *         │                              ├────────────────────────►│                             │
  *         │                              │                         │                             │
  *         │                              │  SNAPSHOT(restore cmds) │                             │
  *         │                              │◄────────────────────────┤                             │
  *         │                              │  Repl stream            │                             │
  *         │                              │◄────────────────────────┤                             │
- *         │                              │                         │ASM_EVENT_MIGRATE_WAIT_PAUSE │
+ *         │                              │                         │   ASM_EVENT_FINALIZE_REQ    │
  *         │                              │                         ├────────────────────────────►│
- *         │                              │                         │     ASM_OP_NOTIFY_PAUSED    │
+ *         │                              │                         │     ASM_EVENT_FINALIZE      │
  *         │                              │                         │◄────────────────────────────┤
  *         │                              │ Drain repl stream       │                             │
  *         │                              │◄────────────────────────┤                             │
- *         │ASM_EVENT_IMPORT_WAIT_FINALIZE│                         │                             │
+ *         │   ASM_EVENT_AWAIT_FINALIZE   │                         │                             │
  *         │◄─────────────────────────────┤                         │                             │
  *         │                              │                         │                             │
- *         │ ASM_OP_NOTIFY_CONFIG_UPDATED │                         │                             │
- *         ├─────────────────────────────►│                         │ASM_OP_NOTIFY_CONFIG_UPDATED │
+ *         │       ASM_EVENT_DONE         │                         │                             │
+ *         ├─────────────────────────────►│                         │       ASM_EVENT_DONE        │
  *         │                              │                         │◄────────────────────────────┤
  *         │                              │                         │                             │
  */
 
-#define ASM_OP_IMPORT_START          1  /* Start a new import operation (destination side) */
-#define ASM_OP_IMPORT_CANCEL         2  /* Cancel an ongoing import operation (destination side) */
-#define ASM_OP_NOTIFY_PAUSED         3  /* Notify that slot writes are paused (source side) */
-#define ASM_OP_NOTIFY_CONFIG_UPDATED 4  /* Notify that config is updated (source and destination side) */
+#define ASM_EVENT_IMPORT_START         1  /* Start a new import operation (destination side) */
+#define ASM_EVENT_IMPORT_CANCEL        2  /* Cancel an ongoing import operation (destination side) */
+#define ASM_EVENT_FINALIZE_REQ         3  /* Migrate operation waiting for slot writes to be paused (source side) */
+#define ASM_EVENT_FINALIZE             4  /* Notify that slot writes are paused (source side) */
+#define ASM_EVENT_AWAIT_FINALIZE       5  /* Import completed, waiting for config change */
+#define ASM_EVENT_DONE                 6  /* Notify that config is updated (source and destination side) */
 
-/* Called by implementation to request an ASM operation. */
-int clusterAsmProcess(slotRangeArray *slot_ranges, int op, void *arg, sds *err);
-
-#define ASM_EVENT_IMPORT_STARTED        1 /* Import started */
-#define ASM_EVENT_IMPORT_FAILED         2 /* Import failed */
-#define ASM_EVENT_IMPORT_WAIT_FINALIZE  3 /* Import completed, waiting for config change */
-#define ASM_EVENT_IMPORT_FINALIZED      4 /* TODO: decide if we need this to trigger when config is updated */
-
-#define ASM_EVENT_MIGRATE_STARTED       5 /* Migration started */
-#define ASM_EVENT_MIGRATE_FAILED        6 /* Migration failed */
-#define ASM_EVENT_MIGRATE_WAIT_PAUSE    7 /* Migrate operation waiting for slot writes to be paused */
-#define ASM_EVENT_MIGRATE_WAIT_FINALIZE 8 /* Migration completed */
-#define ASM_EVENT_MIGRATE_FINALIZED     9 /* TODO: decide if we need this to trigger when config is updated */
+#define ASM_EVENT_IMPORT_STARTED        7 /* Import started */
+#define ASM_EVENT_IMPORT_FAILED         8 /* Import failed */
+#define ASM_EVENT_IMPORT_COMPLETED      9 /* Import completed (config updated) */
+#define ASM_EVENT_MIGRATE_STARTED       10 /* Migration started */
+#define ASM_EVENT_MIGRATE_FAILED        11 /* Migration failed */
+#define ASM_EVENT_MIGRATE_COMPLETED     12 /* Migrate completed (config updated) */
 
 
-/* Called when an ASM event occurs to notify implementation/plugin. */
+/* Called by plugin/implementation to request an ASM operation. (plugin --> redis)
+ * Valid values for 'event':
+ *   ASM_EVENT_IMPORT_START
+ *   ASM_EVENT_IMPORT_CANCEL
+ *   ASM_EVENT_FINALIZE
+ *   ASM_EVENT_DONE
+ **/
+int clusterAsmProcess(slotRangeArray *slot_ranges, int event, void *arg, sds *err);
+
+/* Called when an ASM event occurs to notify implementation/plugin. (redis --> plugin) */
 int clusterAsmOnEvent(slotRangeArray *slot_ranges, int event, void *arg);
 
 #endif /* __CLUSTER_H */
