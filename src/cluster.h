@@ -224,9 +224,9 @@ int clusterNodeTlsPort(clusterNode *node);
 #define ASM_EVENT_AWAIT_FINALIZE    5  /* Ready to take over the slot, waiting for config change (destination side) */
 #define ASM_EVENT_DONE              6  /* Notify that config is updated (source and destination side) */
 
-#define ASM_EVENT_IMPORT_STARTED    7 /* Import started */
-#define ASM_EVENT_IMPORT_FAILED     8 /* Import failed */
-#define ASM_EVENT_IMPORT_COMPLETED  9 /* Import completed (config updated) */
+#define ASM_EVENT_IMPORT_STARTED    7  /* Import started */
+#define ASM_EVENT_IMPORT_FAILED     8  /* Import failed */
+#define ASM_EVENT_IMPORT_COMPLETED  9  /* Import completed (config updated) */
 #define ASM_EVENT_MIGRATE_STARTED   10 /* Migration started */
 #define ASM_EVENT_MIGRATE_FAILED    11 /* Migration failed */
 #define ASM_EVENT_MIGRATE_COMPLETED 12 /* Migrate completed (config updated) */
