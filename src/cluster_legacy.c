@@ -6532,8 +6532,8 @@ int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
         case ASM_EVENT_IMPORT_FAILED:
             serverLog(LL_NOTICE, "Import task failed for slots: %s", str);
             break;
-        case ASM_EVENT_AWAIT_FINALIZE:
-            serverLog(LL_NOTICE, "Import task is waiting to be finalized for slots: %s", str);
+        case ASM_EVENT_TAKEOVER:
+            serverLog(LL_NOTICE, "Import task is ready to takeover slots: %s", str);
 
             for (int i = 0; i < slot_ranges->num_ranges; i++) {
                 slotRange *sr = &slot_ranges->ranges[i];
@@ -6549,7 +6549,7 @@ int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
             clusterAsmProcess(slot_ranges, ASM_EVENT_DONE, NULL, NULL);
             break;
         case ASM_EVENT_IMPORT_COMPLETED:
-            serverLog(LL_NOTICE, "Import task finalized for slots: %s", str);
+            serverLog(LL_NOTICE, "Import task completed for slots: %s", str);
             break;
         case ASM_EVENT_MIGRATE_STARTED:
             serverLog(LL_NOTICE, "Migrate task started for slots: %s", str);
@@ -6566,7 +6566,7 @@ int clusterAsmOnEvent(slotRangeArray *slot_ranges, int state, void *arg) {
             clusterAsmProcess(slot_ranges, ASM_EVENT_HANDOFF, NULL, NULL);
             break;
         case ASM_EVENT_MIGRATE_COMPLETED:
-            serverLog(LL_NOTICE, "Migrate task finalized for slots: %s", str);
+            serverLog(LL_NOTICE, "Migrate task completed for slots: %s", str);
             unpauseActions(PAUSE_DURING_SLOT_HANDOFF);
             break;
         default:

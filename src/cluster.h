@@ -180,7 +180,7 @@ int clusterNodeTlsPort(clusterNode *node);
  * - On the source side, Redis will call clusterAsmOnEvent(ASM_EVENT_HANDOFF_PREP)
  *   when slots are ready to be handed off  and the write pause is needed.
  * - Implementation stops the traffic to the slots and calls clusterAsmProcess(ASM_EVENT_HANDOFF)
- * - On the destination side, Redis calls clusterAsmOnEvent(ASM_EVENT_AWAIT_FINALIZE)
+ * - On the destination side, Redis calls clusterAsmOnEvent(ASM_EVENT_TAKEOVER)
  *   when destination node is ready to take over the slot, waiting for config change.
  * - Plugin updates the config and calls clusterAsmProcess(ASM_EVENT_DONE)
  *   to notify Redis that the config is updated.
@@ -208,7 +208,7 @@ int clusterNodeTlsPort(clusterNode *node);
  *         │                              │                         │◄────────────────────────────┤
  *         │                              │ Drain repl stream       │                             │
  *         │                              │◄────────────────────────┤                             │
- *         │   ASM_EVENT_AWAIT_FINALIZE   │                         │                             │
+ *         │     ASM_EVENT_TAKEOVER       │                         │                             │
  *         │◄─────────────────────────────┤                         │                             │
  *         │                              │                         │                             │
  *         │       ASM_EVENT_DONE         │                         │                             │
@@ -221,7 +221,7 @@ int clusterNodeTlsPort(clusterNode *node);
 #define ASM_EVENT_IMPORT_CANCEL     2  /* Cancel an ongoing import operation (destination side) */
 #define ASM_EVENT_HANDOFF_PREP      3  /* Slot is ready to be handed off to the destination shard (source side) */
 #define ASM_EVENT_HANDOFF           4  /* Notify that the slot can be handed off (source side) */
-#define ASM_EVENT_AWAIT_FINALIZE    5  /* Ready to take over the slot, waiting for config change (destination side) */
+#define ASM_EVENT_TAKEOVER          5  /* Ready to take over the slot, waiting for config change (destination side) */
 #define ASM_EVENT_DONE              6  /* Notify that config is updated (source and destination side) */
 
 #define ASM_EVENT_IMPORT_STARTED    7  /* Import started */
