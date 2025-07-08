@@ -1800,6 +1800,7 @@ int clusterAsmProcess(slotRangeArray *slot_ranges, int event, void *arg, sds *er
         case ASM_EVENT_IMPORT_START:
             return clusterAsmImport(slot_ranges, err);
         case ASM_EVENT_IMPORT_CANCEL:
+        case ASM_EVENT_MIGRATE_CANCEL:
             return clusterAsmCancel(slot_ranges, err);
         case ASM_EVENT_HANDOFF:
             return clusterAsmHandoff(slot_ranges, err);

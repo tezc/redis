@@ -218,24 +218,26 @@ int clusterNodeTlsPort(clusterNode *node);
  */
 
 #define ASM_EVENT_IMPORT_START      1  /* Start a new import operation (destination side) */
-#define ASM_EVENT_IMPORT_CANCEL     2  /* Cancel an ongoing import operation (destination side) */
-#define ASM_EVENT_HANDOFF_PREP      3  /* Slot is ready to be handed off to the destination shard (source side) */
-#define ASM_EVENT_HANDOFF           4  /* Notify that the slot can be handed off (source side) */
-#define ASM_EVENT_TAKEOVER          5  /* Ready to take over the slot, waiting for config change (destination side) */
-#define ASM_EVENT_DONE              6  /* Notify that config is updated (source and destination side) */
+#define ASM_EVENT_IMPORT_CANCEL     2  /* Cancel an ongoing import operation (source side) */
+#define ASM_EVENT_MIGRATE_CANCEL    3  /* Cancel an ongoing migrate operation (destination side) */
+#define ASM_EVENT_HANDOFF_PREP      4  /* Slot is ready to be handed off to the destination shard (source side) */
+#define ASM_EVENT_HANDOFF           5  /* Notify that the slot can be handed off (source side) */
+#define ASM_EVENT_TAKEOVER          6  /* Ready to take over the slot, waiting for config change (destination side) */
+#define ASM_EVENT_DONE              7  /* Notify that config is updated (source and destination side) */
 
-#define ASM_EVENT_IMPORT_STARTED    7  /* Import started */
-#define ASM_EVENT_IMPORT_FAILED     8  /* Import failed */
-#define ASM_EVENT_IMPORT_COMPLETED  9  /* Import completed (config updated) */
-#define ASM_EVENT_MIGRATE_STARTED   10 /* Migration started */
-#define ASM_EVENT_MIGRATE_FAILED    11 /* Migration failed */
-#define ASM_EVENT_MIGRATE_COMPLETED 12 /* Migrate completed (config updated) */
+#define ASM_EVENT_IMPORT_STARTED    8  /* Import started */
+#define ASM_EVENT_IMPORT_FAILED     9  /* Import failed */
+#define ASM_EVENT_IMPORT_COMPLETED  10 /* Import completed (config updated) */
+#define ASM_EVENT_MIGRATE_STARTED   11 /* Migration started */
+#define ASM_EVENT_MIGRATE_FAILED    12 /* Migration failed */
+#define ASM_EVENT_MIGRATE_COMPLETED 13 /* Migrate completed (config updated) */
 
 
 /* Called by plugin/implementation to request an ASM operation. (plugin --> redis)
  * Valid values for 'event':
  *   ASM_EVENT_IMPORT_START
  *   ASM_EVENT_IMPORT_CANCEL
+ *   ASM_EVENT_MIGRATE_CANCEL
  *   ASM_EVENT_HANDOFF
  *   ASM_EVENT_DONE
  **/
