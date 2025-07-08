@@ -236,7 +236,7 @@ int clusterNodeTlsPort(clusterNode *node);
  * Valid values for 'event':
  *   ASM_EVENT_IMPORT_START
  *   ASM_EVENT_IMPORT_CANCEL
- *   ASM_EVENT_FINALIZE
+ *   ASM_EVENT_HANDOFF
  *   ASM_EVENT_DONE
  **/
 int clusterAsmProcess(slotRangeArray *slot_ranges, int event, void *arg, sds *err);
