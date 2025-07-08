@@ -84,7 +84,6 @@ enum asmState {
     ASM_SEND_RDBCHANNEL,
     ASM_RDBCHANNEL_REPLY,
     ASM_RDBCHANNEL_TRANSFER,
-    ASM_RDBCHANNEL_DONE
 };
 
 enum asmChannel {
@@ -151,7 +150,6 @@ char *asmTaskStateToString(int state) {
         case ASM_SEND_RDBCHANNEL: return "send-rdbchannel";
         case ASM_RDBCHANNEL_REPLY: return "rdbchannel-reply";
         case ASM_RDBCHANNEL_TRANSFER: return "rdbchannel-transfer";
-        case ASM_RDBCHANNEL_DONE: return "rdbchannel-done";
 
         default: return "unknown";
     }
@@ -759,7 +757,7 @@ void asmCallbackOnFreeClient(client *c) {
     if (c == task->rdb_channel_client) {
         /* TODO: Detect whether the bgsave is completed successfully and
          * update the state properly. */
-        task->rdb_channel_state = ASM_RDBCHANNEL_DONE;
+        task->rdb_channel_state = ASM_DONE;
         /* We may not have detected whether the child process has exited yet,
          * so we can’t determine whether the client has completed the slots
          * snapshot transfer. If the RDB channel is interrupted unexpectedly,
@@ -1121,6 +1119,7 @@ void asmStartSendBulkAndStream(struct asmTask *task) {
         connShutdown(task->rdb_channel_client->conn);
         return;
     }
+    task->main_channel_client->replstate = SLAVE_STATE_SEND_BULK_AND_STREAM;
 
     task->state = ASM_SEND_BULK_AND_STREAM;
     task->rdb_channel_state = ASM_RDBCHANNEL_TRANSFER;
@@ -1157,7 +1156,7 @@ void clusterSyncSlotsSnapshotEOF(client *c) {
 
     /* Clear the RDB channel connection */
     task->rdb_channel_conn = NULL;
-    task->rdb_channel_state = ASM_RDBCHANNEL_DONE;
+    task->rdb_channel_state = ASM_DONE;
     serverLog(LL_NOTICE, "RDB channel snapshot transfer completed for the import task.");
 
     /* Free the RDB channel connection. */
@@ -1305,6 +1304,17 @@ void clusterSyncSlotsCommand(client *c) {
         clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_STARTED, NULL);
         addReplyStatusFormat(c, "RDBCHANNELSYNCSLOTS %llu",
                                (unsigned long long) c->id);
+
+        /* We mark the main channel client as a slave after adding reply since in
+         * SLAVE_STATE_WAIT_RDB_CHANNEL state, we can't add reply to the client, then
+         * this client is limited by the client output buffer settings for replicas.
+         * The repl state is not meaningful, just to prevent it from going online. */
+        c->flags |= (CLIENT_SLAVE | CLIENT_REPL_MIGRATION_DEST);
+        c->replstate = SLAVE_STATE_WAIT_RDB_CHANNEL;
+        if (server.repl_disable_tcp_nodelay)
+            connDisableTcpNoDelay(c->conn);  /* Non critical if it fails. */
+        listAddNodeTail(server.slaves, c);
+        createReplicationBacklogIfNeeded();
     } else if (!strcasecmp(c->argv[2]->ptr, "rdbchannel") && c->argc == 4) {
         /* CLUSTER SYNCSLOTS RDBCHANNEL <client-id> */
         long long client_id;
@@ -1337,7 +1347,7 @@ void clusterSyncSlotsCommand(client *c) {
             return;
         }
 
-        /* Mark the client as a slave */
+        /* Mark the client as a slave to generate slots snapshot */
         c->flags |= (CLIENT_SLAVE | CLIENT_REPL_RDB_CHANNEL | CLIENT_REPL_RDBONLY | CLIENT_REPL_MIGRATION_DEST);
         c->slave_capa |= SLAVE_CAPA_EOF;
         c->slave_req |= (SLAVE_REQ_SLOTS_SNAPSHOT | SLAVE_REQ_RDB_CHANNEL);
@@ -1346,11 +1356,10 @@ void clusterSyncSlotsCommand(client *c) {
         if (server.repl_disable_tcp_nodelay)
             connDisableTcpNoDelay(c->conn); /* Non critical if it fails. */
         listAddNodeTail(server.slaves, c);
-        /* Create the replication backlog if needed. */
-        createReplicationBacklogIfNeeded();
 
         /* Wait for bgsave to start for slots sync */
         task->state = ASM_WAIT_BGSAVE_START;
+        task->rdb_channel_state = ASM_WAIT_BGSAVE_START;
         task->rdb_channel_client = c;
         c->task = task;
 
