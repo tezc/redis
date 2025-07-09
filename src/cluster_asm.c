@@ -1288,20 +1288,11 @@ void clusterSyncSlotsCommand(client *c) {
         sds task_id = c->argv[3]->ptr;
         asmTask *task = listLength(asmManager->tasks) == 0 ? NULL :
                             listNodeValue(listFirst(asmManager->tasks));
-        if (task && !strcmp(task->id, task_id)) {
-            if (task->operation != ASM_MIGRATE ||
-                !slotRangeArrayIsEqual(slot_ranges, task->slot_ranges) ||
-                memcmp(task->dest, c->node_id, CLUSTER_NAMELEN) != 0)
-            {
-                addReplyError(c, "ID belongs to a different task");
-                zfree(slot_ranges);
-                return;
-            }
-            if (task->state != ASM_FAILED) {
-                addReplyError(c, "Task is already in progress");
-                zfree(slot_ranges);
-                return;
-            }
+        if (task && !strcmp(task->id, task_id) &&
+            task->operation == ASM_MIGRATE && task->state == ASM_FAILED &&
+            slotRangeArrayIsEqual(slot_ranges, task->slot_ranges) &&
+            memcmp(task->dest, c->node_id, CLUSTER_NAMELEN) == 0)
+        {
             /* Reuse the failed task */
             asmTaskReset(task);
             zfree(task->slot_ranges); /* Will be set again later */
