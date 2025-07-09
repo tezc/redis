@@ -273,6 +273,9 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         } else { set port [lindex [R 0 config get port] 1] }
         set load_handle [start_write_load "127.0.0.1" $port 100 "06S"]
 
+        set loglines [count_log_lines 0]
+
+        # Start the migration
         assert_equal {OK} [R 1 CLUSTER MIGRATION IMPORT 0 100]
 
         # Wait for the migration to complete
@@ -284,8 +287,10 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         wait_for_condition 1000 50 {
             [string match {*send-bulk-and-stream*} [migration_status 0 0-100 error]]
         } else {
-            fail "ASM task did not fail with expected error, src: [migration_status 0 0-100 error]"
+            fail "ASM task did not fail with expected error, current error: [migration_status 0 0-100 error]"
         }
+        wait_for_log_messages 0 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 1000 10
+
         resume_process $r1_pid
         stop_write_load $load_handle
     }
