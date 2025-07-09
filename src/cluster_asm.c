@@ -1233,7 +1233,7 @@ void asmStartImportTask(asmTask *task) {
               task->source, task->dest, slot_ranges_str);
     sdsfree(slot_ranges_str);
 
-    clusterAsmOnEvent(task->id, ASM_EVENT_IMPORT_STARTED, NULL);
+    clusterAsmOnEvent(task->id, ASM_EVENT_IMPORT_STARTED, task->slot_ranges);
     /* TODO: async clean up slots data, and propagate to replica */
     clusterDelKeysInSlotRangeArray(task->slot_ranges, CLUSTER_DELKEYS_ASYNC);
 
@@ -1338,7 +1338,7 @@ void clusterSyncSlotsCommand(client *c) {
                               task->source, task->dest, slot_ranges_str);
         sdsfree(slot_ranges_str);
 
-        clusterAsmOnEvent(task->id, ASM_EVENT_MIGRATE_STARTED, NULL);
+        clusterAsmOnEvent(task->id, ASM_EVENT_MIGRATE_STARTED, task->slot_ranges);
         addReplyStatusFormat(c, "RDBCHANNELSYNCSLOTS %llu",
                                (unsigned long long) c->id);
     } else if (!strcasecmp(c->argv[2]->ptr, "rdbchannel") && c->argc == 4) {
@@ -1446,7 +1446,7 @@ void clusterSyncSlotsCommand(client *c) {
                                          task->source_offset - task->dest_offset,
                                          (int)ASM_PAUSE_WRITE_MAX_GAP_BYTES);
                     task->state = ASM_HANDOFF_PREP;
-                    clusterAsmOnEvent(task->id, ASM_EVENT_HANDOFF_PREP, NULL);
+                    clusterAsmOnEvent(task->id, ASM_EVENT_HANDOFF_PREP, task->slot_ranges);
                 }
             }
         }
