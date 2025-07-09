@@ -1840,7 +1840,10 @@ int asmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
 int clusterAsmDone(sds *task_id, sds *err) {
     UNUSED(err);
     asmTask *task = lookupAsmTaskById(*task_id);
-    if (!task) return C_ERR;
+    if (!task) {
+        *err = sdscatprintf(sdsempty(), "No ASM task found for id: %s", *task_id);
+        return C_ERR;
+    }
     return asmNotifyConfigUpdated(task->slot_ranges, err);
 }
 
