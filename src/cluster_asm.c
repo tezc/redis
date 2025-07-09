@@ -586,9 +586,12 @@ static void clusterMigrationCommandCancel(client *c) {
             addReplyErrorArity(c);
             return;
         }
+    } else {
+        addReplyError(c, "Missing ID or ALL argument");
+        return;
     }
 
-    num_cancelled = clusterAsmCancel(&task_id, &err);
+    num_cancelled = clusterAsmProcess(&task_id, ASM_EVENT_CANCEL, NULL, &err);
     if (num_cancelled < 0) {
         addReplyError(c, err);
         sdsfree(err);
