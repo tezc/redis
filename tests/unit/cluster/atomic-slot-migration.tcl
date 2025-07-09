@@ -1,8 +1,9 @@
 proc migration_status {node_id slots_range field} {
     set status [R $node_id CLUSTER MIGRATION STATUS]
+    set tasks [dict get $status tasks]
 
     # Iterate through each migration operation
-    foreach operation $status {
+    foreach operation $tasks {
         set slots_found ""
         set field_value ""
 
@@ -149,7 +150,7 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         R 3 readonly
         assert_equal [string repeat c 100] [R 3 get $slot101_key]
 
-        R 0 config set rdb-key-save-delay 1000000
+        R 0 config set rdb-key-save-delay 0
     }
 
     global send_migration_import_0_100
@@ -160,9 +161,11 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         foreach state $all_states {
             if {$::verbose} { puts "Testing $operation $channel channel with state: $state"}
 
-            # for streaming-buffer state, we need to set a longer delay to write
-            # incremental data to the main channel
-            if {$state eq "streaming-buffer"} { R 1 config set rdb-key-save-delay 1000000 }
+            # for `streaming-buffer` and `send-bulk-and-stream` state, we need to set
+            # a longer delay to write incremental data to the main channel
+            if {$state eq "streaming-buffer" || $state eq "send-bulk-and-stream"} {
+                R 1 config set rdb-key-save-delay 1000000
+            }
 
             # Start the slot 0 write load on the R 1
             if {$::tls} { set port [lindex [R 1 config get tls-port] 1]
@@ -193,8 +196,8 @@ start_cluster 3 3 {tags {external:skip cluster}} {
                 [string match -nocase "*$channel*${state}*" [migration_status 1 0-100 error]]
             } else {
                 fail "ASM task did not fail with expected error -
-                     (dst: [migration_status 0 0-100 error],
-                      src: [migration_status 1 0-100 error],
+                     (dst: [migration_status 0 0-100 error]
+                      src: [migration_status 1 0-100 error]
                       expected: $channel $state)"
             }
             R 1 config set rdb-key-save-delay 0
@@ -253,5 +256,37 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         after 100
         R 3 readonly
         assert_equal [string repeat b 100] [R 3 get "Qi"]
+        R 1 config set rdb-key-save-delay 0
+    }
+
+    test "client output buffer limit is reached on source side" {
+        set r1_pid [getInfoProperty [R 1 info] process_id]
+        R 1 debug repl-pause on-streaming-repl-buf
+
+        # Set output buffer limit to trigger the error
+        R 0 config set client-output-buffer-limit "replica 10mb 0 0"
+        # we set a delay to write incremental data
+        R 0 config set rdb-key-save-delay 1000000
+
+        # Start the slot 0 write load on the R 0
+        if {$::tls} { set port [lindex [R 0 config get tls-port] 1]
+        } else { set port [lindex [R 0 config get port] 1] }
+        set load_handle [start_write_load "127.0.0.1" $port 100 "06S"]
+
+        assert_equal {OK} [R 1 CLUSTER MIGRATION IMPORT 0 100]
+
+        # Wait for the migration to complete
+        wait_for_condition 1000 50 {
+            [string match {*send-bulk-and-stream*} [migration_status 0 0-100 state]]
+        } else {
+            fail "ASM task did not start"
+        }
+        wait_for_condition 1000 50 {
+            [string match {*send-bulk-and-stream*} [migration_status 0 0-100 error]]
+        } else {
+            fail "ASM task did not fail with expected error, src: [migration_status 0 0-100 error]"
+        }
+        resume_process $r1_pid
+        stop_write_load $load_handle
     }
 }

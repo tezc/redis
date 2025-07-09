@@ -15,6 +15,7 @@
 #define ASM_IMPORT  (1 << 1)
 #define ASM_MIGRATE (1 << 2)
 
+#define ASM_MAX_DONE_TASKS 32 /* Maximum number of completed tasks to keep in memory. */
 #define ASM_PAUSE_WRITE_MAX_GAP_BYTES (1 * 1024 * 1024) /* 1MB, TODO: a new config */
 
 typedef struct asmTask {
@@ -81,7 +82,7 @@ enum asmState {
     ASM_STREAM_DONE,
 
     /* RDB channel state */
-    ASM_SEND_RDBCHANNEL,
+    ASM_RDBCHANNEL_REQUEST,
     ASM_RDBCHANNEL_REPLY,
     ASM_RDBCHANNEL_TRANSFER,
 };
@@ -147,7 +148,7 @@ char *asmTaskStateToString(int state) {
         case ASM_STREAM_DONE: return "stream-done";
 
         /* RDB channel state */
-        case ASM_SEND_RDBCHANNEL: return "send-rdbchannel";
+        case ASM_RDBCHANNEL_REQUEST: return "rdbchannel-request";
         case ASM_RDBCHANNEL_REPLY: return "rdbchannel-reply";
         case ASM_RDBCHANNEL_TRANSFER: return "rdbchannel-transfer";
 
@@ -237,33 +238,39 @@ asmTask *asmTaskCreate(void) {
     task->source_node = NULL;
     task->retry_count = 0;
     task->create_time = server.mstime;
-    task->start_time = 0;
-    task->done_time = 0;
+    task->start_time = -1;
+    task->done_time = -1;
 
     return task;
 }
 
-static void asmMigrateCloseClients(asmTask *task) {
-    serverAssert(task->operation == ASM_MIGRATE);
-
-    if (task->main_channel_client) {
-        freeClientAsync(task->main_channel_client);
-        task->main_channel_client->task = NULL;
-        task->main_channel_client = NULL;
-    }
-    if (task->rdb_channel_client) {
-        freeClientAsync(task->rdb_channel_client);
-        task->rdb_channel_client->task = NULL;
-        task->rdb_channel_client = NULL;
-    }
-}
-
-/* Move the task to completed tasks list */
+/* The task is done or canceled and won't be retried. Update stats and
+ * move it to the completed list, trim if necessary. */
 void asmTaskComplete(asmTask *task) {
     listNode *ln = listFirst(asmManager->tasks);
     serverAssert(ln->value == task);
+
+    task->done_time = server.mstime;
+    asmManager->total_done_tasks++;
+
+    if (task->operation == ASM_IMPORT) {
+        asmManager->sync_buffer_peak = max(asmManager->sync_buffer_peak,
+                                           task->sync_buffer.peak);
+        replDataBufClear(&task->sync_buffer); /* To save memory */
+    }
+
     listUnlinkNode(asmManager->tasks, ln);
     listLinkNodeHead(asmManager->done_tasks, ln);
+
+    /* Trim the done tasks list if it grows too large */
+    if (listLength(asmManager->done_tasks) > ASM_MAX_DONE_TASKS) {
+        asmTask *oldest = listNodeValue(listLast(asmManager->done_tasks));
+        replDataBufClear(&oldest->sync_buffer);
+        zfree(oldest->slot_ranges);
+        sdsfree(oldest->error);
+        zfree(oldest);
+        listDelNode(asmManager->done_tasks, listLast(asmManager->done_tasks));
+    }
 }
 
 static int compareSlotRange(const void *a, const void *b) {
@@ -588,7 +595,7 @@ static void clusterMigrationCommandCancel(client *c) {
 static void replyTaskStatus(client *c, asmTask *task) {
     mstime_t p = 0;
 
-    addReplyMapLen(c, 8);
+    addReplyMapLen(c, 11);
     addReplyBulkCString(c, "slots_range");
     addReplyBulkSds(c, createSlotRangesStr(task->slot_ranges));
     addReplyBulkCString(c, "source");
@@ -603,6 +610,12 @@ static void replyTaskStatus(client *c, asmTask *task) {
     addReplyBulkCBuffer(c, task->error, sdslen(task->error));
     addReplyBulkCString(c, "retries");
     addReplyBulkLongLong(c, task->retry_count);
+    addReplyBulkCString(c, "create_time");
+    addReplyBulkLongLong(c, task->create_time);
+    addReplyBulkCString(c, "start_time");
+    addReplyBulkLongLong(c, task->start_time);
+    addReplyBulkCString(c, "done_time");
+    addReplyBulkLongLong(c, task->done_time);
 
     if (task->operation == ASM_MIGRATE && task->state == ASM_DONE)
         p = task->done_time - task->paused_time;
@@ -611,11 +624,25 @@ static void replyTaskStatus(client *c, asmTask *task) {
 }
 
 /* CLUSTER MIGRATION STATUS
- *  - Reply: Array of atomic slot migration links */
+ *  - Reply: Array of atomic slot migration tasks */
 static void clusterMigrationCommandStatus(client *c) {
     listIter li;
     listNode *ln;
 
+    /* Compute peak sync buffer usage. The current task's peak may not
+     * reflect in asmManager->sync_buffer_peak immediately. */
+    size_t peak = asmManager->sync_buffer_peak;
+    asmTask *task = listFirst(asmManager->tasks) ?
+                    listNodeValue(listFirst(asmManager->tasks)) : NULL;
+    if (task && task->operation == ASM_IMPORT)
+        peak = max(task->sync_buffer.peak, asmManager->sync_buffer_peak);
+
+    addReplyMapLen(c, 3);
+    addReplyBulkCString(c, "total_done_tasks");
+    addReplyLongLong(c, asmManager->total_done_tasks);
+    addReplyBulkCString(c, "sync_buffer_peak");
+    addReplyLongLong(c, peak);
+    addReplyBulkCString(c, "tasks");
     addReplyArrayLen(c, listLength(asmManager->tasks) + listLength(asmManager->done_tasks));
 
     listRewind(asmManager->tasks, &li);
@@ -692,8 +719,17 @@ void asmMigrateSetFailed(asmTask *task) {
     serverAssert(task->operation == ASM_MIGRATE);
     if (task->state == ASM_FAILED) return;
 
-    /* Clients cleanup */
-    asmMigrateCloseClients(task);
+    /* Close the RDB and main channel clients*/
+    if (task->rdb_channel_client) {
+        freeClientAsync(task->rdb_channel_client);
+        task->rdb_channel_client->task = NULL;
+        task->rdb_channel_client = NULL;
+    }
+    if (task->main_channel_client) {
+        freeClientAsync(task->main_channel_client);
+        task->main_channel_client->task = NULL;
+        task->main_channel_client = NULL;
+    }
 
     /* Actually it is not necessary to clear the sync buffer here,
      * to make asmTaskReset work properly after migrate task failed  */
@@ -834,7 +870,7 @@ void asmRdbChannelSyncWithSource(connection *conn) {
         if (!strcmp(err, "+OK")) {
             sdsfree(err);
             err = NULL;
-            task->rdb_channel_state = ASM_SEND_RDBCHANNEL;
+            task->rdb_channel_state = ASM_RDBCHANNEL_REQUEST;
             serverLog(LL_NOTICE, "Source node replied to AUTH command, syncslots rdb channel operation can continue...");
         } else {
             task_error_msg = sdscatprintf(sdsempty(),
@@ -844,7 +880,7 @@ void asmRdbChannelSyncWithSource(connection *conn) {
         }
     }
 
-    if (task->rdb_channel_state == ASM_SEND_RDBCHANNEL) {
+    if (task->rdb_channel_state == ASM_RDBCHANNEL_REQUEST) {
         char cid[LONG_STR_SIZE];
         ull2string(cid, sizeof(cid), task->main_channel_id);
 
@@ -867,7 +903,7 @@ void asmRdbChannelSyncWithSource(connection *conn) {
 
             task->rdb_channel_state = ASM_RDBCHANNEL_TRANSFER;
             client *c = createClient(conn);
-            c->flags |= CLIENT_MASTER;
+            c->flags |= (CLIENT_MASTER | CLIENT_INTERNAL);
             c->querybuf = sdsempty();
             c->authenticated = 1;
             c->user = NULL;
@@ -1227,6 +1263,11 @@ void asmStartImportTask(asmTask *task) {
 }
 
 void clusterSyncSlotsCommand(client *c) {
+    if (!(c->flags & CLIENT_INTERNAL)) {
+        addReplyError(c, "CLUSTER SYNCSLOTS subcommands are only allowed for internal clients");
+        return;
+    }
+
     if (!strcasecmp(c->argv[2]->ptr, "ranges") && c->argc >= 5) {
         /* CLUSTER SYNCSLOTS RANGES <start-slot> <end-slot> [<start-slot> <end-slot>] */
         if (c->argc % 2 == 0) {
@@ -1308,7 +1349,7 @@ void clusterSyncSlotsCommand(client *c) {
         /* We mark the main channel client as a slave after adding reply since in
          * SLAVE_STATE_WAIT_RDB_CHANNEL state, we can't add reply to the client, then
          * this client is limited by the client output buffer settings for replicas.
-         * The repl state is not meaningful, just to prevent it from going online. */
+         * The replstate has no real significance, just to prevent it from going online. */
         c->flags |= (CLIENT_SLAVE | CLIENT_REPL_MIGRATION_DEST);
         c->replstate = SLAVE_STATE_WAIT_RDB_CHANNEL;
         if (server.repl_disable_tcp_nodelay)
@@ -1347,12 +1388,16 @@ void clusterSyncSlotsCommand(client *c) {
             return;
         }
 
+        /* The main channel client must be present when setting RDB channel client */
+        serverAssert(task->main_channel_client != NULL);
+
         /* Mark the client as a slave to generate slots snapshot */
         c->flags |= (CLIENT_SLAVE | CLIENT_REPL_RDB_CHANNEL | CLIENT_REPL_RDBONLY | CLIENT_REPL_MIGRATION_DEST);
         c->slave_capa |= SLAVE_CAPA_EOF;
         c->slave_req |= (SLAVE_REQ_SLOTS_SNAPSHOT | SLAVE_REQ_RDB_CHANNEL);
         c->replstate = SLAVE_STATE_WAIT_BGSAVE_START;
         c->repldbfd = -1;
+        c->slave_listening_port = task->main_channel_client->slave_listening_port;
         if (server.repl_disable_tcp_nodelay)
             connDisableTcpNoDelay(c->conn); /* Non critical if it fails. */
         listAddNodeTail(server.slaves, c);
@@ -1362,9 +1407,6 @@ void clusterSyncSlotsCommand(client *c) {
         task->rdb_channel_state = ASM_WAIT_BGSAVE_START;
         task->rdb_channel_client = c;
         c->task = task;
-
-        /* The main channel client must be present when setting RDB channel client */
-        serverAssert(task->main_channel_client != NULL);
 
         if (!hasActiveChildProcess()) {
             startBgsaveForReplication(c->slave_capa, c->slave_req);
@@ -1607,7 +1649,7 @@ void asmSyncBufferStreamToDb(asmTask *task) {
     /* The buffered stream from the main channel connection into
      * the database is processed by a fake client. */
     client *c = createClient(task->main_channel_conn);
-    c->flags |= CLIENT_MASTER;
+    c->flags |= (CLIENT_MASTER | CLIENT_INTERNAL);
     c->querybuf = sdsempty();
     c->authenticated = 1;
     c->user = NULL;
@@ -1772,24 +1814,14 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
 
     if (task->operation == ASM_IMPORT && task->state == ASM_TAKEOVER) {
         task->state = ASM_DONE;
-        task->done_time = server.mstime;
-        asmManager->total_done_tasks++;
-        asmManager->sync_buffer_peak = max(asmManager->sync_buffer_peak, task->sync_buffer.peak);
-        replDataBufClear(&task->sync_buffer); /* To save memory */
-
-        /* Move the task to completed tasks */
         asmTaskComplete(task);
         clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_COMPLETED, NULL);
         return C_OK;
     } else if (task->operation == ASM_MIGRATE && task->state == ASM_STREAM_DONE) {
-        task->state = ASM_DONE;
-        task->done_time = server.mstime;
-        asmManager->total_done_tasks++;
-
         /* TODO: for plugin, we need to clean up the data of slot ranges
          * such as slotsflush */
 
-        /* Migrate task is done, move it to the completed tasks list */
+        task->state = ASM_DONE;
         asmTaskComplete(task);
         clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_COMPLETED, NULL);
         return C_OK;
