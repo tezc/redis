@@ -19,6 +19,7 @@
 #define ASM_PAUSE_WRITE_MAX_GAP_BYTES (1 * 1024 * 1024) /* 1MB, TODO: a new config */
 
 typedef struct asmTask {
+    sds id;                             /* Task ID */
     int operation;                      /* Either ASM_IMPORT or ASM_MIGRATE */
     slotRangeArray *slot_ranges;        /* List of slot ranges for this migration task */
     int state;                          /* Current state of the task */
@@ -108,6 +109,7 @@ int startBgsaveForReplication(int mincapa, int req);
 void createReplicationBacklogIfNeeded(void);
 static void asmSyncBufferReadFromConn(connection *conn);
 void asmTaskSetFailed(asmTask *task, const char *fmt, ...);
+int clusterAsmCancel(sds *task_id, sds *err);
 
 void clusterAsmInit(void) {
     asmManager = zcalloc(sizeof(*asmManager));
@@ -230,7 +232,7 @@ void asmTaskReset(asmTask *task) {
     task->rdb_channel_client = NULL;
 }
 
-asmTask *asmTaskCreate(void) {
+asmTask *asmTaskCreate(sds task_id) {
     asmTask *task = zcalloc(sizeof(*task));
     task->error = sdsempty();
     asmTaskReset(task);
@@ -240,6 +242,12 @@ asmTask *asmTaskCreate(void) {
     task->create_time = server.mstime;
     task->start_time = -1;
     task->done_time = -1;
+    if (task_id) {
+        task->id = sdsdup(task_id);
+    } else {
+        task->id = sdsnewlen(NULL, CLUSTER_NAMELEN);
+        getRandomHexChars(task->id, CLUSTER_NAMELEN);
+    }
 
     return task;
 }
@@ -298,6 +306,19 @@ static int slotRangeArrayIsEqual(slotRangeArray *sra1, slotRangeArray *sra2) {
     return 1;
 }
 
+/* Returns the ASM task with the given ID, or NULL if no such task exists. */
+asmTask *lookupAsmTaskById(sds id) {
+    listIter li;
+    listNode *ln;
+
+    listRewind(asmManager->tasks, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        asmTask *task = listNodeValue(ln);
+        if (!strcmp(task->id, id)) return task;
+    }
+    return NULL;
+}
+
 /* Returns the ASM task that is identical to the given slot range array, or NULL
  * if no such task exists. */
 asmTask *lookupAsmTaskBySlotRangeArray(slotRangeArray *sra) {
@@ -311,6 +332,14 @@ asmTask *lookupAsmTaskBySlotRangeArray(slotRangeArray *sra) {
             return task;
     }
     return NULL;
+}
+
+/* Returns the slot range array for the given task ID */
+slotRangeArray *asmTaskGetSlotRanges(sds task_id) {
+    asmTask *task = NULL;
+    if (!task_id || (task = lookupAsmTaskById(task_id)) == NULL) return NULL;
+
+    return task->slot_ranges;
 }
 
 /* Returns 1 if the slot range array overlaps with the given slot range. */
@@ -470,7 +499,7 @@ void asmFeedMigrationClient(robj **argv, int argc) {
     task->source_offset += (getNormalClientPendingReplyBytes(c) - prev_bytes);
 }
 
-int asmCreateImportTask(slotRangeArray *slot_ranges, sds *err) {
+sds asmCreateImportTask(slotRangeArray *slot_ranges, sds *err) {
     clusterNode *source;
 
     *err = NULL;
@@ -479,23 +508,23 @@ int asmCreateImportTask(slotRangeArray *slot_ranges, sds *err) {
     source = validateImportSlotRanges(slot_ranges, err);
     if (!source) {
         zfree(slot_ranges);
-        return C_ERR;
+        return NULL;
     }
 
     if (source == getMyClusterNode()) {
         *err = sdsnew("this node is already the owner of the slot range");
         zfree(slot_ranges);
-        return C_ERR;
+        return NULL;
     }
 
     if (listLength(asmManager->tasks) != 0) {
         *err = sdsnew("another ASM task is already in progress");
         zfree(slot_ranges);
-        return C_ERR;
+        return NULL;
     }
 
     /* Create a slot migration task */
-    asmTask *task = asmTaskCreate();
+    asmTask *task = asmTaskCreate(NULL);
     task->slot_ranges = slot_ranges;
     task->state = ASM_NONE;
     task->operation = ASM_IMPORT;
@@ -512,7 +541,7 @@ int asmCreateImportTask(slotRangeArray *slot_ranges, sds *err) {
     /* Start the import task */
     asmStartImportTask(task);
 
-    return C_OK;
+    return task->id;
 }
 
 /* CLUSTER MIGRATION IMPORT <start-slot end-slot [start-slot end-slot ...]>
@@ -530,72 +559,63 @@ static void clusterMigrationCommandImport(client *c) {
     if (!slot_ranges) return;
 
     sds err = NULL;
-    if (asmCreateImportTask(slot_ranges, &err) != C_OK) {
+    sds task_id = asmCreateImportTask(slot_ranges, &err);
+    if (!task_id) {
         addReplyErrorSds(c, err);
         return;
     }
 
-    addReply(c, shared.ok);
+    addReplyBulkCString(c, task_id);
 }
 
-/* Cancel atomic slot migration tasks that overlap with the given slot
- * range. Returns the number of cancelled tasks. */
-static int cancelTasksForSlotRange(slotRange *req_range) {
-    int num_cancelled = 0;
-    listIter li;
-    listNode *ln;
-
-    listRewind(asmManager->tasks, &li);
-    while ((ln = listNext(&li)) != NULL) {
-        asmTask *task = listNodeValue(ln);
-
-        if (task->state == ASM_DONE)
-            continue;
-
-        /* Cancel the task if it overlaps with the slot ranges of the task. */
-        if (slotRangeArrayOverlaps(task->slot_ranges, req_range)) {
-            asmTaskSetFailed(task, "Cancelled by user");
-            task->state = ASM_CANCELED;
-            asmTaskComplete(task);
-            num_cancelled++;
-            continue;
-        }
-    }
-    return num_cancelled;
-}
-
-/* CLUSTER MIGRATION CANCEL <start-slot end-slot [start-slot end-slot ...]>
+/* CLUSTER MIGRATION CANCEL [ID <id> | ALL]
  *   - Reply: Number of cancelled tasks
  *
  * Cancels import tasks that overlap with the specified slot ranges.
  * Multiple tasks may be cancelled. */
 static void clusterMigrationCommandCancel(client *c) {
-    int remaining, num_cancelled = 0;
-    slotRangeArray *slot_ranges;
+    sds err = NULL;
+    sds task_id = NULL;
+    int num_cancelled = 0;
 
     /* Validate slot range arg count */
-    remaining = c->argc - 3;
-    if (remaining == 0 || remaining % 2 != 0) {
+    if (c->argc < 3) {
         addReplyErrorArity(c);
         return;
     }
 
-    slot_ranges = parseSlotRangesOrReply(c, c->argc, 3);
-    if (!slot_ranges) return;
+    if (!strcasecmp(c->argv[3]->ptr, "id")) {
+        if (c->argc != 5) {
+            addReplyErrorArity(c);
+            return;
+        }
+        task_id = c->argv[4]->ptr;
+    } else if (!strcasecmp(c->argv[3]->ptr, "all")) {
+        if (c->argc != 4) {
+            addReplyErrorArity(c);
+            return;
+        }
+    } else {
+        addReplyError(c, "Missing ID or ALL argument");
+        return;
+    }
 
-    /* Cancel ASM tasks that overlap with the slot ranges. */
-    for (int i = 0; i < slot_ranges->num_ranges; i++)
-        num_cancelled += cancelTasksForSlotRange(&slot_ranges->ranges[i]);
-
+    num_cancelled = clusterAsmCancel(&task_id, &err);
+    if (num_cancelled < 0) {
+        addReplyError(c, err);
+        sdsfree(err);
+        return;
+    }
     addReplyLongLong(c, num_cancelled);
-    zfree(slot_ranges);
 }
 
 /* Reply with the status of the task. */
 static void replyTaskStatus(client *c, asmTask *task) {
     mstime_t p = 0;
 
-    addReplyMapLen(c, 11);
+    addReplyMapLen(c, 12);
+    addReplyBulkCString(c, "id");
+    addReplyBulkCString(c, task->id);
     addReplyBulkCString(c, "slots_range");
     addReplyBulkSds(c, createSlotRangesStr(task->slot_ranges));
     addReplyBulkCString(c, "source");
@@ -712,7 +732,7 @@ void asmImportSetFailed(asmTask *task) {
 
     /* Mark the task as failed and notify the cluster */
     task->state = ASM_FAILED;
-    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_FAILED, NULL);
+    clusterAsmOnEvent(task->id, ASM_EVENT_IMPORT_FAILED, NULL);
 }
 
 void asmMigrateSetFailed(asmTask *task) {
@@ -737,7 +757,7 @@ void asmMigrateSetFailed(asmTask *task) {
 
     /* Mark the task as failed and notify the cluster */
     task->state = ASM_FAILED;
-    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_FAILED, NULL);
+    clusterAsmOnEvent(task->id, ASM_EVENT_MIGRATE_FAILED, NULL);
 }
 
 void asmTaskSetFailed(asmTask *task, const char *fmt, ...) {
@@ -765,6 +785,14 @@ void asmTaskSetFailed(asmTask *task, const char *fmt, ...) {
         asmImportSetFailed(task);
     else
         asmMigrateSetFailed(task);
+}
+
+void asmTaskCancel(asmTask *task) {
+    if (task->state == ASM_CANCELED) return;
+
+    asmTaskSetFailed(task, "Cancelled by user");
+    task->state = ASM_CANCELED;
+    asmTaskComplete(task);
 }
 
 void asmCallbackOnFreeClient(client *c) {
@@ -940,18 +968,20 @@ write_error: /* Handle sendCommand() errors. */
 char *asmSendSlotRangesSync(connection *conn, asmTask *task) {
     /* Prepare CLUSTER SYNCSLOTS RANGES command */
     serverAssert(task->slot_ranges->num_ranges <= CLUSTER_SLOTS);
-    int argc = task->slot_ranges->num_ranges*2 + 3;
+    int argc = task->slot_ranges->num_ranges*2 + 4;
     char **args = zcalloc(sizeof(char*) * argc);
     size_t *lens = zcalloc(sizeof(size_t) * argc);
 
     args[0] = "CLUSTER";
     args[1] = "SYNCSLOTS";
     args[2] = "RANGES";
+    args[3] = task->id;
     lens[0] = strlen("CLUSTER");
     lens[1] = strlen("SYNCSLOTS");
     lens[2] = strlen("RANGES");
+    lens[3] = sdslen(task->id);
 
-    int i = 3;
+    int i = 4;
     for (int j = 0; j < task->slot_ranges->num_ranges; j++) {
         slotRange *sr = &task->slot_ranges->ranges[j];
         args[i] = sdscatprintf(sdsempty(), "%d", sr->start);
@@ -966,7 +996,7 @@ char *asmSendSlotRangesSync(connection *conn, asmTask *task) {
     char *err = sendCommandArgv(conn, argc, args, lens);
 
     /* Free allocated memory */
-    for (int j = 3; j < argc; j++) {
+    for (int j = 4; j < argc; j++) {
         sdsfree(args[j]);
     }
     zfree(args);
@@ -1228,7 +1258,7 @@ void clusterSyncSlotsStreamEOF(client *c) {
     freeClientAsync(c);
 
     task->state = ASM_TAKEOVER;
-    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_TAKEOVER, NULL);
+    clusterAsmOnEvent(task->id, ASM_EVENT_TAKEOVER, NULL);
 }
 
 /* Start the import task. */
@@ -1240,7 +1270,7 @@ void asmStartImportTask(asmTask *task) {
               task->source, task->dest, slot_ranges_str);
     sdsfree(slot_ranges_str);
 
-    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_STARTED, NULL);
+    clusterAsmOnEvent(task->id, ASM_EVENT_IMPORT_STARTED, task->slot_ranges);
     /* TODO: async clean up slots data, and propagate to replica */
     clusterDelKeysInSlotRangeArray(task->slot_ranges, CLUSTER_DELKEYS_ASYNC);
 
@@ -1268,14 +1298,14 @@ void clusterSyncSlotsCommand(client *c) {
         return;
     }
 
-    if (!strcasecmp(c->argv[2]->ptr, "ranges") && c->argc >= 5) {
-        /* CLUSTER SYNCSLOTS RANGES <start-slot> <end-slot> [<start-slot> <end-slot>] */
-        if (c->argc % 2 == 0) {
+    if (!strcasecmp(c->argv[2]->ptr, "ranges") && c->argc >= 6) {
+        /* CLUSTER SYNCSLOTS RANGES <ID> <start-slot> <end-slot> [<start-slot> <end-slot>] */
+        if (c->argc % 2 == 1) {
             addReplyErrorArity(c);
             return;
         }
 
-        slotRangeArray *slot_ranges = parseSlotRangesOrReply(c, c->argc, 3);
+        slotRangeArray *slot_ranges = parseSlotRangesOrReply(c, c->argc, 4);
         if (!slot_ranges) return;
 
         /* Validate that the slot ranges are valid and that migration can be
@@ -1295,9 +1325,11 @@ void clusterSyncSlotsCommand(client *c) {
             return;
         }
 
+        sds task_id = c->argv[3]->ptr;
         asmTask *task = listLength(asmManager->tasks) == 0 ? NULL :
                             listNodeValue(listFirst(asmManager->tasks));
-        if (task && task->operation == ASM_MIGRATE && task->state == ASM_FAILED &&
+        if (task && !strcmp(task->id, task_id) &&
+            task->operation == ASM_MIGRATE && task->state == ASM_FAILED &&
             slotRangeArrayIsEqual(slot_ranges, task->slot_ranges) &&
             memcmp(task->dest, c->node_id, CLUSTER_NAMELEN) == 0)
         {
@@ -1314,7 +1346,7 @@ void clusterSyncSlotsCommand(client *c) {
         /* Create the migrate slots task and add it to the list,
          * otherwise reuse the existing one */
         if (task == NULL) {
-            task = asmTaskCreate();
+            task = asmTaskCreate(task_id);
             task->start_time = server.mstime; /* Start immediately */
             listAddNodeTail(asmManager->tasks, task);
         }
@@ -1342,7 +1374,7 @@ void clusterSyncSlotsCommand(client *c) {
                               task->source, task->dest, slot_ranges_str);
         sdsfree(slot_ranges_str);
 
-        clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_STARTED, NULL);
+        clusterAsmOnEvent(task->id, ASM_EVENT_MIGRATE_STARTED, task->slot_ranges);
         addReplyStatusFormat(c, "RDBCHANNELSYNCSLOTS %llu",
                                (unsigned long long) c->id);
 
@@ -1461,7 +1493,7 @@ void clusterSyncSlotsCommand(client *c) {
                                          task->source_offset - task->dest_offset,
                                          (int)ASM_PAUSE_WRITE_MAX_GAP_BYTES);
                     task->state = ASM_HANDOFF_PREP;
-                    clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_HANDOFF_PREP, NULL);
+                    clusterAsmOnEvent(task->id, ASM_EVENT_HANDOFF_PREP, task->slot_ranges);
                 }
             }
         }
@@ -1765,33 +1797,35 @@ void asmCron(void) {
     }
 }
 
-int clusterAsmImport(slotRangeArray *slot_ranges, sds *err) {
-    if (validateSlotRanges(slot_ranges, err) != C_OK ||
-        asmCreateImportTask(slot_ranges, err) != C_OK)
-    {
-        return C_ERR;
+/* Cancel a specific task if ID is provided, otherwise cancel all tasks. */
+int clusterAsmCancel(sds *task_id, sds *err) {
+    if (*task_id) {
+        asmTask *task = lookupAsmTaskById(*task_id);
+        if (!task) {
+            *err = sdscatprintf(sdsempty(), "No ASM task found for id: %s", *task_id);
+            return -1;
+        }
+        asmTaskCancel(task);
+        return 1;
+    } else {
+        int num_cancelled = 0;
+        listIter li;
+        listNode *ln;
+
+        listRewind(asmManager->tasks, &li);
+        while ((ln = listNext(&li)) != NULL) {
+            asmTask *task = listNodeValue(ln);
+            asmTaskCancel(task);
+            num_cancelled++;
+        }
+        return num_cancelled;
     }
-
-    return C_OK;
 }
 
-int clusterAsmCancel(slotRangeArray *slot_ranges, sds *err) {
-    int num_cancelled = 0;
-
-    if (validateSlotRanges(slot_ranges, err) != C_OK) return -1;
-
-    /* Cancel ASM tasks that overlaps with the slot ranges. */
-    for (int i = 0; i < slot_ranges->num_ranges; i++)
-        num_cancelled += cancelTasksForSlotRange(&slot_ranges->ranges[i]);
-
-    return num_cancelled;
-}
-
-int clusterAsmHandoff(slotRangeArray *slot_ranges, sds *err) {
-    UNUSED(slot_ranges);
+int clusterAsmHandoff(sds *task_id, sds *err) {
     UNUSED(err);
-    /* find task matching slot ranges */
-    asmTask *task = listNodeValue(listFirst(asmManager->tasks));
+
+    asmTask *task = lookupAsmTaskById(*task_id);
     if (!task || task->state != ASM_HANDOFF_PREP) return C_ERR;
 
     task->state = ASM_HANDOFF;
@@ -1800,7 +1834,7 @@ int clusterAsmHandoff(slotRangeArray *slot_ranges, sds *err) {
     return C_OK;
 }
 
-int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
+int asmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
     UNUSED(err);
     /* TODO: Validation, cancel asmTasks if required */
 
@@ -1814,16 +1848,16 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
 
     if (task->operation == ASM_IMPORT && task->state == ASM_TAKEOVER) {
         task->state = ASM_DONE;
+        clusterAsmOnEvent(task->id, ASM_EVENT_IMPORT_COMPLETED, NULL);
         asmTaskComplete(task);
-        clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_IMPORT_COMPLETED, NULL);
         return C_OK;
     } else if (task->operation == ASM_MIGRATE && task->state == ASM_STREAM_DONE) {
         /* TODO: for plugin, we need to clean up the data of slot ranges
          * such as slotsflush */
 
         task->state = ASM_DONE;
+        clusterAsmOnEvent(task->id, ASM_EVENT_MIGRATE_COMPLETED, NULL);
         asmTaskComplete(task);
-        clusterAsmOnEvent(task->slot_ranges, ASM_EVENT_MIGRATE_COMPLETED, NULL);
         return C_OK;
     } else {
         serverLog(LL_WARNING, "ASM task is not in the correct state for config update: %s",
@@ -1834,19 +1868,31 @@ int clusterAsmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
     serverAssert(0); /* Unreachable */
 }
 
-int clusterAsmProcess(slotRangeArray *slot_ranges, int event, void *arg, sds *err) {
+/* Import/Migrate task is done, config is updated. */
+int clusterAsmDone(sds *task_id, sds *err) {
+    UNUSED(err);
+    asmTask *task = lookupAsmTaskById(*task_id);
+    if (!task) {
+        *err = sdscatprintf(sdsempty(), "No ASM task found for id: %s", *task_id);
+        return C_ERR;
+    }
+    return asmNotifyConfigUpdated(task->slot_ranges, err);
+}
+
+int clusterAsmProcess(sds *task_id, int event, void *arg, sds *err) {
     UNUSED(arg);
 
     switch (event) {
         case ASM_EVENT_IMPORT_START:
-            return clusterAsmImport(slot_ranges, err);
-        case ASM_EVENT_IMPORT_CANCEL:
-        case ASM_EVENT_MIGRATE_CANCEL:
-            return clusterAsmCancel(slot_ranges, err);
+            *task_id = asmCreateImportTask(arg, err);
+            if (!*task_id) return C_ERR;
+            return C_OK;
+        case ASM_EVENT_CANCEL:
+            return clusterAsmCancel(task_id, err);
         case ASM_EVENT_HANDOFF:
-            return clusterAsmHandoff(slot_ranges, err);
+            return clusterAsmHandoff(task_id, err);
         case ASM_EVENT_DONE:
-            return clusterAsmNotifyConfigUpdated(slot_ranges, err);
+            return clusterAsmDone(task_id, err);
         default:
             *err = sdscatprintf(sdsempty(), "Unknown operation: %d", event);
             return C_ERR;
