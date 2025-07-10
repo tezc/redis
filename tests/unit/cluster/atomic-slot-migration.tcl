@@ -1,9 +1,9 @@
-proc migration_status {node_id slots_range field} {
+proc migration_status {node_id task_id field} {
     set status [R $node_id CLUSTER MIGRATION STATUS]
 
     # Iterate through each migration operation
     foreach operation $status {
-        set slots_found ""
+        set task_id_found ""
         set field_value ""
 
         # Parse the key-value pairs in the operation
@@ -11,14 +11,14 @@ proc migration_status {node_id slots_range field} {
             set key [lindex $operation $i]
             set value [lindex $operation [expr $i + 1]]
 
-            if {$key eq "slots_range"} {
-                set slots_found $value
+            if {$key eq "id"} {
+                set task_id_found $value
             } elseif {$key eq $field} {
                 set field_value $value
             }
         }
-        # Check if this operation matches the requested slots_range
-        if {$slots_found eq $slots_range} {
+        # Check if this operation matches the requested task_id
+        if {$task_id_found eq $task_id} {
             return $field_value
         }
     }
@@ -91,15 +91,15 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         R 1 set tag22273 tag22273 ;# slot hash is 7000
         R 1 set tag9283 tag9283 ;# slot hash is 8000
 
-        R 0 CLUSTER MIGRATION IMPORT 7000 8000
+        set task_id [R 0 CLUSTER MIGRATION IMPORT 7000 8000]
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 8000 9000}
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 7500 8500}
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 6000 7000}
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 6500 7500}
 
         wait_for_condition 1000 50 {
-            [string match {*done*} [migration_status 0 7000-8000 state]] &&
-            [string match {*done*} [migration_status 1 7000-8000 state]]
+            [string match {*done*} [migration_status 0 $task_id state]] &&
+            [string match {*done*} [migration_status 1 $task_id state]]
         } else {
             fail "ASM task did not start"
         }
@@ -119,11 +119,11 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         R 0 config set rdb-key-save-delay 1000000
     
         # migrate slot 0-100 to R 1
-        R 1 CLUSTER MIGRATION IMPORT 0 100
+        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
         # migration is start, and in accumulating buffer stage
         wait_for_condition 1000 50 {
-            [string match {*send-bulk-and-stream*} [R 0 cluster migration status]] &&
-            [string match {*accumulate-buffer*} [R 1 cluster migration status]]
+            [string match {*send-bulk-and-stream*} [migration_status 0 $task_id state]] &&
+            [string match {*accumulate-buffer*} [migration_status 1 $task_id state]]
         } else {
             fail "ASM task did not start"
         }
@@ -137,8 +137,8 @@ start_cluster 3 3 {tags {external:skip cluster}} {
 
         # wait until migration of 0-100 successful
         wait_for_condition 1000 50 {
-            [string match {*done*} [migration_status 0 0-100 state]] &&
-            [string match {*done*} [migration_status 1 0-100 state]]
+            [string match {*done*} [migration_status 0 $task_id state]] &&
+            [string match {*done*} [migration_status 1 $task_id state]]
         } else {
             fail "ASM task did not start"
         }
@@ -192,12 +192,12 @@ start_cluster 3 3 {tags {external:skip cluster}} {
 
             # The task should be failed due to the fail point
             wait_for_condition 1000 50 {
-                [string match -nocase "*$channel*${state}*" [migration_status 0 0-100 last_error]] ||
-                [string match -nocase "*$channel*${state}*" [migration_status 1 0-100 last_error]]
+                [string match -nocase "*$channel*${state}*" [migration_status 0 $task_id last_error]] ||
+                [string match -nocase "*$channel*${state}*" [migration_status 1 $task_id last_error]]
             } else {
                 fail "ASM task did not fail with expected error -
-                     (dst: [migration_status 0 0-100 last_error]
-                      src: [migration_status 1 0-100 last_error]
+                     (dst: [migration_status 0 $task_id last_error]
+                      src: [migration_status 1 $task_id last_error]
                       expected: $channel $state)"
             }
             R 1 config set rdb-key-save-delay 0
@@ -244,12 +244,12 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         assert_equal {OK} [R 1 debug asm-failpoint "" ""]
 
         # Start the migration
-        R 0 CLUSTER MIGRATION IMPORT 0 100
+        set task_id [R 0 CLUSTER MIGRATION IMPORT 0 100]
 
         # Wait for the migration to complete
         wait_for_condition 1000 50 {
-            [string match {*done*} [migration_status 0 0-100 state]] &&
-            [string match {*done*} [migration_status 1 0-100 state]]
+            [string match {*done*} [migration_status 0 $task_id state]] &&
+            [string match {*done*} [migration_status 1 $task_id state]]
         } else {
             fail "ASM task did not complete successfully"
         }
@@ -276,10 +276,10 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         # we set a delay to write incremental data
         R 0 config set rdb-key-save-delay 1000000
 
-        R 1 CLUSTER MIGRATION IMPORT 0 100
+        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
 
         wait_for_condition 1000 50 {
-            [string match {*send-bulk-and-stream*} [migration_status 0 0-100 state]]
+            [string match {*send-bulk-and-stream*} [migration_status 0 $task_id state]]
         } else {
             fail "ASM task did not start"
         }
@@ -301,7 +301,7 @@ start_cluster 3 3 {tags {external:skip cluster}} {
 
         # After some time, the client output buffer limit should be reached
         wait_for_log_messages 0 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 1000 10
-        assert_match {*send-bulk-and-stream*} [migration_status 0 0-100 last_error]
+        assert_match {*send-bulk-and-stream*} [migration_status 0 $task_id last_error]
 
         stop_write_load $load_handle
 
@@ -311,8 +311,8 @@ start_cluster 3 3 {tags {external:skip cluster}} {
 
         # Wait for the migration to complete
         wait_for_condition 1000 50 {
-            [string match {*done*} [migration_status 0 0-100 state]] &&
-            [string match {*done*} [migration_status 1 0-100 state]]
+            [string match {*done*} [migration_status 0 $task_id state]] &&
+            [string match {*done*} [migration_status 1 $task_id state]]
         } else {
             fail "ASM task did not complete successfully"
         }
