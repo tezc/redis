@@ -66,6 +66,7 @@ enum asmState {
     ASM_SEND_HANDSHAKE,
     ASM_HANDSHAKE_REPLY,
     ASM_SEND_SYNCSLOTS,
+    ASM_SYNCSLOTS_REPLY,
     ASM_INIT_RDBCHANNEL,
     ASM_ACCUMULATE_BUF,
     ASM_STREAMING_BUF,
@@ -132,6 +133,7 @@ char *asmTaskStateToString(int state) {
         case ASM_SEND_HANDSHAKE: return "send-handshake";
         case ASM_HANDSHAKE_REPLY: return "handshake-reply";
         case ASM_SEND_SYNCSLOTS: return "send-syncslots";
+        case ASM_SYNCSLOTS_REPLY: return "syncslots-reply";
         case ASM_INIT_RDBCHANNEL: return "init-rdbchannel";
         case ASM_ACCUMULATE_BUF: return "accumulate-buffer";
         case ASM_STREAMING_BUF: return "streaming-buffer";
@@ -178,6 +180,7 @@ int asmDebugSetFailPoint(char * channel, char *state) {
     if (!strcasecmp(state, "connecting")) asmManager->debug_failed_state = ASM_CONNECTING;
     else if (!strcasecmp(state, "auth-reply")) asmManager->debug_failed_state = ASM_AUTH_REPLY;
     else if (!strcasecmp(state, "handshake-reply")) asmManager->debug_failed_state = ASM_HANDSHAKE_REPLY;
+    else if (!strcasecmp(state, "syncslots-reply")) asmManager->debug_failed_state = ASM_SYNCSLOTS_REPLY;
     else if (!strcasecmp(state, "accumulate-buffer")) asmManager->debug_failed_state = ASM_ACCUMULATE_BUF;
     else if (!strcasecmp(state, "streaming-buffer")) asmManager->debug_failed_state = ASM_STREAMING_BUF;
     else if (!strcasecmp(state, "wait-stream-eof")) asmManager->debug_failed_state = ASM_WAIT_STREAM_EOF;
@@ -922,6 +925,8 @@ void asmRdbChannelSyncWithSource(connection *conn) {
 
         /* Check `+SLOTSSNAPSHOT` reply */
         if (!strncmp(err, "+SLOTSSNAPSHOT", strlen("+SLOTSSNAPSHOT"))) {
+            sdsfree(err);
+            err = NULL;
             task->state = ASM_ACCUMULATE_BUF;
             /* The main channel buffers pending commands. */
             connSetReadHandler(task->main_channel_conn, asmSyncBufferReadFromConn);
@@ -935,7 +940,6 @@ void asmRdbChannelSyncWithSource(connection *conn) {
             c->task = task;
             serverLog(LL_NOTICE,
                 "Source node replied to SLOTSSNAPSHOT, syncslots snapshot can continue...");
-            sdsfree(err);
         } else {
             task_error_msg = sdscatprintf(sdsempty(),
                 "Error reply to CLUSTER SYNCSLOTS RDBCHANNEL from the source: %s", err);
@@ -1086,7 +1090,28 @@ void asmSyncWithSource(connection *conn) {
         err = asmSendSlotRangesSync(conn, task);
         if (err) goto write_error;
 
-        task->state = ASM_INIT_RDBCHANNEL;
+        task->state = ASM_SYNCSLOTS_REPLY;
+        return;
+    }
+
+    if (task->state == ASM_SYNCSLOTS_REPLY) {
+        err = receiveSynchronousResponse(conn);
+        /* The source node did not reply */
+        if (err == NULL) goto no_response_error;
+
+        /* Check `+RDBCHANNELSYNCSLOTS` reply */
+        if (!strncmp(err, "+RDBCHANNELSYNCSLOTS", strlen("+RDBCHANNELSYNCSLOTS"))) {
+            sdsfree(err);
+            err = NULL;
+            task->state = ASM_INIT_RDBCHANNEL;
+            serverLog(LL_NOTICE,
+                "Source node replied to RDBCHANNELSYNCSLOTS, syncslots can continue...");
+        } else {
+            task_error_msg = sdscatprintf(sdsempty(),
+                "Error reply to CLUSTER SYNCSLOTS RANGES from the source: %s", err);
+            sdsfree(err);
+            goto error;
+        }
     }
 
     if (task->state == ASM_INIT_RDBCHANNEL) {
@@ -1353,6 +1378,10 @@ void clusterSyncSlotsCommand(client *c) {
         sdsfree(slot_ranges_str);
 
         clusterAsmOnEvent(task->id, ASM_EVENT_MIGRATE_STARTED, task->slot_ranges);
+
+        /* addReply*() is not suitable for replica clients in this state. */
+        if (connWrite(c->conn, "+RDBCHANNELSYNCSLOTS\r\n", 22) != 22)
+            freeClientAsync(c);
     } else if (!strcasecmp(c->argv[2]->ptr, "rdbchannel") && c->argc == 4) {
         /* CLUSTER SYNCSLOTS RDBCHANNEL <task-id> */
         sds task_id = c->argv[3]->ptr;
