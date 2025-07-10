@@ -252,33 +252,12 @@ asmTask *asmTaskCreate(sds task_id) {
     return task;
 }
 
-/* The task is done or canceled and won't be retried. Update stats and
- * move it to the completed list, trim if necessary. */
-void asmTaskComplete(asmTask *task) {
-    listNode *ln = listFirst(asmManager->tasks);
-    serverAssert(ln->value == task);
-
-    task->done_time = server.mstime;
-    asmManager->total_done_tasks++;
-
-    if (task->operation == ASM_IMPORT) {
-        asmManager->sync_buffer_peak = max(asmManager->sync_buffer_peak,
-                                           task->sync_buffer.peak);
-        replDataBufClear(&task->sync_buffer); /* To save memory */
-    }
-
-    listUnlinkNode(asmManager->tasks, ln);
-    listLinkNodeHead(asmManager->done_tasks, ln);
-
-    /* Trim the done tasks list if it grows too large */
-    if (listLength(asmManager->done_tasks) > ASM_MAX_DONE_TASKS) {
-        asmTask *oldest = listNodeValue(listLast(asmManager->done_tasks));
-        replDataBufClear(&oldest->sync_buffer);
-        zfree(oldest->slot_ranges);
-        sdsfree(oldest->error);
-        zfree(oldest);
-        listDelNode(asmManager->done_tasks, listLast(asmManager->done_tasks));
-    }
+void asmTaskFree(asmTask *task) {
+    replDataBufClear(&task->sync_buffer);
+    sdsfree(task->id);
+    zfree(task->slot_ranges);
+    sdsfree(task->error);
+    zfree(task);
 }
 
 static int compareSlotRange(const void *a, const void *b) {
@@ -538,8 +517,10 @@ sds asmCreateImportTask(slotRangeArray *slot_ranges, sds *err) {
                          task->source, task->dest, slot_ranges_str);
     sdsfree(slot_ranges_str);
 
-    /* Start the import task */
-    asmStartImportTask(task);
+    /* Don't start the task here since now we are in the context of executing a
+     * command, otherwise, asmStartImportTask() may delete some keys belonging
+     * to the slot range, and generate a big MULTI-EXEC, even this command itself
+     * also be part of the MULTI-EXEC. So we will do it in beforeSleep(). */
 
     return task->id;
 }
@@ -785,6 +766,32 @@ void asmTaskSetFailed(asmTask *task, const char *fmt, ...) {
         asmImportSetFailed(task);
     else
         asmMigrateSetFailed(task);
+}
+
+/* The task is done or canceled and won't be retried. Update stats and
+ * move it to the completed list, trim if necessary. */
+void asmTaskComplete(asmTask *task) {
+    listNode *ln = listFirst(asmManager->tasks);
+    serverAssert(ln->value == task);
+
+    task->done_time = server.mstime;
+    asmManager->total_done_tasks++;
+
+    if (task->operation == ASM_IMPORT) {
+        asmManager->sync_buffer_peak = max(asmManager->sync_buffer_peak,
+                                           task->sync_buffer.peak);
+        replDataBufClear(&task->sync_buffer); /* Not used, so save memory */
+    }
+
+    listUnlinkNode(asmManager->tasks, ln);
+    listLinkNodeHead(asmManager->done_tasks, ln);
+
+    /* Trim the done tasks list if it grows too large */
+    if (listLength(asmManager->done_tasks) > ASM_MAX_DONE_TASKS) {
+        asmTask *oldest = listNodeValue(listLast(asmManager->done_tasks));
+        asmTaskFree(oldest);
+        listDelNode(asmManager->done_tasks, listLast(asmManager->done_tasks));
+    }
 }
 
 void asmTaskCancel(asmTask *task) {

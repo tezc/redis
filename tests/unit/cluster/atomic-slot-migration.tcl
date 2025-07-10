@@ -153,11 +153,7 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         R 0 config set rdb-key-save-delay 0
     }
 
-    global send_migration_import_0_100
-    set send_migration_import_0_100 0
     proc asm_basic_error_handling_test {operation channel all_states} {
-        global send_migration_import_0_100
-
         foreach state $all_states {
             if {$::verbose} { puts "Testing $operation $channel channel with state: $state"}
 
@@ -172,23 +168,19 @@ start_cluster 3 3 {tags {external:skip cluster}} {
             } else { set port [lindex [R 1 config get port] 1] }
             set load_handle [start_write_load "127.0.0.1" $port 100 "06S"]
 
-            # Set the fail point for the main channel
+            # clear old fail points and set the new fail point
+            assert_equal {OK} [R 0 debug asm-failpoint "" ""]
+            assert_equal {OK} [R 1 debug asm-failpoint "" ""]
             if {$operation eq "import"} {
                 assert_equal {OK} [R 0 debug asm-failpoint "import-$channel-channel" $state]
-                assert_equal {OK} [R 1 debug asm-failpoint "" ""] ;# Clear migrate node fail point
             } elseif {$operation eq "migrate"} {
-                assert_equal {OK} [R 0 debug asm-failpoint "" ""] ;# Clear import node fail point
                 assert_equal {OK} [R 1 debug asm-failpoint "migrate-$channel-channel" $state]
             } else {
                 fail "Unknown operation: $operation"
             }
 
-            # Migrate slot 0-100 to R 0 if this is the first time,
-            # otherwise, import will retry automatically
-            if {$send_migration_import_0_100 == 0} {
-                R 0 CLUSTER MIGRATION IMPORT 0 100
-                set send_migration_import_0_100 1
-            }
+            # Start the migration
+            set task_id [R 0 CLUSTER MIGRATION IMPORT 0 100]
 
             # The task should be failed due to the fail point
             wait_for_condition 1000 50 {
@@ -202,11 +194,20 @@ start_cluster 3 3 {tags {external:skip cluster}} {
             }
             R 1 config set rdb-key-save-delay 0
             stop_write_load $load_handle
+
+            # Cancel the task
+            assert_equal {1} [R 0 CLUSTER MIGRATION CANCEL ID $task_id]
+            catch {R 1 CLUSTER MIGRATION CANCEL ID $task_id} err
+            # err is 1 or 'No ASM task found' since the task may not start on the source
+            if { $err ne "1" && ![string match -nocase "*No ASM task found*" $err]} {
+                fail "Failed to cancel task on source: $err"
+            }
         }
     }
 
     test "Destination node main channel basic error-handling tests " {
-        set all_states [list "connecting" "auth-reply" "handshake-reply" "syncslots-reply" "accumulate-buffer" "streaming-buffer" "wait-stream-eof"]
+        set all_states [list "connecting" "auth-reply" "handshake-reply" "syncslots-reply" \
+                             "accumulate-buffer" "streaming-buffer" "wait-stream-eof"]
         asm_basic_error_handling_test "import" "main" $all_states
     }
 
@@ -237,6 +238,9 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         # Clear all fail points
         assert_equal {OK} [R 0 debug asm-failpoint "" ""]
         assert_equal {OK} [R 1 debug asm-failpoint "" ""]
+
+        # Start the migration
+        R 0 CLUSTER MIGRATION IMPORT 0 100
 
         # Wait for the migration to complete
         wait_for_condition 1000 50 {
