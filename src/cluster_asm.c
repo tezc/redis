@@ -1385,6 +1385,10 @@ void clusterSyncSlotsCommand(client *c) {
     } else if (!strcasecmp(c->argv[2]->ptr, "rdbchannel") && c->argc == 4) {
         /* CLUSTER SYNCSLOTS RDBCHANNEL <task-id> */
         sds task_id = c->argv[3]->ptr;
+        if (sdslen(task_id) != CLUSTER_NAMELEN) {
+            addReplyError(c, "Invalid task id");
+            return;
+        }
 
         if (listLength(asmManager->tasks) == 0) {
             addReplyError(c, "No slot migration task in progress");
