@@ -263,35 +263,48 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         set r1_pid [getInfoProperty [R 1 info] process_id]
         R 1 debug repl-pause on-streaming-repl-buf
 
-        # Set output buffer limit to trigger the error
-        R 0 config set client-output-buffer-limit "replica 10mb 0 0"
+        # Set a small output buffer limit to trigger the error
+        R 0 config set client-output-buffer-limit "replica 1024 0 0"
         # we set a delay to write incremental data
         R 0 config set rdb-key-save-delay 1000000
 
-        # Start the slot 0 write load on the R 0
-        if {$::tls} { set port [lindex [R 0 config get tls-port] 1]
-        } else { set port [lindex [R 0 config get port] 1] }
-        set load_handle [start_write_load "127.0.0.1" $port 100 "06S"]
+        R 1 CLUSTER MIGRATION IMPORT 0 100
 
-        set loglines [count_log_lines 0]
-
-        # Start the migration
-        assert_equal {OK} [R 1 CLUSTER MIGRATION IMPORT 0 100]
-
-        # Wait for the migration to complete
         wait_for_condition 1000 50 {
             [string match {*send-bulk-and-stream*} [migration_status 0 0-100 state]]
         } else {
             fail "ASM task did not start"
         }
-        wait_for_condition 1000 50 {
-            [string match {*send-bulk-and-stream*} [migration_status 0 0-100 error]]
-        } else {
-            fail "ASM task did not fail with expected error, current error: [migration_status 0 0-100 error]"
-        }
-        wait_for_log_messages 0 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 1000 10
 
-        resume_process $r1_pid
+        # some write traffic is to enter streaming buffer state
+        set slot0_key "06S"
+        R 0 set $slot0_key "a" 
+
+        # after 3 second, the slots snapshot should be transferred, start streaming buffer
+        after 3000
+
+        set loglines [count_log_lines 0]
+
+        # Start the slot 0 write load on the R 0
+        if {$::tls} { set port [lindex [R 0 config get tls-port] 1]
+        } else { set port [lindex [R 0 config get port] 1] }
+        set load_handle [start_write_load "127.0.0.1" $port 100 $slot0_key]
+
+        wait_for_log_messages 0 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 1000 10
+        assert_match {*send-bulk-and-stream*} [migration_status 0 0-100 error]
+
         stop_write_load $load_handle
+
+        # resume server and clear pause point
+        resume_process $r1_pid
+        R 1 debug repl-pause clear
+
+        # Wait for the migration to complete
+        wait_for_condition 1000 50 {
+            [string match {*done*} [migration_status 0 0-100 state]] &&
+            [string match {*done*} [migration_status 1 0-100 state]]
+        } else {
+            fail "ASM task did not complete successfully"
+        }
     }
 }
