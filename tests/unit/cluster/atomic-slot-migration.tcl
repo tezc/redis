@@ -1,9 +1,8 @@
 proc migration_status {node_id slots_range field} {
     set status [R $node_id CLUSTER MIGRATION STATUS]
-    set tasks [dict get $status tasks]
 
     # Iterate through each migration operation
-    foreach operation $tasks {
+    foreach operation $status {
         set slots_found ""
         set field_value ""
 
@@ -184,24 +183,20 @@ start_cluster 3 3 {tags {external:skip cluster}} {
 
             # The task should be failed due to the fail point
             wait_for_condition 1000 50 {
-                [string match -nocase "*$channel*${state}*" [migration_status 0 0-100 error]] ||
-                [string match -nocase "*$channel*${state}*" [migration_status 1 0-100 error]]
+                [string match -nocase "*$channel*${state}*" [migration_status 0 0-100 last_error]] ||
+                [string match -nocase "*$channel*${state}*" [migration_status 1 0-100 last_error]]
             } else {
                 fail "ASM task did not fail with expected error -
-                     (dst: [migration_status 0 0-100 error]
-                      src: [migration_status 1 0-100 error]
+                     (dst: [migration_status 0 0-100 last_error]
+                      src: [migration_status 1 0-100 last_error]
                       expected: $channel $state)"
             }
             R 1 config set rdb-key-save-delay 0
             stop_write_load $load_handle
 
             # Cancel the task
-            assert_equal {1} [R 0 CLUSTER MIGRATION CANCEL ID $task_id]
-            catch {R 1 CLUSTER MIGRATION CANCEL ID $task_id} err
-            # err is 1 or 'No ASM task found' since the task may not start on the source
-            if { $err ne "1" && ![string match -nocase "*No ASM task found*" $err]} {
-                fail "Failed to cancel task on source: $err"
-            }
+            R 0 CLUSTER MIGRATION CANCEL ID $task_id
+            R 1 CLUSTER MIGRATION CANCEL ID $task_id
         }
     }
 
@@ -297,7 +292,7 @@ start_cluster 3 3 {tags {external:skip cluster}} {
 
         # After some time, the client output buffer limit should be reached
         wait_for_log_messages 0 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 1000 10
-        assert_match {*send-bulk-and-stream*} [migration_status 0 0-100 error]
+        assert_match {*send-bulk-and-stream*} [migration_status 0 0-100 last_error]
 
         stop_write_load $load_handle
 

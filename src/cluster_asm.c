@@ -255,6 +255,18 @@ void asmTaskFree(asmTask *task) {
     zfree(task);
 }
 
+size_t asmGetPeakSyncBufferSize(void) {
+    /* Compute peak sync buffer usage. The current task's peak may not
+     * reflect in asmManager->sync_buffer_peak immediately. */
+    size_t peak = asmManager->sync_buffer_peak;
+    asmTask *task = listFirst(asmManager->tasks) ?
+                    listNodeValue(listFirst(asmManager->tasks)) : NULL;
+    if (task && task->operation == ASM_IMPORT)
+        peak = max(task->sync_buffer.peak, asmManager->sync_buffer_peak);
+    
+    return peak;
+}
+
 static int compareSlotRange(const void *a, const void *b) {
     const slotRange *sa = a;
     const slotRange *sb = b;
@@ -602,7 +614,7 @@ static void replyTaskStatus(client *c, asmTask *task) {
     addReplyBulkCString(c, task->operation == ASM_IMPORT ? "importing" : "migrating");
     addReplyBulkCString(c, "state");
     addReplyBulkCString(c, asmTaskStateToString(task->state));
-    addReplyBulkCString(c, "error");
+    addReplyBulkCString(c, "last_error");
     addReplyBulkCBuffer(c, task->error, sdslen(task->error));
     addReplyBulkCString(c, "retries");
     addReplyBulkLongLong(c, task->retry_count);
@@ -625,20 +637,6 @@ static void clusterMigrationCommandStatus(client *c) {
     listIter li;
     listNode *ln;
 
-    /* Compute peak sync buffer usage. The current task's peak may not
-     * reflect in asmManager->sync_buffer_peak immediately. */
-    size_t peak = asmManager->sync_buffer_peak;
-    asmTask *task = listFirst(asmManager->tasks) ?
-                    listNodeValue(listFirst(asmManager->tasks)) : NULL;
-    if (task && task->operation == ASM_IMPORT)
-        peak = max(task->sync_buffer.peak, asmManager->sync_buffer_peak);
-
-    addReplyMapLen(c, 3);
-    addReplyBulkCString(c, "total_done_tasks");
-    addReplyLongLong(c, asmManager->total_done_tasks);
-    addReplyBulkCString(c, "sync_buffer_peak");
-    addReplyLongLong(c, peak);
-    addReplyBulkCString(c, "tasks");
     addReplyArrayLen(c, listLength(asmManager->tasks) + listLength(asmManager->done_tasks));
 
     listRewind(asmManager->tasks, &li);
@@ -1762,11 +1760,14 @@ void asmCron(void) {
 /* Cancel a specific task if ID is provided, otherwise cancel all tasks. */
 int clusterAsmCancel(sds *task_id, sds *err) {
     if (*task_id) {
-        asmTask *task = lookupAsmTaskById(*task_id);
-        if (!task) {
-            *err = sdscatprintf(sdsempty(), "No ASM task found for id: %s", *task_id);
+        if (sdslen(*task_id) != CLUSTER_NAMELEN) {
+            *err = sdsnew("Invalid task id");
             return -1;
         }
+
+        asmTask *task = lookupAsmTaskById(*task_id);
+        if (!task) return 0; /* Not found */
+
         asmTaskCancel(task);
         return 1;
     } else {
