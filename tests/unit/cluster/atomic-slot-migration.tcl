@@ -86,17 +86,26 @@ start_cluster 3 3 {tags {external:skip cluster}} {
     }
 
     test "Test IMPORT not allowed if there is an overlapping import" {
+        # Let slot migration take long time, so that we can test overlapping import
+        R 1 config set rdb-key-save-delay 1000000
+        R 1 set tag22273 tag22273 ;# slot hash is 7000
+        R 1 set tag9283 tag9283 ;# slot hash is 8000
+
         R 0 CLUSTER MIGRATION IMPORT 7000 8000
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 8000 9000}
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 7500 8500}
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 6000 7000}
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 6500 7500}
+
         wait_for_condition 1000 50 {
             [string match {*done*} [migration_status 0 7000-8000 state]] &&
             [string match {*done*} [migration_status 1 7000-8000 state]]
         } else {
             fail "ASM task did not start"
         }
+        assert_equal "tag22273" [R 0 get tag22273]
+        assert_equal "tag9283" [R 0 get tag9283]
+        R 1 config set rdb-key-save-delay 0
     }
 
     test "Simple slot migration" {
