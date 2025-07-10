@@ -27,7 +27,6 @@ typedef struct asmTask {
     char dest[CLUSTER_NAMELEN];         /* Destination node name */
     clusterNode *source_node;           /* Source node */
     connection *main_channel_conn;      /* Main channel connection */
-    unsigned long long main_channel_id; /* Main channel ID for the task */
     connection *rdb_channel_conn;       /* RDB channel connection */
     int rdb_channel_state;              /* State of the RDB channel */
     unsigned long long dest_offset;     /* Destination offset */
@@ -67,7 +66,6 @@ enum asmState {
     ASM_SEND_HANDSHAKE,
     ASM_HANDSHAKE_REPLY,
     ASM_SEND_SYNCSLOTS,
-    ASM_SYNCSLOTS_REPLY,
     ASM_INIT_RDBCHANNEL,
     ASM_ACCUMULATE_BUF,
     ASM_STREAMING_BUF,
@@ -134,7 +132,6 @@ char *asmTaskStateToString(int state) {
         case ASM_SEND_HANDSHAKE: return "send-handshake";
         case ASM_HANDSHAKE_REPLY: return "handshake-reply";
         case ASM_SEND_SYNCSLOTS: return "send-syncslots";
-        case ASM_SYNCSLOTS_REPLY: return "syncslots-reply";
         case ASM_INIT_RDBCHANNEL: return "init-rdbchannel";
         case ASM_ACCUMULATE_BUF: return "accumulate-buffer";
         case ASM_STREAMING_BUF: return "streaming-buffer";
@@ -181,7 +178,6 @@ int asmDebugSetFailPoint(char * channel, char *state) {
     if (!strcasecmp(state, "connecting")) asmManager->debug_failed_state = ASM_CONNECTING;
     else if (!strcasecmp(state, "auth-reply")) asmManager->debug_failed_state = ASM_AUTH_REPLY;
     else if (!strcasecmp(state, "handshake-reply")) asmManager->debug_failed_state = ASM_HANDSHAKE_REPLY;
-    else if (!strcasecmp(state, "syncslots-reply")) asmManager->debug_failed_state = ASM_SYNCSLOTS_REPLY;
     else if (!strcasecmp(state, "accumulate-buffer")) asmManager->debug_failed_state = ASM_ACCUMULATE_BUF;
     else if (!strcasecmp(state, "streaming-buffer")) asmManager->debug_failed_state = ASM_STREAMING_BUF;
     else if (!strcasecmp(state, "wait-stream-eof")) asmManager->debug_failed_state = ASM_WAIT_STREAM_EOF;
@@ -220,7 +216,6 @@ int asmDebugIsFailPointActive(int channel, int state) {
 void asmTaskReset(asmTask *task) {
     task->state = ASM_NONE;
     task->rdb_channel_state = ASM_NONE;
-    task->main_channel_id = -1;
     task->main_channel_conn = NULL;
     task->rdb_channel_conn = NULL;
     task->dest_offset = 0;
@@ -916,10 +911,7 @@ void asmRdbChannelSyncWithSource(connection *conn) {
     }
 
     if (task->rdb_channel_state == ASM_RDBCHANNEL_REQUEST) {
-        char cid[LONG_STR_SIZE];
-        ull2string(cid, sizeof(cid), task->main_channel_id);
-
-        err = sendCommand(conn, "CLUSTER", "SYNCSLOTS", "RDBCHANNEL", cid, NULL);
+        err = sendCommand(conn, "CLUSTER", "SYNCSLOTS", "RDBCHANNEL", task->id, NULL);
         if (err) goto write_error;
         task->rdb_channel_state = ASM_RDBCHANNEL_REPLY;
         return;
@@ -1096,38 +1088,7 @@ void asmSyncWithSource(connection *conn) {
         err = asmSendSlotRangesSync(conn, task);
         if (err) goto write_error;
 
-        task->state = ASM_SYNCSLOTS_REPLY;
-        return;
-    }
-
-    if (task->state == ASM_SYNCSLOTS_REPLY) {
-        err = receiveSynchronousResponse(conn);
-        /* The source node did not reply */
-        if (err == NULL) goto no_response_error;
-
-        /* Check `+RDBCHANNELSYNCSLOTS client-id` reply */
-        if (!strncmp(err, "+RDBCHANNELSYNCSLOTS", strlen("+RDBCHANNELSYNCSLOTS"))) {
-            /* Parse main channel id */
-            char *client_id = strchr(err,' ');
-            if (client_id) client_id++;
-            if (!client_id) {
-                task_error_msg = sdscatprintf(sdsempty(),
-                    "Source node replied with wrong +RDBCHANNELSYNCSLOTS syntax: %s", err);
-                sdsfree(err);
-                goto error;
-            }
-            task->main_channel_id = strtoull(client_id, NULL, 10);
-            serverLog(LL_NOTICE,
-                "Source node replied to RDBCHANNELSYNCSLOTS, syncslots can continue...");
-            sdsfree(err);
-            err = NULL;
-            task->state = ASM_INIT_RDBCHANNEL;
-        } else {
-            task_error_msg = sdscatprintf(sdsempty(),
-                "Error reply to CLUSTER SYNCSLOTS RANGES from the source: %s", err);
-            sdsfree(err);
-            goto error;
-        }
+        task->state = ASM_INIT_RDBCHANNEL;
     }
 
     if (task->state == ASM_INIT_RDBCHANNEL) {
@@ -1300,6 +1261,9 @@ void asmStartImportTask(asmTask *task) {
 }
 
 void clusterSyncSlotsCommand(client *c) {
+    /* Only internal clients are allowed to execute this command to avoid
+     * potential attack, since some state changes are not well protected,
+     * external clients may damage the slot migration state. */
     if (!(c->flags & CLIENT_INTERNAL)) {
         addReplyError(c, "CLUSTER SYNCSLOTS subcommands are only allowed for internal clients");
         return;
@@ -1359,7 +1323,6 @@ void clusterSyncSlotsCommand(client *c) {
         }
 
         task->slot_ranges = slot_ranges;
-        task->main_channel_id = c->id;
         task->operation = ASM_MIGRATE;
         memcpy(task->source, getMyClusterNode()->name, CLUSTER_NAMELEN);
         if (c->node_id) memcpy(task->dest, c->node_id, CLUSTER_NAMELEN);
@@ -1373,6 +1336,16 @@ void clusterSyncSlotsCommand(client *c) {
         task->main_channel_client = c;
         c->task = task;
 
+        /* We mark the main channel client as a replica, so this client is limited
+         * by the client output buffer settings for replicas. The replstate has no
+         * real significance, just to prevent it from going online. */
+        c->flags |= (CLIENT_SLAVE | CLIENT_REPL_MIGRATION_DEST);
+        c->replstate = SLAVE_STATE_WAIT_RDB_CHANNEL;
+        if (server.repl_disable_tcp_nodelay)
+            connDisableTcpNoDelay(c->conn);  /* Non critical if it fails. */
+        listAddNodeTail(server.slaves, c);
+        createReplicationBacklogIfNeeded();
+
         /* Wait for RDB channel to be ready */
         task->state = ASM_WAIT_RDBCHANNEL;
 
@@ -1382,26 +1355,9 @@ void clusterSyncSlotsCommand(client *c) {
         sdsfree(slot_ranges_str);
 
         clusterAsmOnEvent(task->id, ASM_EVENT_MIGRATE_STARTED, task->slot_ranges);
-        addReplyStatusFormat(c, "RDBCHANNELSYNCSLOTS %llu",
-                               (unsigned long long) c->id);
-
-        /* We mark the main channel client as a slave after adding reply since in
-         * SLAVE_STATE_WAIT_RDB_CHANNEL state, we can't add reply to the client, then
-         * this client is limited by the client output buffer settings for replicas.
-         * The replstate has no real significance, just to prevent it from going online. */
-        c->flags |= (CLIENT_SLAVE | CLIENT_REPL_MIGRATION_DEST);
-        c->replstate = SLAVE_STATE_WAIT_RDB_CHANNEL;
-        if (server.repl_disable_tcp_nodelay)
-            connDisableTcpNoDelay(c->conn);  /* Non critical if it fails. */
-        listAddNodeTail(server.slaves, c);
-        createReplicationBacklogIfNeeded();
     } else if (!strcasecmp(c->argv[2]->ptr, "rdbchannel") && c->argc == 4) {
-        /* CLUSTER SYNCSLOTS RDBCHANNEL <client-id> */
-        long long client_id;
-
-        if (getLongLongFromObjectOrReply(c, c->argv[3], &client_id, NULL) != C_OK) {
-            return;
-        }
+        /* CLUSTER SYNCSLOTS RDBCHANNEL <task-id> */
+        sds task_id = c->argv[3]->ptr;
 
         if (listLength(asmManager->tasks) == 0) {
             addReplyError(c, "No slot migration task in progress");
@@ -1409,9 +1365,10 @@ void clusterSyncSlotsCommand(client *c) {
         }
 
         asmTask *task = listNodeValue(listFirst(asmManager->tasks));
-        serverAssert(task->operation == ASM_MIGRATE);
-        if (task->main_channel_id != (unsigned long long) client_id) {
-            addReplyErrorFormat(c, "Slot migration task client ID mismatch");
+        if (task->operation != ASM_MIGRATE || task->state != ASM_WAIT_RDBCHANNEL ||
+            strcmp(task->id, task_id) != 0)
+        {
+            addReplyError(c, "Another migration task is already in progress");
             return;
         }
 
@@ -1421,14 +1378,12 @@ void clusterSyncSlotsCommand(client *c) {
                 freeClient(task->main_channel_client);
         }
 
-        if (task->state != ASM_WAIT_RDBCHANNEL || task->main_channel_client == NULL) {
-            /* The main channel connection is closed. */
+        /* The main channel client must be present when setting RDB channel client */
+        if (task->main_channel_client == NULL) {
+            /* Maybe the main channel connection is closed. */
             addReplyError(c, "Main channel connection is not established");
             return;
         }
-
-        /* The main channel client must be present when setting RDB channel client */
-        serverAssert(task->main_channel_client != NULL);
 
         /* Mark the client as a slave to generate slots snapshot */
         c->flags |= (CLIENT_SLAVE | CLIENT_REPL_RDB_CHANNEL | CLIENT_REPL_RDBONLY | CLIENT_REPL_MIGRATION_DEST);

@@ -206,8 +206,8 @@ start_cluster 3 3 {tags {external:skip cluster}} {
     }
 
     test "Destination node main channel basic error-handling tests " {
-        set all_states [list "connecting" "auth-reply" "handshake-reply" "syncslots-reply" \
-                             "accumulate-buffer" "streaming-buffer" "wait-stream-eof"]
+        set all_states [list "connecting" "auth-reply" "handshake-reply" \
+                 "accumulate-buffer" "streaming-buffer" "wait-stream-eof"]
         asm_basic_error_handling_test "import" "main" $all_states
     }
 
