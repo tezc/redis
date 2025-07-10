@@ -276,11 +276,12 @@ start_cluster 3 3 {tags {external:skip cluster}} {
             fail "ASM task did not start"
         }
 
-        # some write traffic is to enter streaming buffer state
+        # some write traffic is to have chance to enter streaming buffer state
         set slot0_key "06S"
         R 0 set $slot0_key "a" 
 
-        # after 3 second, the slots snapshot should be transferred, start streaming buffer
+        # after 3 second, the slots snapshot (costs 2s to generate) should be transferred,
+        # then start streaming buffer
         after 3000
 
         set loglines [count_log_lines 0]
@@ -290,6 +291,7 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         } else { set port [lindex [R 0 config get port] 1] }
         set load_handle [start_write_load "127.0.0.1" $port 100 $slot0_key]
 
+        # After some time, the client output buffer limit should be reached
         wait_for_log_messages 0 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 1000 10
         assert_match {*send-bulk-and-stream*} [migration_status 0 0-100 error]
 
@@ -306,5 +308,9 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         } else {
             fail "ASM task did not complete successfully"
         }
+
+        # Reset configurations
+        R 0 config set client-output-buffer-limit "replica 0 0 0"
+        R 0 config set rdb-key-save-delay 0
     }
 }
