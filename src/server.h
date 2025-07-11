@@ -427,6 +427,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_REPROCESSING_COMMAND (1ULL<<50) /* The client is re-processing the command. */
 #define CLIENT_REPL_RDB_CHANNEL (1ULL<<51)      /* Client which is used for rdb delivery as part of rdb channel replication */
 #define CLIENT_INTERNAL (1ULL<<52) /* Internal client connection */
+#define CLIENT_REPL_MIGRATION_DEST (1ULL<<53) /* Client is a main channel for atomic slot migration destination */
 
 /* Any flag that does not let optimize FLUSH SYNC to run it in bg as blocking client ASYNC */
 #define CLIENT_AVOID_BLOCKING_ASYNC_FLUSH (CLIENT_DENY_BLOCKING|CLIENT_MULTI|CLIENT_LUA_DEBUG|CLIENT_LUA_DEBUG_SYNC|CLIENT_MODULE)
@@ -564,9 +565,10 @@ typedef enum {
 #define SLAVE_REQ_NONE                  0
 #define SLAVE_REQ_RDB_EXCLUDE_DATA      (1 << 0) /* Exclude data from RDB */
 #define SLAVE_REQ_RDB_EXCLUDE_FUNCTIONS (1 << 1) /* Exclude functions from RDB */
-#define SLAVE_REQ_RDB_CHANNEL           (1 << 2) /* Use rdb channel replication, transfer RDB background */
+#define SLAVE_REQ_SLOTS_SNAPSHOT        (1 << 2) /* Only slots snapshot is required */
+#define SLAVE_REQ_RDB_CHANNEL           (1 << 3) /* Use rdb channel replication, transfer RDB background */
 /* Mask of all bits in the slave requirements bitfield that represent non-standard (filtered) RDB requirements */
-#define SLAVE_REQ_RDB_MASK (SLAVE_REQ_RDB_EXCLUDE_DATA | SLAVE_REQ_RDB_EXCLUDE_FUNCTIONS)
+#define SLAVE_REQ_RDB_MASK (SLAVE_REQ_RDB_EXCLUDE_DATA | SLAVE_REQ_RDB_EXCLUDE_FUNCTIONS | SLAVE_REQ_SLOTS_SNAPSHOT)
 
 /* Synchronous read timeout - slave side */
 #define CONFIG_REPL_SYNCIO_TIMEOUT 5
@@ -715,6 +717,7 @@ typedef enum {
     PAUSE_BY_CLIENT_COMMAND = 0,
     PAUSE_DURING_SHUTDOWN,
     PAUSE_DURING_FAILOVER,
+    PAUSE_DURING_SLOT_HANDOFF,
     NUM_PAUSE_PURPOSES /* This value is the number of purposes above. */
 } pause_purpose;
 
@@ -1455,6 +1458,8 @@ typedef struct client {
     unsigned long long net_input_bytes;    /* Total network input bytes read from this client. */
     unsigned long long net_output_bytes;   /* Total network output bytes sent to this client. */
     unsigned long long commands_processed; /* Total count of commands this client executed. */
+    struct asmTask *task;       /* Atomic slot migration task */
+    char *node_id;              /* Node ID to connect to for atomic slot migration */
 } client;
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
@@ -1471,6 +1476,14 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     list *pending_clients_to_main_thread;       /* Clients that are waiting to be executed by the main thread. */
     list *clients;                              /* IO thread managed clients. */
 } IOThread;
+
+/* Context for streaming replDataBuf to database */
+typedef struct replDataBufToDbCtx {
+    client *client;                     /* Client to process commands */
+    size_t applied_offset;              /* Offset applied to the database */
+    int  (*should_continue)(void *ctx); /* Check if should continue */
+    void (*yield_callback)(void *ctx);  /* Yield to event loop */
+} replDataBufToDbCtx;
 
 /* ACL information */
 typedef struct aclInfo {
@@ -2871,6 +2884,7 @@ void rewriteClientCommandArgument(client *c, int i, robj *newval);
 void replaceClientCommandVector(client *c, int argc, robj **argv);
 void redactClientCommandArgument(client *c, int argc);
 size_t getClientOutputBufferMemoryUsage(client *c);
+size_t getNormalClientPendingReplyBytes(client *c);
 size_t getClientMemoryUsage(client *c, size_t *output_buffer_mem_usage);
 int freeClientsInAsyncFreeQueue(void);
 int closeClientOnOutputBufferLimitReached(client *c, int async);
@@ -3116,6 +3130,10 @@ void abortFailover(const char *err);
 const char *getFailoverStateString(void);
 int replicationCheckHasMainChannel(client *slave);
 unsigned long replicationLogicalReplicaCount(void);
+void replDataBufInit(replDataBuf *buf);
+void replDataBufClear(replDataBuf *buf);
+void replDataBufReadFromConn(connection *conn, replDataBuf *buf, void (*error_handler)(connection *conn));
+int replDataBufStreamToDb(replDataBuf *buf, replDataBufToDbCtx *ctx);
 
 /* Generic persistence functions */
 void startLoadingFile(size_t size, char* filename, int rdbflags);
@@ -3391,6 +3409,10 @@ int restartServer(int flags, mstime_t delay);
 int getKeySlot(sds key);
 int calculateKeySlot(sds key);
 
+#define GETSLOT_NOKEYS     (-1)
+#define GETSLOT_CROSSSLOT  (-2)
+int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc);
+
 /* kvstore wrappers */
 int dbExpand(redisDb *db, uint64_t db_size, int try_expand);
 int dbExpandExpires(redisDb *db, uint64_t db_size, int try_expand);
@@ -3654,15 +3676,15 @@ kvobj *dbUnshareStringValueByLink(redisDb *db, robj *key, kvobj *kv, dictEntryLi
 #define FLUSH_TYPE_ALL   0
 #define FLUSH_TYPE_DB    1
 #define FLUSH_TYPE_SLOTS 2
-typedef struct SlotRange {
-    unsigned short first, last;
-} SlotRange;
-typedef struct SlotsFlush {
-    int numRanges;
-    SlotRange ranges[];
-} SlotsFlush;
-void replySlotsFlushAndFree(client *c, SlotsFlush *sflush);
-int flushCommandCommon(client *c, int type, int flags, SlotsFlush *sflush);
+typedef struct slotRange {
+    unsigned short start, end;
+} slotRange;
+typedef struct slotRangeArray {
+    int num_ranges;
+    slotRange ranges[];
+} slotRangeArray;
+void replySlotsFlushAndFree(client *c, slotRangeArray *ranges);
+int flushCommandCommon(client *c, int type, int flags, slotRangeArray *ranges);
 #define EMPTYDB_NO_FLAGS 0      /* No flags. */
 #define EMPTYDB_ASYNC (1<<0)    /* Reclaim memory in another thread. */
 #define EMPTYDB_NOFUNCTIONS (1<<1) /* Indicate not to flush the functions. */

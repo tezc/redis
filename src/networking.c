@@ -18,6 +18,7 @@
 #include "script.h"
 #include "fpconv_dtoa.h"
 #include "fmtargs.h"
+#include "cluster_asm.h"
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <math.h>
@@ -227,6 +228,8 @@ client *createClient(connection *conn) {
     c->net_input_bytes = 0;
     c->net_output_bytes = 0;
     c->commands_processed = 0;
+    c->task = NULL;
+    c->node_id = NULL;
     return c;
 }
 
@@ -1747,6 +1750,8 @@ void freeClient(client *c) {
                               c);
     }
 
+    asmCallbackOnFreeClient(c);
+
     /* Notify module system that this client auth status changed. */
     moduleNotifyUserChanged(c);
 
@@ -1891,6 +1896,7 @@ void freeClient(client *c) {
     sdsfree(c->peerid);
     sdsfree(c->sockname);
     sdsfree(c->slave_addr);
+    sdsfree(c->node_id);
     zfree(c);
 }
 
@@ -2678,6 +2684,9 @@ void commandProcessed(client *c) {
         if (applied) {
             replicationFeedStreamFromMasterStream(c->querybuf+c->repl_applied,applied);
             c->repl_applied += applied;
+
+            /* Update the atomic slot migration task's applied bytes. */
+            if (c->task) asmImportIncrAppliedBytes(c->task, applied);
         }
     }
 }
@@ -4181,6 +4190,14 @@ size_t getClientOutputBufferMemoryUsage(client *c) {
     }
 }
 
+size_t getNormalClientPendingReplyBytes(client *c) {
+    serverAssert(!clientTypeIsSlave(c));
+    if (listLength(c->reply) == 0) return c->bufpos;
+
+    clientReplyBlock *block = listNodeValue(listLast(c->reply));
+    return (c->reply_bytes - block->size + block->used) + c->bufpos;
+}
+
 /* Returns the total client's memory usage.
  * Optionally, if output_buffer_mem_usage is not NULL, it fills it with
  * the client output buffer memory usage portion of the total. */
@@ -4229,10 +4246,13 @@ int getClientType(client *c) {
 }
 
 static inline int clientTypeIsSlave(client *c) {
-    /* Even though MONITOR clients are marked as replicas, we
-     * want the expose them as normal clients. */
-    if (unlikely((c->flags & CLIENT_SLAVE) && !(c->flags & CLIENT_MONITOR)))
+    /* Even though MONITOR clients and ASM destination RDB/main channels are marked
+     * as replicas, we want the expose them as normal clients. */
+    if (unlikely((c->flags & CLIENT_SLAVE) &&
+        !(c->flags & (CLIENT_MONITOR | CLIENT_REPL_MIGRATION_DEST))))
+    {
         return 1;
+    }
     return 0;
 }
 

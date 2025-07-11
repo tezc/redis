@@ -20,6 +20,7 @@
 #include "server.h"
 #include "cluster.h"
 #include "cluster_legacy.h"
+#include "cluster_asm.h"
 #include "endianconv.h"
 #include "connection.h"
 
@@ -75,7 +76,7 @@ const char *clusterGetMessageTypeString(int type);
 void removeChannelsInSlot(unsigned int slot);
 unsigned int countKeysInSlot(unsigned int hashslot);
 unsigned int countChannelsInSlot(unsigned int hashslot);
-unsigned int delKeysInSlot(unsigned int hashslot);
+unsigned int clusterDelKeysInSlot(unsigned int hashslot, int flags);
 void clusterAddNodeToShard(const char *shard_id, clusterNode *node);
 list *clusterLookupNodeListByShardId(const char *shard_id);
 void clusterRemoveNodeFromShard(clusterNode *node);
@@ -1032,6 +1033,7 @@ void clusterInit(void) {
     clusterUpdateMyselfHumanNodename();
 
     getRandomHexChars(server.cluster->internal_secret, CLUSTER_INTERNALSECRETLEN);
+    clusterCommonInit();
 }
 
 void clusterInitLast(void) {
@@ -2336,6 +2338,9 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
     uint16_t dirty_slots[CLUSTER_SLOTS];
     int dirty_slots_count = 0;
 
+    uint8_t asm_detect_updated_slots[CLUSTER_SLOTS];
+    memset(asm_detect_updated_slots, 0, sizeof(asm_detect_updated_slots));
+
     /* We should detect if sender is new master of our shard.
      * We will know it if all our slots were migrated to sender, and sender
      * has no slots except ours */
@@ -2375,6 +2380,14 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
             if (isSlotUnclaimed(j) ||
                 server.cluster->slots[j]->configEpoch < senderConfigEpoch)
             {
+                /* After compelting slot ranges migration, the destination node
+                 * will broadcast a PONG message to all the nodes. We need to
+                 * detect that the slot was moved from us to the sender, and
+                 * send ASM_REQUEST_CONFIG_UPDATED request to ASM later. */
+                if (server.cluster->slots[j] == myself && sender != myself) {
+                    asm_detect_updated_slots[j] = 1;
+                }
+
                 /* Was this slot mine, and still contains keys? Mark it as
                  * a dirty slot. */
                 if (server.cluster->slots[j] == myself &&
@@ -2406,6 +2419,34 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
             bitmapSetBit(server.cluster->owner_not_claiming_slot, j);
         }
     }
+
+    /* Transform the bitmap to a list of slot ranges, and send a request to ASM. */
+    slotRangeArray *sra = zmalloc(sizeof(*sra) + sizeof(slotRange) * CLUSTER_SLOTS);
+    sra->num_ranges = 0;
+    int start = -1;
+    for (int i = 0; i < CLUSTER_SLOTS; i++) {
+        if (asm_detect_updated_slots[i]) {
+            if (start == -1) {
+                start = i;
+            }
+        } else {
+            if (start != -1) {
+                sra->ranges[sra->num_ranges].start = start;
+                sra->ranges[sra->num_ranges].end = i - 1;
+                sra->num_ranges++;
+                start = -1;
+            }
+        }
+    }
+    if (start != -1) {
+        sra->ranges[sra->num_ranges].start = start;
+        sra->ranges[sra->num_ranges].end = CLUSTER_SLOTS - 1;
+        sra->num_ranges++;
+    }
+    if (sra->num_ranges > 0 && server.masterhost == NULL) {
+        asmNotifyConfigUpdated(sra, NULL);
+    }
+    zfree(sra);
 
     /* After updating the slots configuration, don't do any actual change
      * in the state of the server if a module disabled Redis Cluster
@@ -2456,7 +2497,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
          * In order to maintain a consistent state between keys and slots
          * we need to remove all the keys from the slots we lost. */
         for (j = 0; j < dirty_slots_count; j++)
-            delKeysInSlot(dirty_slots[j]);
+            clusterDelKeysInSlot(dirty_slots[j], 0);
     }
 }
 
@@ -4869,6 +4910,9 @@ void clusterCron(void) {
 
     if (update_state || server.cluster->state == CLUSTER_FAIL)
         clusterUpdateState();
+
+    /* Atomic slot migration cron */
+    asmCron();
 }
 
 /* This function is called before the event handler returns to sleep for
@@ -4906,6 +4950,8 @@ void clusterBeforeSleep(void) {
         int fsync = flags & CLUSTER_TODO_FSYNC_CONFIG;
         clusterSaveConfigOrDie(fsync);
     }
+
+    asmBeforeSleep();
 }
 
 void clusterDoBeforeSleep(int flags) {
@@ -5597,18 +5643,6 @@ const char *clusterGetMessageTypeString(int type) {
     return "unknown";
 }
 
-int getSlotOrReply(client *c, robj *o) {
-    long long slot;
-
-    if (getLongLongFromObject(o,&slot) != C_OK ||
-        slot < 0 || slot >= CLUSTER_SLOTS)
-    {
-        addReplyError(c,"Invalid or out of range slot");
-        return -1;
-    }
-    return (int) slot;
-}
-
 int checkSlotAssignmentsOrReply(client *c, unsigned char *slots, int del, int start_slot, int end_slot) {
     int slot;
     for (slot = start_slot; slot <= end_slot; slot++) {
@@ -5743,6 +5777,7 @@ sds genClusterInfoString(void) {
         "cluster_size:%d\r\n"
         "cluster_current_epoch:%llu\r\n"
         "cluster_my_epoch:%llu\r\n"
+        "cluster_slot_migration_sync_buffer_peak:%zu\r\n"
         , statestr[server.cluster->state],
         slots_assigned,
         slots_ok,
@@ -5751,7 +5786,8 @@ sds genClusterInfoString(void) {
         dictSize(server.cluster->nodes),
         server.cluster->size,
         (unsigned long long) server.cluster->currentEpoch,
-        (unsigned long long) myepoch
+        (unsigned long long) myepoch,
+        asmGetPeakSyncBufferSize()
     );
 
     /* Show stats about messages sent and received. */
@@ -5792,39 +5828,6 @@ void removeChannelsInSlot(unsigned int slot) {
     if (countChannelsInSlot(slot) == 0) return;
 
     pubsubShardUnsubscribeAllChannelsInSlot(slot);
-}
-
-/* Remove all the keys in the specified hash slot.
- * The number of removed items is returned. */
-unsigned int delKeysInSlot(unsigned int hashslot) {
-    if (!kvstoreDictSize(server.db->keys, hashslot))
-        return 0;
-
-    unsigned int j = 0;
-
-    kvstoreDictIterator *kvs_di = NULL;
-    dictEntry *de = NULL;
-    kvs_di = kvstoreGetDictSafeIterator(server.db->keys, hashslot);
-    while((de = kvstoreDictIteratorNext(kvs_di)) != NULL) {
-        enterExecutionUnit(1, 0);
-        sds sdskey = kvobjGetKey(dictGetKV(de));
-        robj *key = createStringObject(sdskey, sdslen(sdskey));
-        dbDelete(&server.db[0], key);
-        propagateDeletion(&server.db[0], key, server.lazyfree_lazy_server_del);
-        signalModifiedKey(NULL, &server.db[0], key);
-        /* The keys are not actually logically deleted from the database, just moved to another node.
-         * The modules needs to know that these keys are no longer available locally, so just send the
-         * keyspace notification to the modules, but not to clients. */
-        moduleNotifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, server.db[0].id);
-        exitExecutionUnit();
-        postExecutionUnitOperations();
-        decrRefCount(key);
-        j++;
-        server.dirty++;
-    }
-    kvstoreReleaseDictIterator(kvs_di);
-
-    return j;
 }
 
 /* Get the count of the channels for a given slot. */
@@ -6409,6 +6412,10 @@ int clusterCommandSpecial(client *c) {
     } else if (!strcasecmp(c->argv[1]->ptr,"links") && c->argc == 2) {
         /* CLUSTER LINKS */
         addReplyClusterLinksDescription(c);
+    } else if (!strcasecmp(c->argv[1]->ptr, "migration")) {
+        clusterMigrationCommand(c);
+    } else if (!strcasecmp(c->argv[1]->ptr,"syncslots") && c->argc >= 3) {
+        clusterSyncSlotsCommand(c);
     } else {
         return 0;
     }
@@ -6513,4 +6520,62 @@ int clusterAllowFailoverCmd(client *c) {
 
 void clusterPromoteSelfToMaster(void) {
     replicationUnsetMaster();
+}
+
+int clusterAsmOnEvent(sds task_id, int event, void *arg) {
+    UNUSED(arg);
+
+    slotRangeArray *slots = asmTaskGetSlotRanges(task_id);
+    sds str = createSlotRangesStr(slots);
+
+    switch (event) {
+        case ASM_EVENT_IMPORT_STARTED:
+            serverLog(LL_NOTICE, "Import task started for slots: %s", str);
+            break;
+        case ASM_EVENT_IMPORT_FAILED:
+            serverLog(LL_NOTICE, "Import task failed for slots: %s", str);
+            break;
+        case ASM_EVENT_TAKEOVER:
+            serverLog(LL_NOTICE, "Import task is ready to takeover slots: %s", str);
+
+            for (int i = 0; i < slots->num_ranges; i++) {
+                slotRange *sr = &slots->ranges[i];
+                for (int j = sr->start; j <= sr->end; j++) {
+                    clusterDelSlot(j);
+                    clusterAddSlot(myself, j);
+                }
+            }
+            /* New config and Bump new config */
+            clusterBumpConfigEpochWithoutConsensus();
+            clusterBroadcastPong(CLUSTER_BROADCAST_ALL);
+            clusterSaveConfigOrDie(1);
+            clusterAsmProcess(&task_id, ASM_EVENT_DONE, NULL, NULL);
+            break;
+        case ASM_EVENT_IMPORT_COMPLETED:
+            serverLog(LL_NOTICE, "Import task completed for slots: %s", str);
+            break;
+        case ASM_EVENT_MIGRATE_STARTED:
+            serverLog(LL_NOTICE, "Migrate task started for slots: %s", str);
+            break;
+        case ASM_EVENT_MIGRATE_FAILED:
+            serverLog(LL_NOTICE, "Migrate task failed for slots: %s", str);
+            unpauseActions(PAUSE_DURING_SLOT_HANDOFF);
+            break;
+        case ASM_EVENT_HANDOFF_PREP:
+            serverLog(LL_NOTICE, "Migrate task preparing to handoff for slots: %s", str);
+            pauseActions(PAUSE_DURING_SLOT_HANDOFF,
+                         LLONG_MAX,
+                         PAUSE_ACTIONS_CLIENT_WRITE_SET);
+            clusterAsmProcess(&task_id, ASM_EVENT_HANDOFF, NULL, NULL);
+            break;
+        case ASM_EVENT_MIGRATE_COMPLETED:
+            serverLog(LL_NOTICE, "Migrate task completed for slots: %s", str);
+            unpauseActions(PAUSE_DURING_SLOT_HANDOFF);
+            break;
+        default:
+            break;
+    }
+
+    sdsfree(str);
+    return C_OK;
 }

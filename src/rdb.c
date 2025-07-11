@@ -3719,6 +3719,8 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     return rdbLoadWithEmptyFunc(filename, rsi, rdbflags, NULL);
 }
 
+int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error);
+
 /* Like rdbLoadRio() but takes a filename instead of a rio stream. The
  * filename is open for reading and a rio stream object created in order
  * to do the actual loading. Moreover the ETA displayed in the INFO
@@ -3883,6 +3885,7 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
     pid_t childpid;
     int pipefds[2], rdb_pipe_write = 0, safe_to_exit_pipe = 0;
     int rdb_channel = server.repl_rdb_channel && (req & SLAVE_REQ_RDB_CHANNEL);
+    int slots_req = req & SLAVE_REQ_SLOTS_SNAPSHOT;
 
     if (hasActiveChildProcess()) return C_ERR;
 
@@ -3955,7 +3958,13 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
         redisSetProcTitle("redis-rdb-to-slaves");
         redisSetCpuAffinity(server.bgsave_cpulist);
 
-        retval = rdbSaveRioWithEOFMark(req,&rdb,NULL,rsi);
+        if (req & SLAVE_REQ_SLOTS_SNAPSHOT) {
+            /* Slots snapshot is required */
+            retval = slotRangesSnapshotSaveRio(req, &rdb, NULL);
+        } else {
+            retval = rdbSaveRioWithEOFMark(req,&rdb,NULL,rsi);
+        }
+
         if (retval == C_OK && rioFlush(&rdb) == 0)
             retval = C_ERR;
 
@@ -4005,7 +4014,8 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
             }
         } else {
             serverLog(LL_NOTICE, "Background RDB transfer started by pid %ld to %s", (long)childpid,
-                      rdb_channel ? "replica socket" : "parent process pipe");
+                rdb_channel ? (slots_req ? "slot migration destination socket" : "replica socket") :
+                              "parent process pipe");
             server.rdb_save_time_start = time(NULL);
             server.rdb_child_type = RDB_CHILD_TYPE_SOCKET;
             if (!rdb_channel) {

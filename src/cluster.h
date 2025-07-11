@@ -64,6 +64,7 @@ static inline unsigned int keyHashSlot(char *key, int keylen) {
 /* functions requiring mechanism specific implementations */
 void clusterInit(void);
 void clusterInitLast(void);
+void clusterCommonInit(void);
 void clusterCron(void);
 void clusterBeforeSleep(void);
 int verifyClusterConfigWithData(void);
@@ -137,10 +138,20 @@ int clusterRedirectBlockedClientIfNeeded(client *c);
 void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_code);
 void migrateCloseTimedoutSockets(void);
 int patternHashSlot(char *pattern, int length);
+int getSlotOrReply(client *c, robj *o);
 int isValidAuxString(char *s, unsigned int length);
 void migrateCommand(client *c);
 void clusterCommand(client *c);
 ConnectionType *connTypeOfCluster(void);
+sds createSlotRangesStr(slotRangeArray *slot_ranges);
+int validateSlotRanges(slotRangeArray *sra, sds *err);
+slotRangeArray *parseSlotRangesOrReply(client *c, int argc, int pos);
+
+#define CLUSTER_DELKEYS_NONE        (0)
+#define CLUSTER_DELKEYS_ASYNC       (1 << 0)
+#define CLUSTER_DELKEYS_BY_COMMAND  (1 << 1)
+unsigned int clusterDelKeysInSlot(unsigned int hashslot, int flags);
+unsigned int clusterDelKeysInSlotRangeArray(slotRangeArray *sra, int flags);
 
 void clusterGenNodesSlotsInfo(int filter);
 void clusterFreeNodesSlotsInfo(clusterNode *n);
@@ -160,4 +171,106 @@ clusterNode *clusterShardNodeFirst(void *shard);
 
 int clusterNodeTcpPort(clusterNode *node);
 int clusterNodeTlsPort(clusterNode *node);
+
+/* API for implementation/plugin
+ *
+ * - On destination side, implementation calls clusterAsmProcess(ASM_EVENT_IMPORT_START)
+ *   to start the import operation.
+ * - Redis calls clusterAsmOnEvent() when an event occurs.
+ * - On the source side, Redis will call clusterAsmOnEvent(ASM_EVENT_HANDOFF_PREP)
+ *   when slots are ready to be handed off  and the write pause is needed.
+ * - Implementation stops the traffic to the slots and calls clusterAsmProcess(ASM_EVENT_HANDOFF)
+ * - On the destination side, Redis calls clusterAsmOnEvent(ASM_EVENT_TAKEOVER)
+ *   when destination node is ready to take over the slot, waiting for config change.
+ * - Plugin updates the config and calls clusterAsmProcess(ASM_EVENT_DONE)
+ *   to notify Redis that the config is updated.
+ *
+ * Sequence diagram for import:
+ *   - Note: shows only the events that plugin needs to react.
+ *
+ * ┌───────────────┐              ┌───────────────┐         ┌───────────────┐             ┌───────────────┐
+ * │ Destination   │              │ Destination   │         │    Source     │             │ Source        │
+ * │ Cluster plugin│              │ Master        │         │    Master     │             │ Cluster plugin│
+ * └───────┬───────┘              └───────┬───────┘         └───────┬───────┘             └───────┬───────┘
+ *         │                              │                         │                             │
+ *         │     ASM_EVENT_IMPORT_START   │                         │                             │
+ *         ├─────────────────────────────►│                         │                             │
+ *         │                              │ CLUSTER SYNCSLOTS <arg> │                             │
+ *         │                              ├────────────────────────►│                             │
+ *         │                              │                         │                             │
+ *         │                              │  SNAPSHOT(restore cmds) │                             │
+ *         │                              │◄────────────────────────┤                             │
+ *         │                              │  Repl stream            │                             │
+ *         │                              │◄────────────────────────┤                             │
+ *         │                              │                         │   ASM_EVENT_HANDOFF_PREP    │
+ *         │                              │                         ├────────────────────────────►│
+ *         │                              │                         │     ASM_EVENT_HANDOFF       │
+ *         │                              │                         │◄────────────────────────────┤
+ *         │                              │ Drain repl stream       │                             │
+ *         │                              │◄────────────────────────┤                             │
+ *         │     ASM_EVENT_TAKEOVER       │                         │                             │
+ *         │◄─────────────────────────────┤                         │                             │
+ *         │                              │                         │                             │
+ *         │       ASM_EVENT_DONE         │                         │                             │
+ *         ├─────────────────────────────►│                         │       ASM_EVENT_DONE        │
+ *         │                              │                         │◄────────────────────────────┤
+ *         │                              │                         │                             │
+ */
+
+#define ASM_EVENT_IMPORT_START      1  /* Start a new import operation (destination side) */
+#define ASM_EVENT_CANCEL            2  /* Cancel an ongoing import/migrate operation (source and destination side) */
+#define ASM_EVENT_HANDOFF_PREP      3  /* Slot is ready to be handed off to the destination shard (source side) */
+#define ASM_EVENT_HANDOFF           4  /* Notify that the slot can be handed off (source side) */
+#define ASM_EVENT_TAKEOVER          5  /* Ready to take over the slot, waiting for config change (destination side) */
+#define ASM_EVENT_DONE              6  /* Notify that import/migrate is completed, config is updated (source and destination side) */
+
+#define ASM_EVENT_IMPORT_STARTED    7  /* Import started */
+#define ASM_EVENT_IMPORT_FAILED     8  /* Import failed */
+#define ASM_EVENT_IMPORT_COMPLETED  9  /* Import completed (config updated) */
+#define ASM_EVENT_MIGRATE_STARTED   10 /* Migration started */
+#define ASM_EVENT_MIGRATE_FAILED    11 /* Migration failed */
+#define ASM_EVENT_MIGRATE_COMPLETED 12 /* Migrate completed (config updated) */
+
+
+/* Called by plugin/implementation to request an ASM operation. (plugin --> redis)
+ * Valid values for 'event':
+ *  ASM_EVENT_IMPORT_START
+ *  ASM_EVENT_CANCEL
+ *  ASM_EVENT_HANDOFF
+ *  ASM_EVENT_DONE
+ *
+ *  In case of ASM_EVENT_IMPORT_START, 'task_id' will be set to the task id of
+ *  the import task. For this event, task_id should be NULL initially.
+ *    Usage:
+ *      sds task_id = NULL, err = NULL;
+ *      slotRangeArray *sra  = zmalloc(sizeof(*sra) + sizeof(slotRange));
+ *      sra->num_ranges = 1;
+ *      sra->ranges[0].start = 0;
+ *      sra->ranges[0].end = 1000;
+ *
+ *      if (clusterAsmProcess(&task_id, ASM_EVENT_IMPORT_START, sra, &err) != C_OK) {
+ *          // Handle error
+ *          sdsfree(err);
+ *          return;
+ *      }
+ *      // task_id is set to the task id of the import task
+ *
+ *  For other events, 'task_id' should be set to the task id of the task.
+ *
+ * Returns C_OK on success, C_ERR on failure. 'err' will be set to the error
+ * message and should be freed by the caller.
+ **/
+int clusterAsmProcess(sds *task_id, int event, void *arg, sds *err);
+
+/* Called when an ASM event occurs to notify implementation/plugin. (redis --> plugin)
+ *
+ * `arg` will point to a `slotRangeArray` for the following events`:
+ *  ASM_EVENT_IMPORT_STARTED
+ *  ASM_EVENT_MIGRATE_STARTED
+ *  ASM_EVENT_HANDOFF_PREP
+ *
+ *  Returns C_OK on success.
+ **/
+int clusterAsmOnEvent(sds task_id, int event, void *arg);
+
 #endif /* __CLUSTER_H */

@@ -17,6 +17,7 @@
 
 #include "server.h"
 #include "cluster.h"
+#include "cluster_asm.h"
 
 #include <ctype.h>
 
@@ -60,6 +61,18 @@ ConnectionType *connTypeOfCluster(void) {
     }
 
     return connectionTypeTcp();
+}
+
+int getSlotOrReply(client *c, robj *o) {
+    long long slot;
+
+    if (getLongLongFromObject(o,&slot) != C_OK ||
+        slot < 0 || slot >= CLUSTER_SLOTS)
+    {
+        addReplyError(c,"Invalid or out of range slot");
+        return -1;
+    }
+    return (int) slot;
 }
 
 /* -----------------------------------------------------------------------------
@@ -1559,14 +1572,137 @@ void readonlyCommand(client *c) {
     addReply(c,shared.ok);
 }
 
-void replySlotsFlushAndFree(client *c, SlotsFlush *sflush) {
-    addReplyArrayLen(c, sflush->numRanges);
-    for (int i = 0 ; i < sflush->numRanges ; i++) {
-        addReplyArrayLen(c, 2);
-        addReplyLongLong(c, sflush->ranges[i].first);
-        addReplyLongLong(c, sflush->ranges[i].last);
+/* Remove all the keys in the specified hash slot.
+ * The number of removed items is returned. */
+unsigned int clusterDelKeysInSlot(unsigned int hashslot, int flags) {
+    unsigned int j = 0;
+
+    if (!kvstoreDictSize(server.db->keys, (int) hashslot))
+        return 0;
+
+    kvstoreDictIterator *kvs_di = NULL;
+    dictEntry *de = NULL;
+    kvs_di = kvstoreGetDictSafeIterator(server.db->keys, (int) hashslot);
+    while((de = kvstoreDictIteratorNext(kvs_di)) != NULL) {
+        enterExecutionUnit(1, 0);
+        sds sdskey = kvobjGetKey(dictGetKV(de));
+        robj *key = createStringObject(sdskey, sdslen(sdskey));
+
+        if (flags & CLUSTER_DELKEYS_ASYNC) dbAsyncDelete(&server.db[0], key);
+        else dbSyncDelete(&server.db[0], key);
+
+        signalModifiedKey(NULL, &server.db[0], key);
+        if (flags & CLUSTER_DELKEYS_BY_COMMAND) {
+            /* Keys are not migrated but actually deleted. Command (sflush)
+             * will be propagated, so there is no need to propagate each
+             * deletion of the key. */
+            notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, server.db[0].id);
+        } else {
+            /* Propagate the DEL command */
+            propagateDeletion(&server.db[0], key, server.lazyfree_lazy_server_del);
+            /* The keys are not actually logically deleted from the database,
+             * just moved to another node. The modules needs to know that these
+             * keys are no longer available locally, so just send the keyspace
+             * notification to the modules, but not to clients. */
+            moduleNotifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, server.db[0].id);
+        }
+        exitExecutionUnit();
+        postExecutionUnitOperations();
+        decrRefCount(key);
+        j++;
+        server.dirty++;
     }
-    zfree(sflush);
+    kvstoreReleaseDictIterator(kvs_di);
+    return j;
+}
+
+/* Delete the keys in the slot ranges. Returns the number of deleted items */
+unsigned int clusterDelKeysInSlotRangeArray(slotRangeArray *sra, int flags) {
+    unsigned int j = 0;
+    for (int i = 0; i < sra->num_ranges; i++) {
+        for (int slot = sra->ranges[i].start; slot <= sra->ranges[i].end; slot++) {
+            j += clusterDelKeysInSlot(slot, flags);
+        }
+    }
+    return j;
+}
+
+void replySlotsFlushAndFree(client *c, slotRangeArray *sra) {
+    addReplyArrayLen(c, sra->num_ranges);
+    for (int i = 0 ; i < sra->num_ranges ; i++) {
+        addReplyArrayLen(c, 2);
+        addReplyLongLong(c, sra->ranges[i].start);
+        addReplyLongLong(c, sra->ranges[i].end);
+    }
+    zfree(sra);
+}
+
+/* Checks that slot ranges are well-formed and non-overlapping. */
+int validateSlotRanges(slotRangeArray *sra, sds *err) {
+    unsigned char slots[CLUSTER_SLOTS] = {0};
+
+    if (sra->num_ranges <= 0 || sra->num_ranges >= CLUSTER_SLOTS) {
+        *err = sdscatprintf(sdsempty(), "invalid number of slot ranges: %d", sra->num_ranges);
+        return C_ERR;
+    }
+
+    for (int i = 0; i < sra->num_ranges; i++) {
+        if (sra->ranges[i].start >= CLUSTER_SLOTS ||
+            sra->ranges[i].end >= CLUSTER_SLOTS)
+        {
+            *err = sdscatprintf(sdsempty(), "slot range is out of range: %d-%d",
+                                sra->ranges[i].start, sra->ranges[i].end);
+            return C_ERR;
+        }
+
+        if (sra->ranges[i].start > sra->ranges[i].end) {
+            *err = sdscatprintf(sdsempty(), "start slot number %d is greater than end slot number %d",
+                                sra->ranges[i].start, sra->ranges[i].end);
+            return C_ERR;
+        }
+
+        for (int j = sra->ranges[i].start; j <= sra->ranges[i].end; j++) {
+            if (slots[j]) {
+                *err = sdscatprintf(sdsempty(), "Slot %d specified multiple times", j);
+                return C_ERR;
+            }
+            slots[j]++;
+        }
+    }
+    return C_OK;
+}
+
+/* Parse slot ranges from the command arguments. Returns NULL on error. */
+slotRangeArray *parseSlotRangesOrReply(client *c, int argc, int pos) {
+    int start, end, count;
+    slotRangeArray *sra;
+
+    serverAssert(pos <= argc);
+    serverAssert((argc - pos) % 2 == 0);
+
+    count = (argc - pos) / 2;
+    sra = zcalloc(sizeof(*sra) + count * sizeof(slotRange));
+    sra->num_ranges = 0;
+
+    for (int j = pos; j < argc; j += 2) {
+        if ((start = getSlotOrReply(c, c->argv[j])) == -1 ||
+            (end = getSlotOrReply(c, c->argv[j + 1])) == -1)
+        {
+            zfree(sra);
+            return NULL;
+        }
+        sra->ranges[sra->num_ranges].start = start;
+        sra->ranges[sra->num_ranges].end = end;
+        sra->num_ranges++;
+    }
+
+    sds err = NULL;
+    if (validateSlotRanges(sra, &err) != C_OK) {
+        addReplyErrorSds(c, err);
+        zfree(sra);
+        return NULL;
+    }
+    return sra;
 }
 
 /* Partially flush destination DB in a cluster node, based on the slot range.
@@ -1606,77 +1742,54 @@ void sflushCommand(client *c) {
         return;
     }
 
-    /* Verify <first, last> slot pairs are valid and not overlapping */
-    long long j, first, last;
-    unsigned char slotsToFlushRq[CLUSTER_SLOTS] = {0};
-    for (j = 1; j < argc; j += 2) {
-        /* check if the first slot is valid */
-        if (getLongLongFromObject(c->argv[j], &first) != C_OK || first < 0 || first >= CLUSTER_SLOTS) {
-            addReplyError(c,"Invalid or out of range slot");
-            return;
-        }
+    /* Parse slot ranges from the command arguments. */
+    slotRangeArray *slot_ranges = parseSlotRangesOrReply(c, argc, 1);
+    if (!slot_ranges) return;
 
-        /* check if the last slot is valid */
-        if (getLongLongFromObject(c->argv[j+1], &last) != C_OK || last < 0 || last >= CLUSTER_SLOTS) {
-            addReplyError(c,"Invalid or out of range slot");
-            return;
-        }
-
-        if (first > last) {
-            addReplyErrorFormat(c,"start slot number %lld is greater than end slot number %lld", first, last);
-            return;
-        }
-
-        /* Mark the slots in slotsToFlushRq[] */
-        for (int i = first; i <= last; i++) {
-            if (slotsToFlushRq[i]) {
-                addReplyErrorFormat(c, "Slot %d specified multiple times", i);
-                return;
-            }
-            slotsToFlushRq[i] = 1;
-        }
-    }
-
-    /* Verify slotsToFlushRq[] covers ALL slots of myNode. */
-    clusterNode *myNode = getMyClusterNode();
-    /* During iteration trace also the slot range pairs and save in SlotsFlush.
-     * It is allocated on heap since there is a chance that FLUSH SYNC will be 
-     * running as blocking ASYNC and only later reply with slot ranges */
+    /* Iterate and find the slot ranges that belong to this node. Save them in
+     * a new slotRangeArray. It is allocated on heap since there is a chance
+     * that FLUSH SYNC will be running as blocking ASYNC and only later reply
+     * with slot ranges */
+    int in_slot_range = 0;
     int capacity = 32; /* Initial capacity */
-    SlotsFlush *sflush = zmalloc(sizeof(SlotsFlush) + sizeof(SlotRange) * capacity);
-    sflush->numRanges = 0;
-    int inSlotRange = 0;
-    for (int i = 0; i < CLUSTER_SLOTS; i++) {
-        if (myNode == getNodeBySlot(i)) {
-            if (!slotsToFlushRq[i]) {
-                addReplySetLen(c, 0); /* Not all slots of mynode got covered. See sflushCommand() comment. */
-                zfree(sflush);
-                return;
-            }
 
-            if (!inSlotRange) { /* If start another slot range */
-                sflush->ranges[sflush->numRanges].first = i;
-                inSlotRange = 1;
+    slotRangeArray *myslots = zmalloc(sizeof(*myslots) + sizeof(slotRange) * capacity);
+    myslots->num_ranges = 0;
+
+    for (int i = 0; i < slot_ranges->num_ranges; i++) {
+        slotRange *sr = &slot_ranges->ranges[i];
+        for (int slot = sr->start; slot <= sr->end; slot++) {
+            if (myslots->num_ranges >= capacity) {
+                capacity *= 2;
+                myslots = zrealloc(myslots, sizeof(*myslots) + sizeof(slotRange) * capacity);
             }
-        } else {
-            if (inSlotRange) { /* If end another slot range */
-                sflush->ranges[sflush->numRanges++].last = i - 1;
-                inSlotRange = 0;
-                /* If reached 'sflush' capacity, double the capacity */
-                if (sflush->numRanges >= capacity) {
-                    capacity *= 2;
-                    sflush = zrealloc(sflush, sizeof(SlotsFlush) + sizeof(SlotRange) * capacity);
-                }
+            /* Check if this slot belongs to this node */
+            int myslot = (getNodeBySlot(slot) == getMyClusterNode());
+
+            /* Start range on first owned slot, end range on first unowned slot */
+            if (myslot && !in_slot_range) {
+                in_slot_range = 1;
+                myslots->ranges[myslots->num_ranges].start = slot;
+            } else if (!myslot && in_slot_range) {
+                in_slot_range = 0;
+                myslots->ranges[myslots->num_ranges++].end = slot - 1;
+            }
+        }
+        if (in_slot_range) {
+            /* End the current slot range if this is the last range or if
+             * there's a gap before the next range starts. */
+            int last_range = (i == slot_ranges->num_ranges - 1);
+            if (last_range || slot_ranges->ranges[i + 1].start != sr->end + 1) {
+                myslots->ranges[myslots->num_ranges++].end = sr->end;
+                in_slot_range = 0;
             }
         }
     }
+    zfree(slot_ranges);
 
-    /* Update last pair if last cluster slot is also end of last range */
-    if (inSlotRange) sflush->ranges[sflush->numRanges++].last = CLUSTER_SLOTS - 1;
-    
     /* Flush selected slots. If not flush as blocking async, then reply immediately */
-    if (flushCommandCommon(c, FLUSH_TYPE_SLOTS, flags, sflush) == 0)
-        replySlotsFlushAndFree(c, sflush);
+    if (flushCommandCommon(c, FLUSH_TYPE_SLOTS, flags, myslots) == 0)
+        replySlotsFlushAndFree(c, myslots);
 }
 
 /* The READWRITE command just clears the READONLY command state. */
@@ -1688,3 +1801,22 @@ void readwriteCommand(client *c) {
     c->flags &= ~CLIENT_READONLY;
     addReply(c,shared.ok);
 }
+
+void clusterCommonInit(void) {
+    clusterAsmInit();
+}
+
+/* Create a slot range string in the format of: "1000-2000 3000-4000 ..." */
+sds createSlotRangesStr(slotRangeArray *slot_ranges) {
+    sds s = sdsempty();
+
+    for (int i = 0; i < slot_ranges->num_ranges; i++) {
+        slotRange *sr = &slot_ranges->ranges[i];
+        s = sdscatprintf(s, "%d-%d ", sr->start, sr->end);
+    }
+    sdssetlen(s, sdslen(s) - 1);
+    s[sdslen(s)] = '\0';
+
+    return s;
+}
+
