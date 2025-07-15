@@ -423,7 +423,7 @@ unsigned long long kvstoreScan(kvstore *kvs, unsigned long long cursor,
 
     dict *d = kvstoreGetDict(kvs, didx);
 
-    int skip = !d || (skip_cb && skip_cb(d));
+    int skip = !d || (skip_cb && skip_cb(d, didx));
     if (!skip) {
         _cursor = dictScan(d, cursor, scan_cb, privdata);
         /* In dictScan, scan_cb may delete entries (e.g., in active expire case). */

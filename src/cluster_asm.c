@@ -272,6 +272,29 @@ size_t asmGetPeakSyncBufferSize(void) {
     return peak;
 }
 
+/* Return true if the given slot supports key expiration.
+ * This is used to determine whether keys in the slot can be
+ * expired or evicted during ASM operations. */
+int asmSlotAllowsExpiry(int slot) {
+    if (!asmManager || listLength(asmManager->tasks) == 0) return 1;
+
+    /* Only support a single task at a time now, so only check the first task */
+    asmTask *task = listNodeValue(listFirst(asmManager->tasks));
+    if ((task->operation == ASM_IMPORT && task->state != ASM_NONE) ||
+        (task->operation == ASM_MIGRATE &&
+         (task->state == ASM_HANDOFF || task->state == ASM_STREAM_DONE)))
+    {
+        for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
+            slotRange *sr = &task->slot_ranges->ranges[i];
+            /* If the slot is in the range, return false */
+            if (slot >= sr->start && slot <= sr->end)
+                return 0;
+        }
+    }
+
+    return 1;
+}
+
 static int compareSlotRange(const void *a, const void *b) {
     const slotRange *sa = a;
     const slotRange *sb = b;
@@ -704,6 +727,8 @@ void asmImportSetFailed(asmTask *task) {
     /* Close the connections */
     if (task->rdb_channel_conn) connClose(task->rdb_channel_conn);
     if (task->main_channel_conn) connClose(task->main_channel_conn);
+    task->rdb_channel_conn = NULL;
+    task->main_channel_conn = NULL;
 
     /* Clear the replication data buffer */
     asmManager->sync_buffer_peak = max(asmManager->sync_buffer_peak, task->sync_buffer.peak);

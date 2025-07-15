@@ -16,6 +16,7 @@
 #include "latency.h"
 #include "script.h"
 #include "functions.h"
+#include "cluster_asm.h"
 
 #include <signal.h>
 #include <ctype.h>
@@ -1391,6 +1392,11 @@ char *getObjectTypeName(robj *o) {
     }
 }
 
+static int shouldSkipDictForScan(dict *d, int didx) {
+    UNUSED(d);
+    return server.cluster_enabled && !asmSlotAllowsExpiry(didx);
+}
+
 /* This command implements SCAN, HSCAN and SSCAN commands.
  * If object 'o' is passed, then it must be a Hash, Set or Zset object, otherwise
  * if 'o' is NULL the command will operate on the dictionary associated with
@@ -1544,7 +1550,7 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
             /* In cluster mode there is a separate dictionary for each slot.
              * If cursor is empty, we should try exploring next non-empty slot. */
             if (o == NULL) {
-                cursor = kvstoreScan(c->db->keys, cursor, onlydidx, scanCallback, NULL, &data);
+                cursor = kvstoreScan(c->db->keys, cursor, onlydidx, scanCallback, shouldSkipDictForScan, &data);
             } else {
                 cursor = dictScan(ht, cursor, scanCallback, &data);
             }
@@ -2503,15 +2509,18 @@ keyStatus expireIfNeeded(redisDb *db, robj *key, kvobj *kv, int flags) {
      * exception is when write operations are performed on writable
      * replicas.
      *
+     * In cluster mode, we also return ASAP if we are importing data
+     * from the source, to avoid deleting keys that are still in use.
+     *
      * Still we try to return the right information to the caller,
      * that is, KEY_VALID if we think the key should still be valid,
      * KEY_EXPIRED if we think the key is expired but don't want to delete it at this time.
      *
      * When replicating commands from the master, keys are never considered
      * expired. */
-    if (server.masterhost != NULL) {
+    if (server.masterhost != NULL || server.cluster_enabled) {
         if (server.current_client && (server.current_client->flags & CLIENT_MASTER)) return KEY_VALID;
-        if (!(flags & EXPIRE_FORCE_DELETE_EXPIRED)) return KEY_EXPIRED;
+        if (server.masterhost != NULL && !(flags & EXPIRE_FORCE_DELETE_EXPIRED)) return KEY_EXPIRED;
     }
 
     /* In some cases we're explicitly instructed to return an indication of a
@@ -2609,7 +2618,7 @@ unsigned long long dbSize(redisDb *db) {
 }
 
 unsigned long long dbScan(redisDb *db, unsigned long long cursor, dictScanFunction *scan_cb, void *privdata) {
-    return kvstoreScan(db->keys, cursor, -1, scan_cb, NULL, privdata);
+    return kvstoreScan(db->keys, cursor, -1, scan_cb, shouldSkipDictForScan, privdata);
 }
 
 /* -----------------------------------------------------------------------------

@@ -250,13 +250,15 @@ start_cluster 3 3 {tags {external:skip cluster}} {
     }
 
     test "Migration will be successful after fail points are cleared" {
+        set slot0_key "06S"
+        set slot1_key "Qi"
         # we set a delay to write incremental data
         R 1 config set rdb-key-save-delay 1000000
 
         # Start the slot 0 write load on the R 1
         if {$::tls} { set port [lindex [R 1 config get tls-port] 1]
         } else { set port [lindex [R 1 config get port] 1] }
-        set load_handle [start_write_load "127.0.0.1" $port 100 "06S"]
+        set load_handle [start_write_load "127.0.0.1" $port 100 $slot0_key]
 
         # Clear all fail points
         assert_equal {OK} [R 0 debug asm-failpoint "" ""]
@@ -277,12 +279,12 @@ start_cluster 3 3 {tags {external:skip cluster}} {
 
         # Verify the data is migrated, slot 0 and 1 should belong to R 1
         # slot 0 key should be changed by the write load
-        assert_not_equal [string repeat a 100] [R 0 get "06S"]
-        assert_equal [string repeat b 100] [R 0 get "Qi"]
+        assert_not_equal [string repeat a 100] [R 0 get $slot0_key]
+        assert_equal [string repeat b 100] [R 0 get $slot1_key]
         # Slave should also get the data
         after 100
         R 3 readonly
-        assert_equal [string repeat b 100] [R 3 get "Qi"]
+        assert_equal [string repeat b 100] [R 3 get $slot1_key]
         R 1 config set rdb-key-save-delay 0
     }
 
@@ -339,5 +341,48 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         # Reset configurations
         R 0 config set client-output-buffer-limit "replica 0 0 0"
         R 0 config set rdb-key-save-delay 0
+    }
+
+    test {"expired key is not deleted during migration"} {
+        set slot0_key "06S"
+        set slot1_key "Qi"
+        set slot2_key "5L5"
+
+        # we set a delay to write incremental data
+        R 1 config set rdb-key-save-delay 1000000
+
+        # set expire time 2s. Generating slot snapshot will 3s, so these
+        # three keys will be expired after slot snapshot is transferred
+        R 1 setex $slot0_key 2 "a"
+        R 1 setex $slot1_key 2 "b"
+        R 1 setex $slot2_key 2 "c"
+
+        set task_id [R 0 CLUSTER MIGRATION IMPORT 0 100]
+        wait_for_condition 2000 10 {
+            [string match {*send-bulk-and-stream*} [migration_status 1 $task_id state]]
+        } else {
+            fail "ASM task did not start"
+        }
+
+        # update expire time during mirgration
+        R 1 setex $slot0_key 100 "aa"
+        R 1 setex $slot1_key 80  "bb"
+        R 1 setex $slot2_key 60  "cc"
+
+        wait_for_condition 1000 50 {
+            [string match {*done*} [migration_status 0 $task_id state]] &&
+            [string match {*done*} [migration_status 1 $task_id state]]
+        } else {
+            fail "ASM task did not complete successfully"
+        }
+
+        # verify the keys are valid
+        assert_equal "aa" [R 0 get $slot0_key]
+        assert_equal "bb" [R 0 get $slot1_key]
+        assert_equal "cc" [R 0 get $slot2_key]
+
+        assert_range [R 0 ttl $slot0_key] 90 100
+        assert_range [R 0 ttl $slot1_key] 70 80
+        assert_range [R 0 ttl $slot2_key] 50 60
     }
 }

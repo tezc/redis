@@ -37,7 +37,7 @@ typedef struct _kvstore kvstore;
 typedef struct _kvstoreIterator kvstoreIterator;
 typedef struct _kvstoreDictIterator kvstoreDictIterator;
 
-typedef int (kvstoreScanShouldSkipDict)(dict *d);
+typedef int (kvstoreScanShouldSkipDict)(dict *d, int didx);
 typedef int (kvstoreExpandShouldSkipDictIndex)(int didx);
 
 #define KVSTORE_ALLOCATE_DICTS_ON_DEMAND (1<<0)
