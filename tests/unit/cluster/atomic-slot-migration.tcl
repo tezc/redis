@@ -26,7 +26,7 @@ proc migration_status {node_id task_id field} {
     return ""
 }
 
-start_cluster 3 3 {tags {external:skip cluster}} {
+start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000}} {
     test "Test IMPORT input validation" {
         # Invalid slot range
         assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION IMPORT}
@@ -318,7 +318,7 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         # Start the slot 0 write load on the R 0
         if {$::tls} { set port [lindex [R 0 config get tls-port] 1]
         } else { set port [lindex [R 0 config get port] 1] }
-        set load_handle [start_write_load "127.0.0.1" $port 100000 $slot0_key]
+        set load_handle [start_write_load "127.0.0.1" $port 1000 $slot0_key]
 
         # After some time, the client output buffer limit should be reached
         wait_for_log_messages 0 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 1000 10
