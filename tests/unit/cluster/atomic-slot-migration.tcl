@@ -318,7 +318,7 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         # Start the slot 0 write load on the R 0
         if {$::tls} { set port [lindex [R 0 config get tls-port] 1]
         } else { set port [lindex [R 0 config get port] 1] }
-        set load_handle [start_write_load "127.0.0.1" $port 100 $slot0_key]
+        set load_handle [start_write_load "127.0.0.1" $port 100000 $slot0_key]
 
         # After some time, the client output buffer limit should be reached
         wait_for_log_messages 0 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 1000 10
@@ -371,7 +371,7 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         R 1 expire $slot1_key 80
         R 1 expire $slot2_key 60
 
-        # after 2s, at least a key should be tranferred, and should not be deleted
+        # after 2s, at least a key should be transferred, and should not be deleted
         # due to expired, neither active nor lazy expiration (SCAN) takes effect,
         # Besides SCAN command can not find them
         after 2000
