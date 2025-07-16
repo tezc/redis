@@ -280,10 +280,10 @@ int asmSlotAllowsExpiry(int slot) {
 
     /* Only support a single task at a time now, so only check the first task */
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
-    if ((task->operation == ASM_IMPORT && task->state != ASM_NONE) ||
-        (task->operation == ASM_MIGRATE &&
-         (task->state == ASM_HANDOFF || task->state == ASM_STREAM_DONE)))
-    {
+    /* We only check the destination side, the source side `pauseActions` will
+     * pause the write traffic (including expire/evict). */
+    /* TODO: for failed state, is it safe to expire? cleanup may take long time */
+    if ((task->operation == ASM_IMPORT && task->state != ASM_NONE)) {
         for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
             slotRange *sr = &task->slot_ranges->ranges[i];
             /* If the slot is in the range, return false */
