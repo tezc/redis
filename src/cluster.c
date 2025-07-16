@@ -238,7 +238,7 @@ void restoreCommand(client *c) {
         deleted = dbDelete(c->db,key);
 
     if (ttl && !absttl) ttl+=commandTimeSnapshot();
-    if (ttl && checkAlreadyExpired(ttl)) {
+    if (ttl && checkAlreadyExpired(ttl) && !(c->flags & CLIENT_MASTER)) {
         if (deleted) {
             robj *aux = server.lazyfree_lazy_server_del ? shared.unlink : shared.del;
             rewriteClientCommandVector(c, 2, aux, key);

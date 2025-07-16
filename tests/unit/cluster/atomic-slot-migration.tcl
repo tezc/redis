@@ -343,10 +343,12 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         R 0 config set rdb-key-save-delay 0
     }
 
-    test {"expired key is not deleted during migration"} {
+    test "expired key is not deleted during migration" {
         set slot0_key "06S"
         set slot1_key "Qi"
         set slot2_key "5L5"
+        R 1 flushall
+        R 0 flushall
 
         # we set a delay to write incremental data
         R 1 config set rdb-key-save-delay 1000000
@@ -365,9 +367,18 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         }
 
         # update expire time during mirgration
-        R 1 setex $slot0_key 100 "aa"
-        R 1 setex $slot1_key 80  "bb"
-        R 1 setex $slot2_key 60  "cc"
+        R 1 expire $slot0_key 100
+        R 1 expire $slot1_key 80
+        R 1 expire $slot2_key 60
+
+        # after 2s, at least a key should be tranferred, and should not be deleted
+        # due to expired, neither active nor lazy expiration (SCAN) takes effect,
+        # Besides SCAN command can not find them
+        after 2000
+        assert_equal {0 {}} [R 0 scan 0 count 10]
+        if {$::verbose} { puts [R 0 info keyspace] }
+        assert {[scan [regexp -inline {keys\=([\d]*)} [R 0 info keyspace]] keys=%d] >= 1}
+        assert {[scan [regexp -inline {expires\=([\d]*)} [R 0 info keyspace]] expires=%d] >= 1}
 
         wait_for_condition 1000 50 {
             [string match {*done*} [migration_status 0 $task_id state]] &&
@@ -377,12 +388,27 @@ start_cluster 3 3 {tags {external:skip cluster}} {
         }
 
         # verify the keys are valid
-        assert_equal "aa" [R 0 get $slot0_key]
-        assert_equal "bb" [R 0 get $slot1_key]
-        assert_equal "cc" [R 0 get $slot2_key]
-
         assert_range [R 0 ttl $slot0_key] 90 100
         assert_range [R 0 ttl $slot1_key] 70 80
         assert_range [R 0 ttl $slot2_key] 50 60
+
+        # after slot migration, scan can find all of them
+        assert_equal [list 0 [list $slot0_key $slot1_key $slot2_key]] [R 0 scan 0 count 10]
+        assert_equal 3 [scan [regexp -inline {keys\=([\d]*)} [R 0 info keyspace]] keys=%d]
+        assert_equal 3 [scan [regexp -inline {expires\=([\d]*)} [R 0 info keyspace]] expires=%d]
+
+        # update expire time to 10ms, after some time, the keys should be deleted due to
+        # active expiration
+        R 0 pexpire $slot0_key 10
+        R 0 pexpire $slot1_key 10
+        R 0 pexpire $slot2_key 10
+        wait_for_condition 100 50 {
+            [scan [regexp -inline {keys\=([\d]*)} [R 0 info keyspace]] keys=%d] == {} &&
+            [scan [regexp -inline {expires\=([\d]*)} [R 0 info keyspace]] expires=%d] == {}
+        } else {
+            fail "keys did not expire"
+        }
+
+        R 1 config set rdb-key-save-delay 0
     }
 }

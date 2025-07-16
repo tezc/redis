@@ -1634,8 +1634,10 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
                     if (rioWriteBulkString(rdb, "ABSTTL", 6) == 0) goto werr;
 
                     /* Delay return if required (for testing) */
-                    if (unlikely(server.rdb_key_save_delay))
+                    if (unlikely(server.rdb_key_save_delay)) {
+                        rioFlush(rdb); /* Send buffer to the destination ASAP. */
                         debugDelay(server.rdb_key_save_delay);
+                    }
                 }
                 kvstoreReleaseDictIterator(kvs_di);
                 kvs_di = NULL;
