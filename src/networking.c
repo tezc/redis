@@ -126,10 +126,18 @@ client *createClient(connection *conn) {
      * in the context of a client. When commands are executed in other
      * contexts (for instance a Lua script) we need a non connected client. */
     if (conn) {
+#if !defined(HAVE_IO_URING)
         connEnableTcpNoDelay(conn);
+#endif
         if (server.tcpkeepalive)
             connKeepAlive(conn,server.tcpkeepalive);
+#if defined(HAVE_IO_URING)
+        /* Do not create poll event */
+        conn->read_handler = readDoneFromClient;
+        conn->write_handler = writeDoneToClient;
+#else
         connSetReadHandler(conn, readQueryFromClient);
+#endif
         connSetPrivateData(conn, c);
     }
     c->buf = zmalloc_usable(PROTO_REPLY_CHUNK_BYTES, &c->buf_usable_size);
@@ -151,6 +159,9 @@ client *createClient(connection *conn) {
     c->lib_name = NULL;
     c->lib_ver = NULL;
     c->bufpos = 0;
+    c->qblen = 0;
+    c->submitted_query = 0;
+    c->totwritten = 0;
     c->buf_peak = c->buf_usable_size;
     c->buf_peak_last_reset_time = server.unixtime;
     c->ref_repl_buf_node = NULL;
@@ -1468,6 +1479,10 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
         freeClient(connGetPrivateData(conn));
         return;
     }
+
+#ifdef HAVE_IO_URING
+    readQueryFromClient(conn);
+#endif
 }
 
 /* Attempt to defer freeing the object to the IO thread. We usually call this since
@@ -2000,51 +2015,31 @@ client *lookupClientByID(uint64_t id) {
     return c;
 }
 
-/* This function should be called from _writeToClient when the reply list is not empty,
- * it gathers the scattered buffers from reply list and sends them away with connWritev.
- * If we write successfully, it returns C_OK, otherwise, C_ERR is returned,
- * and 'nwritten' is an output parameter, it means how many bytes server write
- * to client. */
-static int _writevToClient(client *c, ssize_t *nwritten) {
-    int iovcnt = 0;
-    int iovmax = min(IOV_MAX, c->conn->iovcnt);
-    struct iovec iov[iovmax];
-    size_t iov_bytes_len = 0;
-    /* If the static reply buffer is not empty, 
-     * add it to the iov array for writev() as well. */
-    if (c->bufpos > 0) {
-        iov[iovcnt].iov_base = c->buf + c->sentlen;
-        iov[iovcnt].iov_len = c->bufpos - c->sentlen;
-        iov_bytes_len += iov[iovcnt++].iov_len;
+#if defined(HAVE_IO_URING)
+void writeDoneToClient(connection *conn) {
+    client *c = connGetPrivateData(conn);
+    c->submitted_query--;
+
+    ssize_t nwritten = conn->cqe_res;
+    if (nwritten < 0) {
+        if (connGetState(conn) == CONN_STATE_CONNECTED) {
+            nwritten = 0;
+        } else {
+            serverLog(LL_VERBOSE,
+                      "Error writing to client: %s", connGetLastError(c->conn));
+            freeClientAsync(c);
+            return;
+        }
     }
-    /* The first node of reply list might be incomplete from the last call,
-     * thus it needs to be calibrated to get the actual data address and length. */
-    size_t offset = c->bufpos > 0 ? 0 : c->sentlen;
+    if (nwritten <= 0) return;
+
     listIter iter;
     listNode *next;
     clientReplyBlock *o;
-    listRewind(c->reply, &iter);
-    while ((next = listNext(&iter)) && iovcnt < iovmax && iov_bytes_len < NET_MAX_WRITES_PER_EVENT) {
-        o = listNodeValue(next);
-        if (o->used == 0) { /* empty node, just release it and skip. */
-            c->reply_bytes -= o->size;
-            listDelNode(c->reply, next);
-            offset = 0;
-            continue;
-        }
-
-        iov[iovcnt].iov_base = o->buf + offset;
-        iov[iovcnt].iov_len = o->used - offset;
-        iov_bytes_len += iov[iovcnt++].iov_len;
-        offset = 0;
-    }
-    if (iovcnt == 0) return C_OK;
-    *nwritten = connWritev(c->conn, iov, iovcnt);
-    if (*nwritten <= 0) return C_ERR;
 
     /* Locate the new node which has leftover data and
      * release all nodes in front of it. */
-    ssize_t remaining = *nwritten;
+    ssize_t remaining = nwritten;
     if (c->bufpos > 0) { /* deal with static reply buffer first. */
         int buf_len = c->bufpos - c->sentlen;
         c->sentlen += remaining;
@@ -2055,7 +2050,10 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             c->sentlen = 0;
         }
         remaining -= buf_len;
+        if (remaining == 0)
+            c->wiov_count--;
     }
+
     listRewind(c->reply, &iter);
     while (remaining > 0) {
         next = listNext(&iter);
@@ -2068,7 +2066,84 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         c->reply_bytes -= o->size;
         listDelNode(c->reply, next);
         c->sentlen = 0;
+        c->wiov_count--;
     }
+
+    if (clientHasPendingReplies(c)) {
+        writeToClient(c, 0);
+    } else {
+        server.stat_net_output_bytes += c->totwritten;
+        if (c->totwritten > 0) {
+            /* For clients representing masters we don't count sending data
+            * as an interaction, since we always send REPLCONF ACK commands
+            * that take some time to just fill the socket output buffer.
+            * We just rely on data / pings received for timeout detection. */
+            if (!(c->flags & CLIENT_MASTER)) c->lastinteraction = server.unixtime;
+        }
+        /* Close connection after entire reply has been sent. */
+        if (c->flags & CLIENT_CLOSE_AFTER_REPLY) {
+            freeClientAsync(c);
+            return;
+        }
+        readQueryFromClient(conn);
+    }
+}
+#endif
+
+/* This function should be called from _writeToClient when the reply list is not empty,
+ * it gathers the scattered buffers from reply list and sends them away with connWritev.
+ * If we write successfully, it returns C_OK, otherwise, C_ERR is returned,
+ * and 'nwritten' is an output parameter, it means how many bytes server write
+ * to client. */
+static int _writevToClient(client *c, ssize_t *nwritten) {
+    int iovmax = min(IOV_MAX, c->conn->iovcnt);
+    struct iovec *iov = c->wiov;
+    size_t iov_bytes_len = 0;
+    /* If the static reply buffer is not empty, 
+     * add it to the iov array for writev() as well. */
+    if (c->bufpos > 0) {
+        iov[c->wiov_count].iov_base = c->buf + c->sentlen;
+        iov[c->wiov_count].iov_len = c->bufpos - c->sentlen;
+        iov_bytes_len += iov[c->wiov_count++].iov_len;
+    }
+    /* The first node of reply list might be incomplete from the last call,
+     * thus it needs to be calibrated to get the actual data address and length. */
+    size_t offset = c->bufpos > 0 ? 0 : c->sentlen;
+    listIter iter;
+    listNode *next;
+    clientReplyBlock *o;
+    listRewind(c->reply, &iter);
+    while ((next = listNext(&iter)) && c->wiov_count < iovmax && iov_bytes_len < NET_MAX_WRITES_PER_EVENT) {
+        o = listNodeValue(next);
+        if (o->used == 0) { /* empty node, just release it and skip. */
+            c->reply_bytes -= o->size;
+            listDelNode(c->reply, next);
+            offset = 0;
+            continue;
+        }
+
+        iov[c->wiov_count].iov_base = o->buf + offset;
+        iov[c->wiov_count].iov_len = o->used - offset;
+        iov_bytes_len += iov[c->wiov_count++].iov_len;
+        offset = 0;
+    }
+    if (c->wiov_count == 0) return C_OK;
+
+    c->submitted_query++;
+
+#if defined(HAVE_IO_URING)
+#else
+    *nwritten = connWrite(c->conn, c->buf + c->sentlen, c->bufpos - c->sentlen);
+        if (*nwritten <= 0) return C_ERR;
+        c->sentlen += *nwritten;
+
+        /* If the buffer was sent, set bufpos to zero to continue with
+         * the remainder of the reply. */
+        if ((int)c->sentlen == c->bufpos) {
+            c->bufpos = 0;
+            c->sentlen = 0;
+        }
+#endif
 
     return C_OK;
 }
@@ -2091,6 +2166,12 @@ static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten) {
         if (listLength(c->reply) == 0)
             serverAssert(c->reply_bytes == 0);
     } else if (c->bufpos > 0) {
+#if defined(HAVE_IO_URING)
+        c->wiov[c->wiov_count].iov_base = c->buf + c->sentlen;
+        c->wiov[c->wiov_count].iov_len = c->bufpos - c->sentlen;
+        c->wiov_count++;
+        c->submitted_query++;
+#else
         *nwritten = connWrite(c->conn, c->buf + c->sentlen, c->bufpos - c->sentlen);
         if (*nwritten <= 0) return C_ERR;
         c->sentlen += *nwritten;
@@ -2101,6 +2182,7 @@ static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten) {
             c->bufpos = 0;
             c->sentlen = 0;
         }
+#endif
     }
     return C_OK;
 }
@@ -2165,7 +2247,7 @@ int writeToClient(client *c, int handler_installed) {
          * it's because it's a MONITOR/slot-migration client, which are marked
          * as replicas, but exposed as normal clients */
         const int is_normal_client = !(c->flags & CLIENT_SLAVE);
-        while (_clientHasPendingRepliesNonSlave(c)) {
+        while (_clientHasPendingRepliesNonSlave(c) && c->submitted_query == 0) {
             int ret = _writeToClientNonSlave(c, &nwritten);
             if (ret == C_ERR) break;
             totwritten += nwritten;
@@ -2189,46 +2271,56 @@ int writeToClient(client *c, int handler_installed) {
         }
         atomicIncr(server.stat_net_output_bytes, totwritten);
     }
-    c->net_output_bytes += totwritten;
+#if defined(HAVE_IO_URING)
+    if (aeCreateFileEventWithBuf(server.el, c->conn->fd, AE_WRITABLE,
+                                 c->conn->type->ae_handler, c->conn, c->wiov, c->wiov_count) == AE_ERR)
+    {
+        serverPanic("Unrecoverable error creating WRITABLE file event.");
+    }
 
-    if (nwritten == -1) {
-        if (connGetState(c->conn) != CONN_STATE_CONNECTED) {
-            serverLog(LL_VERBOSE,
-                "Error writing to client: %s", connGetLastError(c->conn));
-            freeClientAsync(c);
-            return C_ERR;
-        }
-    }
-    if (totwritten > 0) {
-        /* For clients representing masters we don't count sending data
-         * as an interaction, since we always send REPLCONF ACK commands
-         * that take some time to just fill the socket output buffer.
-         * We just rely on data / pings received for timeout detection. */
-        if (!(c->flags & CLIENT_MASTER)) c->lastinteraction = server.unixtime;
-    }
-    if (!clientHasPendingReplies(c)) {
-        c->sentlen = 0;
-        /* Note that writeToClient() is called in a threaded way, but
-         * aeDeleteFileEvent() is not thread safe: however writeToClient()
-         * is always called with handler_installed set to 0 from threads
-         * so we are fine. */
-        if (handler_installed) {
-            /* IO Thread also can do that now. */
-            connSetWriteHandler(c->conn, NULL);
-        }
+#endif
 
-        /* Close connection after entire reply has been sent. */
-        if (c->flags & CLIENT_CLOSE_AFTER_REPLY) {
-            freeClientAsync(c);
-            return C_ERR;
-        }
-    }
-    /* Update client's memory usage after writing.
-     * Since this isn't thread safe we do this conditionally. */
-    if (c->running_tid == IOTHREAD_MAIN_THREAD_ID) {
-        updateClientMemUsageAndBucket(c);
-    }
     return C_OK;
+    //c->net_output_bytes += totwritten;
+
+    //if (nwritten == -1) {
+    //    if (connGetState(c->conn) != CONN_STATE_CONNECTED) {
+    //        serverLog(LL_VERBOSE,
+    //            "Error writing to client: %s", connGetLastError(c->conn));
+    //        freeClientAsync(c);
+    //        return C_ERR;
+    //    }
+    //}
+    //if (totwritten > 0) {
+    //    /* For clients representing masters we don't count sending data
+    //     * as an interaction, since we always send REPLCONF ACK commands
+    //     * that take some time to just fill the socket output buffer.
+    //     * We just rely on data / pings received for timeout detection. */
+    //    if (!(c->flags & CLIENT_MASTER)) c->lastinteraction = server.unixtime;
+    //}
+    //if (!clientHasPendingReplies(c)) {
+    //    c->sentlen = 0;
+    //    /* Note that writeToClient() is called in a threaded way, but
+    //     * aeDeleteFileEvent() is not thread safe: however writeToClient()
+    //     * is always called with handler_installed set to 0 from threads
+    //     * so we are fine. */
+    //    if (handler_installed) {
+    //        /* IO Thread also can do that now. */
+    //        connSetWriteHandler(c->conn, NULL);
+    //    }
+
+    //    /* Close connection after entire reply has been sent. */
+    //    if (c->flags & CLIENT_CLOSE_AFTER_REPLY) {
+    //        freeClientAsync(c);
+    //        return C_ERR;
+    //    }
+    //}
+    ///* Update client's memory usage after writing.
+    // * Since this isn't thread safe we do this conditionally. */
+    //if (c->running_tid == IOTHREAD_MAIN_THREAD_ID) {
+    //    updateClientMemUsageAndBucket(c);
+    //}
+    //return C_OK;
 }
 
 /* Write event handler. Just send data to the client. */
@@ -2271,11 +2363,13 @@ int handleClientsWithPendingWrites(void) {
         /* Try to write buffers to the client socket. */
         if (writeToClient(c,0) == C_ERR) continue;
 
+#if !defined(HAVE_IO_URING)
         /* If after the synchronous writes above we still have data to
          * output to the client, we need to install the writable handler. */
         if (clientHasPendingReplies(c)) {
             installClientWriteHandler(c);
         }
+#endif
     }
     return processed;
 }
@@ -2935,7 +3029,7 @@ int processInputBuffer(client *c) {
 
 void readQueryFromClient(connection *conn) {
     client *c = connGetPrivateData(conn);
-    int nread, big_arg = 0;
+    int big_arg = 0;
     size_t qblen, readlen;
     if (!(c->io_flags & CLIENT_IO_READ_ENABLED)) return;
     c->read_error = 0;
@@ -2991,7 +3085,7 @@ void readQueryFromClient(connection *conn) {
         }
     }
 
-    qblen = sdslen(c->querybuf);
+    qblen = c->qblen = sdslen(c->querybuf);
     if (!(c->flags & CLIENT_MASTER) && // master client's querybuf can grow greedy.
         (big_arg || sdsalloc(c->querybuf) < PROTO_IOBUF_LEN)) {
         /* When reading a BIG_ARG we won't be reading more than that one arg
@@ -3009,6 +3103,7 @@ void readQueryFromClient(connection *conn) {
         /* Read as much as possible from the socket to save read(2) system calls. */
         readlen = sdsavail(c->querybuf);
     }
+#if !defined(HAVE_IO_URING)
     nread = connRead(c->conn, c->querybuf+qblen, readlen);
     if (nread == -1) {
         if (connGetState(conn) == CONN_STATE_CONNECTED) {
@@ -3055,6 +3150,68 @@ void readQueryFromClient(connection *conn) {
      * and check if there is a full command to execute. */
     if (processInputBuffer(c) == C_ERR)
          c = NULL;
+#else
+    c->riov->iov_len = readlen;
+    c->riov->iov_base = c->querybuf+qblen;
+    c->submitted_query++;
+    if (aeCreateFileEventWithBuf(server.el, conn->fd, AE_READABLE, conn->type->ae_handler, conn, c->riov, 1) == AE_ERR) {
+        serverPanic("Unrecoverable error creating file event.");
+    }
+    return;
+#endif
+}
+
+#if defined(HAVE_IO_URING)
+void readDoneFromClient(connection *conn) {
+    client *c = connGetPrivateData(conn);
+    int nread = conn->cqe_res;
+    if (nread < 0) {
+        if (connGetState(conn) == CONN_STATE_CONNECTED) {
+            goto done;
+        } else {
+            c->read_error = CLIENT_READ_CONN_DISCONNECTED;
+            freeClientAsync(c);
+            goto done;
+        }
+    } else if (nread == 0) {
+        c->read_error = CLIENT_READ_CONN_CLOSED;
+        freeClientAsync(c);
+        goto done;
+    }
+
+    sdsIncrLen(c->querybuf,nread);
+    c->qblen = sdslen(c->querybuf);
+    if (c->querybuf_peak < c->qblen) c->querybuf_peak = c->qblen;
+
+    c->lastinteraction = server.unixtime;
+    if (c->flags & CLIENT_MASTER) {
+        c->read_reploff += nread;
+        atomicIncr(server.stat_net_repl_input_bytes, nread);
+    } else {
+        atomicIncr(server.stat_net_input_bytes, nread);
+    }
+    c->net_input_bytes += nread;
+
+    if (!(c->flags & CLIENT_MASTER) &&
+        /* The commands cached in the MULTI/EXEC queue have not been executed yet,
+         * so they are also considered a part of the query buffer in a broader sense.
+         *
+         * For unauthenticated clients, the query buffer cannot exceed 1MB at most. */
+        (c->mstate.argv_len_sums + sdslen(c->querybuf) > server.client_max_querybuf_len ||
+         (c->mstate.argv_len_sums + sdslen(c->querybuf) > 1024*1024 && authRequired(c))))
+    {
+        c->read_error = CLIENT_READ_REACHED_MAX_QUERYBUF;
+        freeClientAsync(c);
+        atomicIncr(server.stat_client_qbuf_limit_disconnections, 1);
+        goto done;
+    }
+
+    c->submitted_query--;
+
+    /* There is more data in the client input buffer, continue parsing it
+     * and check if there is a full command to execute. */
+    if (processInputBuffer(c) == C_ERR)
+        c = NULL;
 
 done:
     if (c && c->read_error) {
@@ -3069,6 +3226,7 @@ done:
     }
     beforeNextClient(c);
 }
+#endif
 
 /* A Redis "Address String" is a colon separated ip:port pair.
  * For IPv4 it's in the form x.y.z.k:port, example: "127.0.0.1:1234".

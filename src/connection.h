@@ -91,7 +91,7 @@ typedef struct ConnectionType {
     int (*process_pending_data)(struct aeEventLoop *el);
 
     /* TLS specified methods */
-    sds (*get_peer_cert)(struct connection *conn);
+    void* (*get_peer_cert)(struct connection *conn);
 } ConnectionType;
 
 struct connection {
@@ -99,6 +99,7 @@ struct connection {
     ConnectionState state;
     int last_errno;
     int fd;
+    int cqe_res;
     short int flags;
     short int refs;
     unsigned short int iovcnt;
@@ -377,7 +378,7 @@ int connSendTimeout(connection *conn, long long ms);
 int connRecvTimeout(connection *conn, long long ms);
 
 /* Get cert for the secure connection */
-static inline sds connGetPeerCert(connection *conn) {
+static inline void *connGetPeerCert(connection *conn) {
     if (conn->type->get_peer_cert) {
         return conn->type->get_peer_cert(conn);
     }
@@ -446,6 +447,7 @@ static inline aeFileProc *connAcceptHandler(ConnectionType *ct) {
 }
 
 /* Get Listeners information, note that caller should free the non-empty string */
+typedef char *sds;
 sds getListensInfoString(sds info);
 
 int RedisRegisterConnectionTypeSocket(void);

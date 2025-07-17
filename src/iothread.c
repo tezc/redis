@@ -650,12 +650,20 @@ void initThreadedIO(void) {
                              "The maximum number is %d.", IO_THREADS_MAX_NUM);
         exit(1);
     }
+    int extflags = 0;
+
+#define ENABLE_SQPOLL 1
+
+#ifdef HAVE_IO_URING
+    if (server.sqpoll)
+        extflags |= ENABLE_SQPOLL;
+#endif
 
     /* Spawn and initialize the I/O threads. */
     for (int i = 1; i < server.io_threads_num; i++) {
         IOThread *t = &IOThreads[i];
         t->id = i;
-        t->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
+        t->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR, extflags, 4);
         t->el->privdata[0] = t;
         t->pending_clients = listCreate();
         t->processing_clients = listCreate();

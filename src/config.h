@@ -84,6 +84,11 @@
 #define HAVE_EPOLL 1
 #endif
 
+/* Test for io uring API */
+#ifdef __linux__
+#define HAVE_IO_URING 1
+#endif
+
 /* Test for accept4() */
 #if defined(__linux__) || defined(OpenBSD5_7) || \
     (__FreeBSD__ >= 10 || __FreeBSD_version >= 1000000) || \

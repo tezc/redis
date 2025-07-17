@@ -774,9 +774,15 @@ static void tlsAcceptHandler(aeEventLoop *el, int fd, void *privdata, int mask) 
             if (errno != EWOULDBLOCK)
                 serverLog(LL_WARNING,
                     "Accepting client connection: %s", server.neterr);
+#ifdef HAVE_IO_URING
+            if (aeCreateFileEvent(el, fd, AE_READABLE, acceptTcpHandler, NULL) == AE_ERR) {
+                serverPanic("Unrecoverable error creating server.ipfd file event.");
+            }
+#endif
             return;
         }
         serverLog(LL_VERBOSE,"Accepted %s:%d", cip, cport);
+        aeRegisterFile(el, cfd);
         acceptCommonHandler(connCreateAcceptedTLS(el,cfd,&server.tls_auth_clients), 0, cip);
     }
 }

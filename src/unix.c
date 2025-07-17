@@ -105,9 +105,16 @@ static void connUnixAcceptHandler(aeEventLoop *el, int fd, void *privdata, int m
             if (errno != EWOULDBLOCK)
                 serverLog(LL_WARNING,
                     "Accepting client connection: %s", server.neterr);
+#ifdef HAVE_IO_URING
+            if (aeCreateFileEvent(el, fd, AE_READABLE, connUnixAcceptHandler, NULL) == AE_ERR) {
+                serverPanic("Unrecoverable error creating server.ipfd file event.");
+            }
+#endif
+
             return;
         }
         serverLog(LL_VERBOSE,"Accepted connection to %s", server.unixsocket);
+        aeRegisterFile(el, cfd);
         acceptCommonHandler(connCreateAcceptedUnix(el, cfd, NULL),CLIENT_UNIX_SOCKET,NULL);
     }
 }

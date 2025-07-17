@@ -207,9 +207,11 @@ const char *asmChannelToString(int channel) {
     }
 }
 
+/* Debug failure */
 int asmDebugIsFailPointActive(int channel, int state) {
     if (!asmManager) return 0; /* ASM manager not initialized */
     if (asmManager->debug_failed_channel == channel && asmManager->debug_failed_state == state) {
+
         serverLog(LL_NOTICE, "ASM fail point active: channel=%s, state=%s",
                   asmChannelToString(channel), asmTaskStateToString(state));
         return 1;

@@ -1333,6 +1333,11 @@ typedef struct client {
     robj *lib_name;         /* The client library name as set by CLIENT SETINFO. */
     robj *lib_ver;          /* The client library version as set by CLIENT SETINFO. */
     sds querybuf;           /* Buffer we use to accumulate client queries. */
+    struct iovec riov[IOV_MAX];
+    struct iovec wiov[IOV_MAX];
+    int wiov_count;
+    int submitted_query;
+    size_t qblen;
     size_t qb_pos;          /* The position we have read in querybuf. */
     size_t querybuf_peak;   /* Recent (100ms or more) peak of querybuf size. */
     int argc;               /* Num of arguments of current command. */
@@ -1359,6 +1364,7 @@ typedef struct client {
     list *deferred_reply_errors;    /* Used for module thread safe contexts. */
     size_t sentlen;         /* Amount of bytes already sent in the current
                                buffer or object being sent. */
+    size_t totwritten;
     time_t ctime;           /* Client creation time. */
     long duration;          /* Current command duration. Used for measuring latency of blocking/non-blocking cmds */
     int slot;               /* The slot the client is executing against. Set to -1 if no slot is being used */
@@ -1852,6 +1858,7 @@ struct redisServer {
     int io_threads_do_reads;    /* Read and parse from IO threads? */
     int io_threads_active;      /* Is IO threads currently active? */
     long long events_processed_while_blocked; /* processEventsWhileBlocked() */
+    int iouring_threads_num;
     int enable_protected_configs;    /* Enable the modification of protected configs, see PROTECTED_ACTION_ALLOWED_* */
     int enable_debug_cmd;            /* Enable DEBUG commands, see PROTECTED_ACTION_ALLOWED_* */
     int enable_module_cmd;           /* Enable MODULE commands, see PROTECTED_ACTION_ALLOWED_* */
@@ -2285,6 +2292,7 @@ struct redisServer {
     char *bio_cpulist; /* cpu affinity list of bio thread. */
     char *aof_rewrite_cpulist; /* cpu affinity list of aof rewrite process. */
     char *bgsave_cpulist; /* cpu affinity list of bgsave process. */
+    int sqpoll;
     /* Sentinel config */
     struct sentinelConfig *sentinel_config; /* sentinel config to load at startup time. */
     /* Coordinate failover info */
@@ -2825,6 +2833,10 @@ void setDeferredPushLen(client *c, void *node, long length);
 int processInputBuffer(client *c);
 void acceptCommonHandler(connection *conn, int flags, char *ip);
 void readQueryFromClient(connection *conn);
+#if defined(HAVE_IO_URING)
+void readDoneFromClient(connection *conn);
+void writeDoneToClient(connection *conn);
+#endif
 int prepareClientToWrite(client *c);
 void addReplyNull(client *c);
 void addReplyNullArray(client *c);

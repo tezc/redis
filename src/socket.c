@@ -311,9 +311,16 @@ static void connSocketAcceptHandler(aeEventLoop *el, int fd, void *privdata, int
             if (errno != EWOULDBLOCK)
                 serverLog(LL_WARNING,
                     "Accepting client connection: %s", server.neterr);
+
+#ifdef HAVE_IO_URING
+            if (aeCreateFileEvent(el, fd, AE_READABLE, connSocketAcceptHandler, NULL) == AE_ERR) {
+                serverPanic("Unrecoverable error creating server.ipfd file event.");
+            }
+#endif
             return;
         }
         serverLog(LL_VERBOSE,"Accepted %s:%d", cip, cport);
+        aeRegisterFile(el, cfd);
         acceptCommonHandler(connCreateAcceptedSocket(el,cfd,NULL), 0, cip);
     }
 }
