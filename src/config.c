@@ -354,7 +354,7 @@ void resetServerSaveParams(void) {
     server.saveparamslen = 0;
 }
 
-void setServerSqpoll() {
+void setServerSqpoll(void) {
     server.sqpoll = 1;
 }
 

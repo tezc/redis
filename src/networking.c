@@ -2096,6 +2096,7 @@ void writeDoneToClient(connection *conn) {
  * and 'nwritten' is an output parameter, it means how many bytes server write
  * to client. */
 static int _writevToClient(client *c, ssize_t *nwritten) {
+    (void) nwritten;
     int iovmax = min(IOV_MAX, c->conn->iovcnt);
     struct iovec *iov = c->wiov;
     size_t iov_bytes_len = 0;
@@ -2225,6 +2226,7 @@ static inline int _writeToClientSlave(client *c, ssize_t *nwritten) {
  * set to 0. So when handler_installed is set to 0 the function must be
  * thread safe. */
 int writeToClient(client *c, int handler_installed) {
+    (void) handler_installed;
     if (!(c->io_flags & CLIENT_IO_WRITE_ENABLED)) return C_OK;
     /* Update the number of writes of io threads on server */
     atomicIncr(server.stat_io_writes_processed[c->running_tid], 1);
