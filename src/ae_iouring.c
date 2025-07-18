@@ -136,7 +136,7 @@ static int aeApiResize(aeEventLoop *eventLoop, int setsize) {
 static void aeApiFree(aeEventLoop *eventLoop) {
     aeApiState *state = eventLoop->apidata;
 
-    close(state->urfd);
+    io_uring_queue_exit(state->ring);
     zfree(state->events);
     zfree(state->ring);
     zfree(state);
