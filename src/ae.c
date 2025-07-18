@@ -49,7 +49,7 @@
 #endif
 
 #define INITIAL_EVENT 1024
-aeEventLoop *aeCreateEventLoop(int setsize, int extflags, int num_threads) {
+aeEventLoop *aeCreateEventLoop(int setsize, int extflags, int num_threads, int num_iothreads) {
     aeEventLoop *eventLoop;
     int i;
 
@@ -70,6 +70,7 @@ aeEventLoop *aeCreateEventLoop(int setsize, int extflags, int num_threads) {
     eventLoop->flags = 0;
     eventLoop->extflags = extflags;
     eventLoop->num_threads = num_threads;
+    eventLoop->num_iothreads = num_iothreads;
     memset(eventLoop->privdata, 0, sizeof(eventLoop->privdata));
     if (aeApiCreate(eventLoop) == -1) goto err;
     /* Events with mask == AE_NONE are not set. So let's initialize the

@@ -1336,7 +1336,8 @@ typedef struct client {
     struct iovec riov[IOV_MAX];
     struct iovec wiov[IOV_MAX];
     int wiov_count;
-    int submitted_query;
+    int pending_iouringop_read;
+    int pending_iouringop_write;
     size_t qblen;
     size_t qb_pos;          /* The position we have read in querybuf. */
     size_t querybuf_peak;   /* Recent (100ms or more) peak of querybuf size. */

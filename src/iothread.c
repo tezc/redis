@@ -482,6 +482,13 @@ void handleClientsFromIOThread(struct aeEventLoop *el, int fd, void *ptr, int ma
 
     /* Process the clients from IO threads. */
     processClientsFromIOThread(t);
+
+    if (aeCreateFileEvent(server.el, getReadEventFd(mainThreadPendingClientsNotifiers[t->id]),
+                          AE_READABLE, handleClientsFromIOThread, t) != AE_OK)
+    {
+        serverLog(LL_WARNING, "Fatal: Can't register file event for main thread notifications.");
+        exit(1);
+    }
 }
 
 /* In the new threaded io design, one thread may process multiple clients, so when
@@ -519,6 +526,13 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
 
     /* Process the clients from main thread. */
     processClientsFromMainThread(t);
+
+    if (aeCreateFileEvent(t->el, getReadEventFd(t->pending_clients_notifier),
+                          AE_READABLE, handleClientsFromMainThread, t) != AE_OK)
+    {
+        serverLog(LL_WARNING, "Fatal: Can't register file event for IO thread notifications.");
+        exit(1);
+    }
 }
 
 /* Processing clients that have finished executing commands from the main thread.
@@ -566,15 +580,18 @@ int processClientsFromMainThread(IOThread *t) {
         if (!connHasEventLoop(c->conn)) {
             connRebindEventLoop(c->conn, t->el);
             serverAssert(!connHasReadHandler(c->conn));
-            connSetReadHandler(c->conn, readQueryFromClient);
+            c->conn->read_handler = readDoneFromClient;
+            c->conn->write_handler = writeDoneToClient;
         }
 
         /* If the client has pending replies, write replies to client. */
         if (clientHasPendingReplies(c)) {
             writeToClient(c, 0);
-            if (!(c->io_flags & CLIENT_IO_CLOSE_ASAP) && clientHasPendingReplies(c)) {
-                connSetWriteHandler(c->conn, sendReplyToClient);
-            }
+            //if (!(c->io_flags & CLIENT_IO_CLOSE_ASAP) && clientHasPendingReplies(c) && c->pending_iouringop == 0) {
+            //    connSetWriteHandler(c->conn, sendReplyToClient);
+            //}
+        } else {
+            readQueryFromClient(c->conn);
         }
     }
     /* All clients must are processed. */
@@ -663,7 +680,7 @@ void initThreadedIO(void) {
     for (int i = 1; i < server.io_threads_num; i++) {
         IOThread *t = &IOThreads[i];
         t->id = i;
-        t->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR, extflags, 4);
+        t->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR, extflags, server.iouring_threads_num, server.io_threads_num);
         t->el->privdata[0] = t;
         t->pending_clients = listCreate();
         t->processing_clients = listCreate();

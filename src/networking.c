@@ -160,7 +160,8 @@ client *createClient(connection *conn) {
     c->lib_ver = NULL;
     c->bufpos = 0;
     c->qblen = 0;
-    c->submitted_query = 0;
+    c->pending_iouringop_read = 0;
+    c->pending_iouringop_write = 0;
     c->totwritten = 0;
     c->buf_peak = c->buf_usable_size;
     c->buf_peak_last_reset_time = server.unixtime;
@@ -1402,7 +1403,13 @@ void clientAcceptHandler(connection *conn) {
                           c);
 
     /* Assign the client to an IO thread */
-    if (server.io_threads_num > 1) assignClientToIOThread(c);
+    if (server.io_threads_num > 1) {
+        assignClientToIOThread(c);
+    } else {
+#ifdef HAVE_IO_URING
+        readQueryFromClient(conn);
+#endif
+    }
 }
 
 void acceptCommonHandler(connection *conn, int flags, char *ip) {
@@ -1479,10 +1486,6 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
         freeClient(connGetPrivateData(conn));
         return;
     }
-
-#ifdef HAVE_IO_URING
-    readQueryFromClient(conn);
-#endif
 }
 
 /* Attempt to defer freeing the object to the IO thread. We usually call this since
@@ -2018,7 +2021,7 @@ client *lookupClientByID(uint64_t id) {
 #if defined(HAVE_IO_URING)
 void writeDoneToClient(connection *conn) {
     client *c = connGetPrivateData(conn);
-    c->submitted_query--;
+    c->pending_iouringop_write--;
 
     ssize_t nwritten = conn->cqe_res;
     if (nwritten < 0) {
@@ -2130,7 +2133,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     }
     if (c->wiov_count == 0) return C_OK;
 
-    c->submitted_query++;
+    c->pending_iouringop_write++;
 
 #if defined(HAVE_IO_URING)
 #else
@@ -2171,7 +2174,7 @@ static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten) {
         c->wiov[c->wiov_count].iov_base = c->buf + c->sentlen;
         c->wiov[c->wiov_count].iov_len = c->bufpos - c->sentlen;
         c->wiov_count++;
-        c->submitted_query++;
+        c->pending_iouringop_write++;
 #else
         *nwritten = connWrite(c->conn, c->buf + c->sentlen, c->bufpos - c->sentlen);
         if (*nwritten <= 0) return C_ERR;
@@ -2249,7 +2252,7 @@ int writeToClient(client *c, int handler_installed) {
          * it's because it's a MONITOR/slot-migration client, which are marked
          * as replicas, but exposed as normal clients */
         const int is_normal_client = !(c->flags & CLIENT_SLAVE);
-        while (_clientHasPendingRepliesNonSlave(c) && c->submitted_query == 0) {
+        while (_clientHasPendingRepliesNonSlave(c) && c->pending_iouringop_write == 0) {
             int ret = _writeToClientNonSlave(c, &nwritten);
             if (ret == C_ERR) break;
             totwritten += nwritten;
@@ -2274,7 +2277,7 @@ int writeToClient(client *c, int handler_installed) {
         atomicIncr(server.stat_net_output_bytes, totwritten);
     }
 #if defined(HAVE_IO_URING)
-    if (aeCreateFileEventWithBuf(server.el, c->conn->fd, AE_WRITABLE,
+    if (aeCreateFileEventWithBuf(c->conn->el, c->conn->fd, AE_WRITABLE,
                                  c->conn->type->ae_handler, c->conn, c->wiov, c->wiov_count) == AE_ERR)
     {
         serverPanic("Unrecoverable error creating WRITABLE file event.");
@@ -3036,6 +3039,8 @@ void readQueryFromClient(connection *conn) {
     if (!(c->io_flags & CLIENT_IO_READ_ENABLED)) return;
     c->read_error = 0;
 
+    if (c->pending_iouringop_read) return;
+
     /* Update the number of reads of io threads on server */
     atomicIncr(server.stat_io_reads_processed[c->running_tid], 1);
 
@@ -3155,8 +3160,8 @@ void readQueryFromClient(connection *conn) {
 #else
     c->riov->iov_len = readlen;
     c->riov->iov_base = c->querybuf+qblen;
-    c->submitted_query++;
-    if (aeCreateFileEventWithBuf(server.el, conn->fd, AE_READABLE, conn->type->ae_handler, conn, c->riov, 1) == AE_ERR) {
+    c->pending_iouringop_read++;
+    if (aeCreateFileEventWithBuf(c->conn->el, conn->fd, AE_READABLE, conn->type->ae_handler, conn, c->riov, 1) == AE_ERR) {
         serverPanic("Unrecoverable error creating file event.");
     }
     return;
@@ -3166,6 +3171,8 @@ void readQueryFromClient(connection *conn) {
 #if defined(HAVE_IO_URING)
 void readDoneFromClient(connection *conn) {
     client *c = connGetPrivateData(conn);
+    c->pending_iouringop_read--;
+
     int nread = conn->cqe_res;
     if (nread < 0) {
         if (connGetState(conn) == CONN_STATE_CONNECTED) {
@@ -3207,8 +3214,6 @@ void readDoneFromClient(connection *conn) {
         atomicIncr(server.stat_client_qbuf_limit_disconnections, 1);
         goto done;
     }
-
-    c->submitted_query--;
 
     /* There is more data in the client input buffer, continue parsing it
      * and check if there is a full command to execute. */

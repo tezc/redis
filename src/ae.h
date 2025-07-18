@@ -94,11 +94,12 @@ typedef struct aeEventLoop {
     int flags;
     int extflags;
     int num_threads;
+    int num_iothreads;
     void *privdata[2];
 } aeEventLoop;
 
 /* Prototypes */
-aeEventLoop *aeCreateEventLoop(int setsize, int extflags, int num_threads);
+aeEventLoop *aeCreateEventLoop(int setsize, int extflags, int num_threads, int num_iothreads);
 void aeDeleteEventLoop(aeEventLoop *eventLoop);
 void aeStop(aeEventLoop *eventLoop);
 int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,

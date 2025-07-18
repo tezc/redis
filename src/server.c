@@ -826,7 +826,7 @@ int clientsCronResizeQueryBuffer(client *c) {
 
     /* Only resize the query buffer if the buffer is actually wasting at least a
      * few kbytes */
-    if (sdsavail(c->querybuf) > 1024*4 && !c->submitted_query) {
+    if (sdsavail(c->querybuf) > 1024*4 && !c->pending_iouringop_read) {
         /* There are two conditions to resize the query buffer: */
         if (idletime > 2) {
             /* 1) Query is idle for a long time. */
@@ -2829,7 +2829,7 @@ void initServer(void) {
         extflags |= ENABLE_SQPOLL;
 #endif
 
-    server.el = aeCreateEventLoop(server.maxclients + CONFIG_FDSET_INCR, extflags, server.iouring_threads_num);
+    server.el = aeCreateEventLoop(server.maxclients + CONFIG_FDSET_INCR, extflags, server.iouring_threads_num, server.io_threads_num);
     if (server.el == NULL) {
         serverLog(LL_WARNING,
             "Failed creating the event loop. Error message: '%s'",

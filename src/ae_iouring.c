@@ -36,7 +36,7 @@
 #define MAX_ENTRIES 8192 /* entries should be configured by users */
 #define ENABLE_SQPOLL 1
 
-static int register_files = 1;
+static int register_files = 0;
 
 typedef struct uring_event {
     int fd;
@@ -69,10 +69,19 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
     struct io_uring_params params;
     memset(&params, 0, sizeof(params));
 
-    params.flags |= IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_DEFER_TASKRUN;
+    params.flags |= IORING_SETUP_COOP_TASKRUN;
 
-    if (eventLoop->extflags & ENABLE_SQPOLL)
-        params.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_SQPOLL;
+    if (eventLoop->num_iothreads < 2)
+        params.flags |= IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
+
+    if (eventLoop->extflags & ENABLE_SQPOLL) {
+        if (eventLoop->num_iothreads > 1) {
+            perror("sqpoll not supported with multiple io threads");
+            exit(1);
+        }
+        params.flags = IORING_SETUP_SQPOLL;
+    }
+
 
     state->urfd = io_uring_queue_init_params(MAX_ENTRIES, state->ring, &params);
     if (state->urfd != 0) {
@@ -191,8 +200,8 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     struct io_uring_cqe *cqe;
 
     struct __kernel_timespec ts = {
-            .tv_nsec = tvp->tv_usec * 1000,
-            .tv_sec = tvp->tv_sec
+            .tv_nsec = tvp ? tvp->tv_usec * 1000: 0,
+            .tv_sec = tvp ? tvp->tv_sec : 100000000
     };
 
     retval = io_uring_submit_and_wait_timeout(state->ring, &cqe, 1, &ts, NULL);
@@ -217,7 +226,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
 
         if (ev->type & AE_POLLABLE) {
             if (cqe->res < 0) {
-                //io_uring_cqe_seen(state->ring, cqe);
+                fprintf(stderr, "poll_add failed: %d %s %d\n", cqe->res, strerror(-cqe->res), ev->fd);
                 continue;
             }
 
