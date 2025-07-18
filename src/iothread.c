@@ -680,7 +680,7 @@ void initThreadedIO(void) {
     for (int i = 1; i < server.io_threads_num; i++) {
         IOThread *t = &IOThreads[i];
         t->id = i;
-        t->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR, extflags, server.iouring_threads_num, server.io_threads_num);
+        t->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR, extflags, server.iouring_threads_num, server.io_threads_num, server.el->ringfd);
         t->el->privdata[0] = t;
         t->pending_clients = listCreate();
         t->processing_clients = listCreate();

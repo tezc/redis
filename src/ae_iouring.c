@@ -69,28 +69,29 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
     struct io_uring_params params;
     memset(&params, 0, sizeof(params));
 
-    params.flags |= IORING_SETUP_COOP_TASKRUN;
-
     if (eventLoop->num_iothreads < 2)
         params.flags |= IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
 
-    if (eventLoop->extflags & ENABLE_SQPOLL) {
-        if (eventLoop->num_iothreads > 1) {
-            perror("sqpoll not supported with multiple io threads");
-            exit(1);
-        }
-        params.flags = IORING_SETUP_SQPOLL;
-    }
+    if (eventLoop->extflags & ENABLE_SQPOLL)
+        params.flags |= IORING_SETUP_SQPOLL;
+    else
+        params.flags |= IORING_SETUP_COOP_TASKRUN;
 
+    if (eventLoop->ringfd != -1) {
+        params.wq_fd = eventLoop->ringfd;
+        params.flags |= IORING_SETUP_ATTACH_WQ;
+    }
 
     state->urfd = io_uring_queue_init_params(MAX_ENTRIES, state->ring, &params);
     if (state->urfd != 0) {
-        printf("error awas %d \n", state->urfd);
+        printf("error was %d %s\n", state->urfd, strerror(-state->urfd));
         zfree(state->ring);
         zfree(state->events);
         zfree(state);
         return -1;
     }
+    eventLoop->ringfd = state->ring->ring_fd;
+
     if (!(params.features & IORING_FEAT_FAST_POLL)) {
         io_uring_queue_exit(state->ring);
         zfree(state->ring);

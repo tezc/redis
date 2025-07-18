@@ -2829,7 +2829,7 @@ void initServer(void) {
         extflags |= ENABLE_SQPOLL;
 #endif
 
-    server.el = aeCreateEventLoop(server.maxclients + CONFIG_FDSET_INCR, extflags, server.iouring_threads_num, server.io_threads_num);
+    server.el = aeCreateEventLoop(server.maxclients + CONFIG_FDSET_INCR, extflags, server.iouring_threads_num, server.io_threads_num, -1);
     if (server.el == NULL) {
         serverLog(LL_WARNING,
             "Failed creating the event loop. Error message: '%s'",
