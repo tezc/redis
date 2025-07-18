@@ -90,7 +90,8 @@ void keepClientInMainThread(client *c) {
     unbindClientFromIOThreadEventLoop(c);
     /* Let main thread to run it, rebind event loop and read handler */
     connRebindEventLoop(c->conn, server.el);
-    connSetReadHandler(c->conn, readQueryFromClient);
+    //connSetReadHandler(c->conn, readQueryFromClient);
+    abort();
     c->io_flags |= CLIENT_IO_READ_ENABLED | CLIENT_IO_WRITE_ENABLED;
     c->running_tid = IOTHREAD_MAIN_THREAD_ID;
     c->tid = IOTHREAD_MAIN_THREAD_ID;
@@ -482,13 +483,6 @@ void handleClientsFromIOThread(struct aeEventLoop *el, int fd, void *ptr, int ma
 
     /* Process the clients from IO threads. */
     processClientsFromIOThread(t);
-
-    if (aeCreateFileEvent(server.el, getReadEventFd(mainThreadPendingClientsNotifiers[t->id]),
-                          AE_READABLE, handleClientsFromIOThread, t) != AE_OK)
-    {
-        serverLog(LL_WARNING, "Fatal: Can't register file event for main thread notifications.");
-        exit(1);
-    }
 }
 
 /* In the new threaded io design, one thread may process multiple clients, so when
@@ -526,13 +520,6 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
 
     /* Process the clients from main thread. */
     processClientsFromMainThread(t);
-
-    if (aeCreateFileEvent(t->el, getReadEventFd(t->pending_clients_notifier),
-                          AE_READABLE, handleClientsFromMainThread, t) != AE_OK)
-    {
-        serverLog(LL_WARNING, "Fatal: Can't register file event for IO thread notifications.");
-        exit(1);
-    }
 }
 
 /* Processing clients that have finished executing commands from the main thread.

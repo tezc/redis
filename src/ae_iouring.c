@@ -154,7 +154,7 @@ static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask,
         unsigned int poll_mask = 0;
         if (mask == AE_READABLE) poll_mask |= EPOLLIN;
         if (mask == AE_WRITABLE) poll_mask |= EPOLLOUT;
-        io_uring_prep_poll_add(sqe, fd, poll_mask);
+        io_uring_prep_poll_multishot(sqe, fd, poll_mask);
     } else {
         if (mask & AE_READABLE) {
             if (num_iovecs == 1)
@@ -208,7 +208,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     retval = io_uring_submit_and_wait_timeout(state->ring, &cqe, 1, &ts, NULL);
     if (retval == -ETIME)
         return 0;
-    else if (retval < 0) {
+    else if (retval != -EINTR && retval < 0) {
         fprintf(stderr, "submit_and_wait: %d\n", retval);
         return 0;
     }
@@ -222,12 +222,15 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
         ++num_completed;
         uring_event *ev = io_uring_cqe_get_data(cqe);
         if (!ev) {
-            abort();
+            printf("no event: %d %d %llu\n", cqe->res, cqe->flags, cqe->user_data);
+            continue;
         }
 
         if (ev->type & AE_POLLABLE) {
             if (cqe->res < 0) {
-                fprintf(stderr, "poll_add failed: %d %s %d\n", cqe->res, strerror(-cqe->res), ev->fd);
+                /* Add event again */
+                fprintf(stderr, "poll_add failed: %d %s %d %d\n", cqe->res, strerror(-cqe->res), ev->fd, ev->type);
+                //aeApiAddEvent(eventLoop, ev->fd, ev->type, NULL, 0);
                 continue;
             }
 
