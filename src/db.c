@@ -607,6 +607,10 @@ void setKeyByLink(client *c, redisDb *db, robj *key, robj **valref, int flags, d
         signalModifiedKey(c,db,key);
 }
 
+static int randomKeyShouldSkipDictIndex(int didx) {
+    return server.cluster_enabled && !asmSlotAllowsExpiryOrEviction(didx);
+}
+
 /* Return a random key, in form of a Redis object.
  * If there are no keys, NULL is returned.
  *
@@ -618,7 +622,8 @@ robj *dbRandomKey(redisDb *db) {
 
     while(1) {
         robj *keyobj;
-        int randomSlot = kvstoreGetFairRandomDictIndex(db->keys);
+        int randomSlot = kvstoreGetFairRandomDictIndex(db->keys, randomKeyShouldSkipDictIndex, 16, 1);
+        if (randomSlot == -1) return NULL;
         de = kvstoreDictGetFairRandomKey(db->keys, randomSlot);
         if (de == NULL) return NULL;
 

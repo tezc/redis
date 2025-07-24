@@ -14,6 +14,7 @@
 #include "bio.h"
 #include "atomicvar.h"
 #include "script.h"
+#include "cluster_asm.h"
 #include <math.h>
 
 /* ----------------------------------------------------------------------------
@@ -80,6 +81,10 @@ unsigned long long estimateObjectIdleTime(robj *o) {
     }
 }
 
+static int randomEvictionShouldSkipDictIndex(int didx) {
+    return server.cluster_enabled && !asmSlotAllowsExpiryOrEviction(didx);
+}
+
 /* LRU approximation algorithm
  *
  * Redis uses an approximation of the LRU algorithm that runs in constant
@@ -127,7 +132,9 @@ int evictionPoolPopulate(redisDb *db, kvstore *samplekvs, struct evictionPoolEnt
     int j, k, count;
     dictEntry *samples[server.maxmemory_samples];
 
-    int slot = kvstoreGetFairRandomDictIndex(samplekvs);
+    /* Don't try, since we will call evictionPoolPopulate multiple times if needed. */
+    int slot = kvstoreGetFairRandomDictIndex(samplekvs, randomEvictionShouldSkipDictIndex, 1, 0);
+    if (slot == -1) return 0;
     count = kvstoreDictGetSomeKeys(samplekvs,slot,samples,server.maxmemory_samples);
     for (j = 0; j < count; j++) {
         unsigned long long idle;
@@ -636,7 +643,8 @@ int performEvictions(void) {
                 } else {
                     kvs = db->expires;
                 }
-                int slot = kvstoreGetFairRandomDictIndex(kvs);
+                int slot = kvstoreGetFairRandomDictIndex(kvs, randomEvictionShouldSkipDictIndex, 16, 0);
+                if (slot == -1) continue;
                 de = kvstoreDictGetRandomKey(kvs, slot);
                 if (de) {
                     kvobj *kv = dictGetKV(de);
