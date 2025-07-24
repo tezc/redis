@@ -357,7 +357,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # three keys will be expired after slot snapshot is transferred
         R 1 setex $slot0_key 2 "a"
         R 1 setex $slot1_key 2 "b"
-        R 1 setex $slot2_key 2 "c"
+        R 1 hset $slot2_key "f1" "1"
+        R 1 expire $slot2_key 2
+        R 1 hexpire $slot2_key 2 FIELDS 1 "f1"
 
         set task_id [R 0 CLUSTER MIGRATION IMPORT 0 100]
         wait_for_condition 2000 10 {
@@ -370,6 +372,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 1 expire $slot0_key 100
         R 1 expire $slot1_key 80
         R 1 expire $slot2_key 60
+        R 1 hincrbyfloat $slot2_key "f1" 1
+        R 1 hexpire $slot2_key 60 FIELDS 1 "f1"
 
         # after 2s, at least a key should be transferred, and should not be deleted
         # due to expired, neither active nor lazy expiration (SCAN) takes effect,
@@ -391,20 +395,21 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         assert_range [R 0 ttl $slot0_key] 90 100
         assert_range [R 0 ttl $slot1_key] 70 80
         assert_range [R 0 ttl $slot2_key] 50 60
+        assert_range [R 0 httl $slot2_key FIELDS 1 "f1"] 50 60
 
         # after slot migration, scan can find all of them
         assert_equal [list 0 [list $slot0_key $slot1_key $slot2_key]] [R 0 scan 0 count 10]
         assert_equal 3 [scan [regexp -inline {keys\=([\d]*)} [R 0 info keyspace]] keys=%d]
         assert_equal 3 [scan [regexp -inline {expires\=([\d]*)} [R 0 info keyspace]] expires=%d]
+        assert_equal 1 [scan [regexp -inline {subexpiry\=([\d]*)} [R 0 info keyspace]] subexpiry=%d]
 
         # update expire time to 10ms, after some time, the keys should be deleted due to
         # active expiration
         R 0 pexpire $slot0_key 10
         R 0 pexpire $slot1_key 10
-        R 0 pexpire $slot2_key 10
+        R 0 hpexpire $slot2_key 10 FIELDS 1 "f1" ;# the last field is expired, the key will be deleted
         wait_for_condition 100 50 {
-            [scan [regexp -inline {keys\=([\d]*)} [R 0 info keyspace]] keys=%d] == {} &&
-            [scan [regexp -inline {expires\=([\d]*)} [R 0 info keyspace]] expires=%d] == {}
+            [scan [regexp -inline {keys\=([\d]*)} [R 0 info keyspace]] keys=%d] == {}
         } else {
             fail "keys did not expire"
         }

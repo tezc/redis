@@ -24,7 +24,8 @@ void asmImportIncrAppliedBytes(struct asmTask *task, size_t bytes);
 slotRangeArray *asmTaskGetSlotRanges(sds task_id);
 int asmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err);
 size_t asmGetPeakSyncBufferSize(void);
-int asmSlotAllowsExpiry(int slot);
+int asmSlotAllowsExpiryOrEviction(int slot);
+int asmKeyAllowsExpiryOrEviction(kvobj *kv);
 
 void clusterMigrationCommand(client *c);
 void clusterSyncSlotsCommand(client *c);

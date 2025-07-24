@@ -136,7 +136,7 @@ static inline int shouldSkipExpiryDictForSampling(dict *d, int didx) {
     }
 
     /* In cluster mode, check if the slot allows expiry during slot migration. */
-    if (server.cluster_enabled && !asmSlotAllowsExpiry(didx)) return 1;
+    if (server.cluster_enabled && !asmSlotAllowsExpiryOrEviction(didx)) return 1;
 
     return 0;
 }

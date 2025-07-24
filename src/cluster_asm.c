@@ -272,11 +272,8 @@ size_t asmGetPeakSyncBufferSize(void) {
     return peak;
 }
 
-/* Return true if the given slot supports key expiration.
- * This is used to determine whether keys in the slot can be
- * expired or evicted during ASM operations. */
-int asmSlotAllowsExpiry(int slot) {
-    if (!asmManager || listLength(asmManager->tasks) == 0) return 1;
+static inline int asmIsSlotImporting(void) {
+    if (!asmManager || listLength(asmManager->tasks) == 0) return 0;
 
     /* Only support a single task at a time now, so only check the first task */
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
@@ -284,14 +281,43 @@ int asmSlotAllowsExpiry(int slot) {
      * pause the write traffic (including expire/evict). */
     /* TODO: for failed state, is it safe to expire? cleanup may take long time */
     if ((task->operation == ASM_IMPORT && task->state != ASM_NONE)) {
-        for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
-            slotRange *sr = &task->slot_ranges->ranges[i];
-            /* If the slot is in the range, return false */
-            if (slot >= sr->start && slot <= sr->end)
-                return 0;
-        }
+        return 1;
     }
 
+    return 0;
+}
+
+/* Return true if the given slot supports key expiration.
+ * This is used to determine whether keys in the slot can be
+ * expired or evicted during ASM operations.
+ *
+ * Note: make sure the caller has already checked asmIsSlotImporting() */
+static inline int asmSlotAllowsExpiryOrEvictionCore(int slot) {
+    debugServerAssert(asmIsSlotImporting());
+    asmTask *task = listNodeValue(listFirst(asmManager->tasks));
+    /* TODO: optimize this, use bitmap instead of array */
+    for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
+        slotRange *sr = &task->slot_ranges->ranges[i];
+        /* If the slot is in the range, return false */
+        if (slot >= sr->start && slot <= sr->end)
+            return 0;
+    }
+    return 1;
+}
+
+int asmSlotAllowsExpiryOrEviction(int slot) {
+    if (asmIsSlotImporting()) {
+        return asmSlotAllowsExpiryOrEvictionCore(slot);
+    }
+    return 1;
+}
+
+int asmKeyAllowsExpiryOrEviction(kvobj *kv) {
+    if (asmIsSlotImporting()) {
+        sds key = kvobjGetKey(kv);
+        int slot = keyHashSlot((char*)key, sdslen(key));
+        return asmSlotAllowsExpiryOrEvictionCore(slot);
+    }
     return 1;
 }
 

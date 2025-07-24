@@ -1394,7 +1394,7 @@ char *getObjectTypeName(robj *o) {
 
 static int shouldSkipDictForScan(dict *d, int didx) {
     UNUSED(d);
-    return server.cluster_enabled && !asmSlotAllowsExpiry(didx);
+    return server.cluster_enabled && !asmSlotAllowsExpiryOrEviction(didx);
 }
 
 /* This command implements SCAN, HSCAN and SSCAN commands.
@@ -2511,6 +2511,8 @@ keyStatus expireIfNeeded(redisDb *db, robj *key, kvobj *kv, int flags) {
      *
      * In cluster mode, we also return ASAP if we are importing data
      * from the source, to avoid deleting keys that are still in use.
+     * We create a fake master client to import data, so we can check
+     * for it using the CLIENT_MASTER flag.
      *
      * Still we try to return the right information to the caller,
      * that is, KEY_VALID if we think the key should still be valid,
