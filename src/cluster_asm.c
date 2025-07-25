@@ -279,7 +279,6 @@ static inline int asmIsSlotImporting(void) {
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
     /* We only check the destination side, the source side `pauseActions` will
      * pause the write traffic (including expire/evict). */
-    /* TODO: for failed state, is it safe to expire? cleanup may take long time */
     if ((task->operation == ASM_IMPORT && task->state != ASM_NONE)) {
         return 1;
     }
@@ -287,37 +286,17 @@ static inline int asmIsSlotImporting(void) {
     return 0;
 }
 
-/* Return true if the given slot supports key expiration.
- * This is used to determine whether keys in the slot can be
- * expired or evicted during ASM operations.
- *
- * Note: make sure the caller has already checked asmIsSlotImporting() */
-static inline int asmSlotAllowsExpiryOrEvictionCore(int slot) {
-    debugServerAssert(asmIsSlotImporting());
-    asmTask *task = listNodeValue(listFirst(asmManager->tasks));
-    /* TODO: optimize this, use bitmap instead of array */
-    for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
-        slotRange *sr = &task->slot_ranges->ranges[i];
-        /* If the slot is in the range, return false */
-        if (slot >= sr->start && slot <= sr->end)
-            return 0;
-    }
-    return 1;
-}
-
-int asmSlotAllowsExpiryOrEviction(int slot) {
-    if (asmIsSlotImporting()) {
-        return asmSlotAllowsExpiryOrEvictionCore(slot);
-    }
-    return 1;
-}
-
-int asmKeyAllowsExpiryOrEviction(kvobj *kv) {
+/* Returns 1 if the key belongs to the current node, 0 otherwise.
+ * Check if there is a s lot import task in progress, and if so,
+ * check if the key belongs to the current node, to avoid calculating
+ * the key's hash slot. */
+int asmKeyBelongsToCurrentNode(kvobj *kv) {
     if (asmIsSlotImporting()) {
         sds key = kvobjGetKey(kv);
         int slot = keyHashSlot((char*)key, sdslen(key));
-        return asmSlotAllowsExpiryOrEvictionCore(slot);
+        return clusterNodeCoversSlot(getMyClusterNode(), slot);
     }
+    /* Not importing, all keys belong to the current node. TODO: make sure? */
     return 1;
 }
 

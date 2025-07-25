@@ -465,8 +465,10 @@ int kvstoreExpand(kvstore *kvs, uint64_t newsize, int try_expand, kvstoreExpandS
     return 1;
 }
 
-/* Returns fair random dict index, probability of each dict being returned is proportional to the number of elements that dictionary holds.
- * This function guarantees that it returns a dict-index of a non-empty dict, unless the entire kvstore is empty.
+/* Returns fair random dict index, probability of each dict being returned is
+ * proportional to the number of elements that dictionary holds.
+ * This function guarantees that it returns a dict-index of a non-empty dict,
+ * unless the entire kvstore is empty or all dicts are skipped.
  *
  * Parameters:
  * - kvs: the kvstore instance

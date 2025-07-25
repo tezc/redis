@@ -11,7 +11,7 @@
  */
 
 #include "server.h"
-#include "cluster_asm.h"
+#include "cluster.h"
 
 /*-----------------------------------------------------------------------------
  * Incremental collection of expired keys.
@@ -125,7 +125,7 @@ void expireScanCallback(void *privdata, const dictEntry *de, dictEntryLink plink
     data->sampled++;
 }
 
-static inline int shouldSkipExpiryDictForSampling(dict *d, int didx) {
+static inline int expirySamplingShouldSkipDict(dict *d, int didx) {
     long long numkeys = dictSize(d);
     unsigned long buckets = dictBuckets(d);
     /* When there are less than 1% filled buckets, sampling the key
@@ -135,8 +135,9 @@ static inline int shouldSkipExpiryDictForSampling(dict *d, int didx) {
         return 1;
     }
 
-    /* In cluster mode, check if the slot allows expiry during slot migration. */
-    if (server.cluster_enabled && !asmSlotAllowsExpiryOrEviction(didx)) return 1;
+    /* In cluster mode, check if the slot belongs to the current node. */
+    if (server.cluster_enabled && !clusterNodeCoversSlot(getMyClusterNode(), didx))
+        return 1;
 
     return 0;
 }
@@ -334,7 +335,7 @@ void activeExpireCycle(int type) {
             int origin_ttl_samples = data.ttl_samples;
 
             while (data.sampled < num && checked_buckets < max_buckets) {
-                db->expires_cursor = kvstoreScan(db->expires, db->expires_cursor, -1, expireScanCallback, shouldSkipExpiryDictForSampling, &data);
+                db->expires_cursor = kvstoreScan(db->expires, db->expires_cursor, -1, expireScanCallback, expirySamplingShouldSkipDict, &data);
                 if (db->expires_cursor == 0) {
                     db_done = 1;
                     break;

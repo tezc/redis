@@ -1812,8 +1812,9 @@ static ExpireAction hashTypeActiveExpire(eItem item, void *ctx) {
     /* It may block the expiration of subsequent keys if current hash key is in
      * importing.
      * TODO: does it support skipping keys that belong to specific slots?
-     * and is it inefficient to skip a bunch of keys every time? */
-    if (!asmKeyAllowsExpiryOrEviction((kvobj *) item))
+     * and is it inefficient to skip a bunch of keys every time?
+     * maybe one hexpire per slot seems better. */
+    if (!asmKeyBelongsToCurrentNode((kvobj *) item))
         return ACT_STOP_ACTIVE_EXP;
 
     /* If no more quota left for this callback, stop */

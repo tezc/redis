@@ -14,7 +14,7 @@
 #include "bio.h"
 #include "atomicvar.h"
 #include "script.h"
-#include "cluster_asm.h"
+#include "cluster.h"
 #include <math.h>
 
 /* ----------------------------------------------------------------------------
@@ -81,8 +81,10 @@ unsigned long long estimateObjectIdleTime(robj *o) {
     }
 }
 
+/* In cluster mode, check if the slot belongs to the current node,
+ * skipping dicts that don't belong to the current node. */
 static int randomEvictionShouldSkipDictIndex(int didx) {
-    return server.cluster_enabled && !asmSlotAllowsExpiryOrEviction(didx);
+    return server.cluster_enabled && !clusterNodeCoversSlot(getMyClusterNode(), didx);
 }
 
 /* LRU approximation algorithm
@@ -132,7 +134,7 @@ int evictionPoolPopulate(redisDb *db, kvstore *samplekvs, struct evictionPoolEnt
     int j, k, count;
     dictEntry *samples[server.maxmemory_samples];
 
-    /* Don't try, since we will call evictionPoolPopulate multiple times if needed. */
+    /* Don't retry, since we will call evictionPoolPopulate multiple times if needed. */
     int slot = kvstoreGetFairRandomDictIndex(samplekvs, randomEvictionShouldSkipDictIndex, 1, 0);
     if (slot == -1) return 0;
     count = kvstoreDictGetSomeKeys(samplekvs,slot,samples,server.maxmemory_samples);
@@ -466,6 +468,11 @@ static int isSafeToPerformEvictions(void) {
      * and just be masters exact copies. */
     if (server.masterhost && server.repl_slave_ignore_maxmemory) return 0;
 
+    /* Don't evict when importing data of slot migration task. */
+    if (server.current_client && server.current_client->flags & CLIENT_MASTER &&
+        server.current_client->task)
+        return 0;
+
     /* If 'evict' action is paused, for whatever reason, then return false */
     if (isPausedActionsWithUpdate(PAUSE_ACTION_EVICT)) return 0;
 
@@ -563,6 +570,7 @@ int performEvictions(void) {
             struct evictionPoolEntry *pool = EvictionPoolLRU;
             while (bestkey == NULL) {
                 unsigned long total_keys = 0;
+                unsigned long total_sampled_keys = 0;
 
                 /* We don't want to make local-db choices when expiring keys,
                  * so to start populate the eviction pool sampling keys from
@@ -584,6 +592,7 @@ int performEvictions(void) {
                     /* Do not exceed the number of non-empty slots when looping. */
                     while (l--) {
                         sampled_keys += evictionPoolPopulate(db, kvs, pool);
+                        total_sampled_keys += sampled_keys;
                         /* We have sampled enough keys in the current db, exit the loop. */
                         if (sampled_keys >= (unsigned long) server.maxmemory_samples)
                             break;
@@ -595,6 +604,10 @@ int performEvictions(void) {
                     }
                 }
                 if (!total_keys) break; /* No keys to evict. */
+
+                /* If we iterated all the DBs and all non-empty slot dicts, then
+                 * did not sample any key, stop sampling. */
+                if (!total_sampled_keys) break;
 
                 /* Go backward from best to worst element to evict. */
                 for (k = EVPOOL_SIZE-1; k >= 0; k--) {
