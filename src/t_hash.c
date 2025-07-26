@@ -758,10 +758,10 @@ GetFieldRes hashTypeGetValue(redisDb *db, kvobj *o, sds field, unsigned char **v
     if (server.masterhost || server.cluster_enabled) {
         /* If CLIENT_MASTER, assume valid as long as it didn't get delete.
          *
-         * And in cluster mode, we also assume valid if we are importing data
+         * In cluster mode, we also assume valid if we are importing data
          * from the source, to avoid deleting fields that are still in use.
-         * We create a fake master client to import data, so we can check
-         * for it using the CLIENT_MASTER flag. */
+         * We create a fake master client for data import, which can be
+         * identified using the CLIENT_MASTER flag. */
         if (server.current_client && (server.current_client->flags & CLIENT_MASTER))
             return GETF_OK;
 

@@ -607,13 +607,10 @@ void setKeyByLink(client *c, redisDb *db, robj *key, robj **valref, int flags, d
         signalModifiedKey(c,db,key);
 }
 
-/* In cluster mode, check if the slot belongs to the current node or its master.
- * Skipping dicts that don't belong to the current node or its master.
+/* In cluster mode, check whether the slot is served by the current node
+ * or its master, and skip dicts that aren't.
  *
- * For some case, we also need to check if the myself is a replica and the slot
- * belongs to the replica's master. In that case, we should also skip the dict.
- *
- * This function is used by:
+ * This function now is used by:
  * - dbRandomKey
  * - keysCommand
  * - scanCommand
@@ -1423,8 +1420,6 @@ char *getObjectTypeName(robj *o) {
     }
 }
 
-/* In cluster mode, check if the slot belongs to the current node,
- * skipping dicts that don't belong to the current node. */
 static int scanShouldSkipDict(dict *d, int didx) {
     UNUSED(d);
     return accessKeysShouldSkipDictIndex(didx);
@@ -2544,8 +2539,8 @@ keyStatus expireIfNeeded(redisDb *db, robj *key, kvobj *kv, int flags) {
      *
      * In cluster mode, we also return ASAP if we are importing data
      * from the source, to avoid deleting keys that are still in use.
-     * We create a fake master client to import data, so we can check
-     * for it using the CLIENT_MASTER flag.
+     * We create a fake master client for data import, which can be
+     * identified using the CLIENT_MASTER flag.
      *
      * Still we try to return the right information to the caller,
      * that is, KEY_VALID if we think the key should still be valid,

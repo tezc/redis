@@ -288,8 +288,8 @@ static inline int asmIsSlotImporting(void) {
 
 /* Returns 1 if the key belongs to the current node, 0 otherwise.
  * Check if there is a s lot import task in progress, and if so,
- * check if the key belongs to the current node, to avoid calculating
- * the key's hash slot. */
+ * check if the key belongs to the current node, to avoid the
+ * overhead of calculating the key’s hash slot. */
 int asmKeyBelongsToCurrentNode(kvobj *kv) {
     if (asmIsSlotImporting()) {
         sds key = kvobjGetKey(kv);

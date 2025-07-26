@@ -468,7 +468,9 @@ static int isSafeToPerformEvictions(void) {
      * and just be masters exact copies. */
     if (server.masterhost && server.repl_slave_ignore_maxmemory) return 0;
 
-    /* Don't evict when importing data of slot migration task. */
+    /* Disable eviction during slot migration import to avoid delays and errors
+     * caused by failed evictions. A special client is created for data import,
+     * identified by the CLIENT_MASTER flag and the presence of a `task` field. */
     if (server.current_client && server.current_client->flags & CLIENT_MASTER &&
         server.current_client->task)
         return 0;

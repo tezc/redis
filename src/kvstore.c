@@ -475,11 +475,11 @@ int kvstoreExpand(kvstore *kvs, uint64_t newsize, int try_expand, kvstoreExpandS
  * - skip_cb: callback to determine if a dict should be skipped (NULL means no skipping)
  * - fair_attempts: number of fair selection attempts before falling back
  * - slow_fallback: if 1, uses systematic search when fair attempts fail
- * 
+ *
  * Returns:
  * - Valid dict index (>= 0) on success
  * - -1 if no valid dict found (either slow_fallback is 0 or all dicts are skipped)
- * 
+ *
  * Time complexity: O(fair_attempts * log(kvs->num_dicts)) for fair attempts,
  * plus O(kvs->num_dicts) for systematic fallback if enabled.
  */
