@@ -297,6 +297,14 @@ static int slotRangeArrayIsEqual(slotRangeArray *sra1, slotRangeArray *sra2) {
     return 1;
 }
 
+/* Copies the slot ranges array. */
+slotRangeArray *dupSlotRangeArray(slotRangeArray *sra) {
+    slotRangeArray *dup = zmalloc(sizeof(*dup) + sizeof(slotRange) * sra->num_ranges);
+    dup->num_ranges = sra->num_ranges;
+    memcpy(dup->ranges, sra->ranges, sizeof(slotRange) * sra->num_ranges);
+    return dup;
+}
+
 /* Returns the ASM task with the given ID, or NULL if no such task exists. */
 asmTask *lookupAsmTaskById(const char *id) {
     listIter li;
@@ -497,26 +505,22 @@ asmTask *asmCreateImportTask(const char *task_id, slotRangeArray *slot_ranges, s
     /* Validate that the slot ranges are valid and that migration can be
      * initiated for them. */
     source = validateImportSlotRanges(slot_ranges, err);
-    if (!source) {
-        zfree(slot_ranges);
+    if (!source)
         return NULL;
-    }
 
     if (source == getMyClusterNode()) {
         *err = sdsnew("this node is already the owner of the slot range");
-        zfree(slot_ranges);
         return NULL;
     }
 
     if (listLength(asmManager->tasks) != 0) {
         *err = sdsnew("another ASM task is already in progress");
-        zfree(slot_ranges);
         return NULL;
     }
 
     /* Create a slot migration task */
     asmTask *task = asmTaskCreate(task_id);
-    task->slot_ranges = slot_ranges;
+    task->slot_ranges = dupSlotRangeArray(slot_ranges);
     task->state = ASM_NONE;
     task->operation = ASM_IMPORT;
     task->source_node = source;
@@ -553,6 +557,7 @@ static void clusterMigrationCommandImport(client *c) {
 
     sds err = NULL;
     asmTask *task = asmCreateImportTask(NULL, slot_ranges, &err);
+    zfree(slot_ranges);
     if (!task) {
         addReplyErrorSds(c, err);
         return;
