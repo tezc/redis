@@ -1894,7 +1894,7 @@ int clusterAsmCancel(const char *task_id) {
 }
 
 int clusterAsmHandoff(const char *task_id, sds *err) {
-    UNUSED(err);
+    serverAssert(task_id);
 
     asmTask *task = lookupAsmTaskById(task_id);
     if (!task || task->state != ASM_HANDOFF_PREP) {
@@ -1935,8 +1935,8 @@ int asmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
         return C_OK;
     } else {
         *err = sdscatprintf(sdsempty(),
-                                  "ASM task is not in the correct state for config update: %s",
-                                  asmTaskStateToString(task->state));
+                            "ASM task is not in the correct state for config update: %s",
+                            asmTaskStateToString(task->state));
         return C_ERR;
     }
 
@@ -1945,6 +1945,8 @@ int asmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
 
 /* Import/Migrate task is done, config is updated. */
 int clusterAsmDone(const char *task_id, sds *err) {
+    serverAssert(task_id);
+
     asmTask *task = lookupAsmTaskById(task_id);
     if (!task) {
         *err = sdscatprintf(sdsempty(), "No ASM task found for id: %s", task_id);
@@ -1954,7 +1956,7 @@ int clusterAsmDone(const char *task_id, sds *err) {
 }
 
 int clusterAsmProcess(const char *task_id, int event, void *arg, char **err) {
-    int ret;
+    int ret, num_cancelled;
     sds errsds = NULL;
     static char buf[256];
 
@@ -1965,7 +1967,10 @@ int clusterAsmProcess(const char *task_id, int event, void *arg, char **err) {
             ret = asmCreateImportTask(task_id, arg, &errsds) ? C_OK : C_ERR;
             break;
         case ASM_EVENT_CANCEL:
-            return clusterAsmCancel(task_id);
+            num_cancelled = clusterAsmCancel(task_id);
+            if (arg) *((int *)arg) = num_cancelled;
+            ret = C_OK;
+            break;
         case ASM_EVENT_HANDOFF:
             ret = clusterAsmHandoff(task_id, &errsds);
             break;
@@ -1980,8 +1985,9 @@ int clusterAsmProcess(const char *task_id, int event, void *arg, char **err) {
 
     if (ret != C_OK && errsds && err) {
         snprintf(buf, sizeof(buf), "%s", errsds);
-        sdsfree(errsds);
         *err = buf;
     }
+    sdsfree(errsds);
+
     return ret;
 }
