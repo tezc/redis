@@ -239,8 +239,7 @@ int clusterNodeTlsPort(clusterNode *node);
  *  ASM_EVENT_HANDOFF
  *  ASM_EVENT_DONE
  *
- *  In case of ASM_EVENT_IMPORT_START, 'task_id' should be unique and should be
- *  CLUSTER_NAMELEN characters long.
+ *  In case of ASM_EVENT_IMPORT_START, 'task_id' should be a unique string.
  *    Usage:
  *      char *task_id = malloc(CLUSTER_NAMELEN + 1);
  *      generateTaskID(task_id);
@@ -261,7 +260,7 @@ int clusterNodeTlsPort(clusterNode *node);
  *          return;
  *      }
  *
- * In case of ASM_EVENT_CANCEL, returns the number of cancelled tasks.
+ * For ASM_EVENT_CANCEL, returns the number of cancelled tasks.
  * Otherwise, returns C_OK on success, C_ERR on failure. 'err' will be set to
  * the error message.
  *
@@ -275,7 +274,7 @@ int clusterAsmProcess(const char *task_id, int event, void *arg, char **err);
 
 /* Called when an ASM event occurs to notify implementation/plugin. (redis --> plugin)
  *
- * `arg` will point to a `slotRangeArray` for the following events`:
+ * `arg` will point to a `slotRangeArray` for the following events:
  *  ASM_EVENT_IMPORT_STARTED
  *  ASM_EVENT_MIGRATE_STARTED
  *  ASM_EVENT_HANDOFF_PREP
