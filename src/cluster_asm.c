@@ -1883,10 +1883,8 @@ int asmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
     asmTask *task = lookupAsmTaskBySlotRangeArray(slot_ranges);
     if (!task) {
         sds slot_ranges_str = createSlotRangesStr(slot_ranges);
-        sds errmsg = sdscatprintf(sdsempty(), "No ASM task found for slots: %s", slot_ranges_str);
+        *err = sdscatprintf(sdsempty(), "No ASM task found for slots: %s", slot_ranges_str);
         sdsfree(slot_ranges_str);
-        serverLog(LL_WARNING, "%s", errmsg);
-        if (err) *err = errmsg;
         return C_ERR;
     }
 
@@ -1904,11 +1902,9 @@ int asmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
         asmTaskComplete(task);
         return C_OK;
     } else {
-        sds errmsg = sdscatprintf(sdsempty(),
+        *err = sdscatprintf(sdsempty(),
                                   "ASM task is not in the correct state for config update: %s",
                                   asmTaskStateToString(task->state));
-        serverLog(LL_WARNING, "%s", errmsg);
-        if (err) *err = errmsg;
         return C_ERR;
     }
 

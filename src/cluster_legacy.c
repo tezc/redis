@@ -2444,7 +2444,11 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
         sra->num_ranges++;
     }
     if (sra->num_ranges > 0 && server.masterhost == NULL) {
-        asmNotifyConfigUpdated(sra, NULL);
+        sds err = NULL;
+        if (asmNotifyConfigUpdated(sra, &err) != C_OK) {
+            serverLog(LL_WARNING, "ASM config update failed: %s", err);
+            sdsfree(err);
+        }
     }
     zfree(sra);
 
