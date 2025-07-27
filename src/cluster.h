@@ -239,10 +239,12 @@ int clusterNodeTlsPort(clusterNode *node);
  *  ASM_EVENT_HANDOFF
  *  ASM_EVENT_DONE
  *
- *  In case of ASM_EVENT_IMPORT_START, 'task_id' should be a unique string.
+ * In case of ASM_EVENT_IMPORT_START, 'task_id' should be a unique string.
+ * For other events (ASM_EVENT_CANCEL, ASM_EVENT_HANDOFF, ASM_EVENT_DONE),
+ * 'task_id' should match the ID from the corresponding import operation.
  *    Usage:
  *      char *task_id = malloc(CLUSTER_NAMELEN + 1);
- *      generateTaskID(task_id);
+ *      getRandomHexChars(task_id, CLUSTER_NAMELEN);
  *      task_id[CLUSTER_NAMELEN] = '\0';
  *
  *      slotRangeArray *sra  = zmalloc(sizeof(*sra) + sizeof(slotRange));
@@ -260,9 +262,10 @@ int clusterNodeTlsPort(clusterNode *node);
  *          return;
  *      }
  *
- * For ASM_EVENT_CANCEL, returns the number of cancelled tasks.
- * Otherwise, returns C_OK on success, C_ERR on failure. 'err' will be set to
- * the error message.
+ * Return value:
+ *  For ASM_EVENT_CANCEL, returns the number of cancelled tasks.
+ *  Otherwise, returns C_OK on success, C_ERR on failure. 'err' will be set to
+ *  the error message.
  *
  * Memory management:
  *  - There is no ownership transfer of 'task_id', 'err' or `slotRangeArray`.
