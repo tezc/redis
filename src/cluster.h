@@ -263,9 +263,9 @@ int clusterNodeTlsPort(clusterNode *node);
  *      }
  *
  * Return value:
- *  For ASM_EVENT_CANCEL, returns the number of cancelled tasks.
- *  Otherwise, returns C_OK on success, C_ERR on failure. 'err' will be set to
- *  the error message.
+ *  - For ASM_EVENT_CANCEL, returns the number of cancelled tasks.
+ *  - For all other events, returns C_OK on success, C_ERR on failure and 'err'
+ *    will be set to the error message.
  *
  * Memory management:
  *  - There is no ownership transfer of 'task_id', 'err' or `slotRangeArray`.
