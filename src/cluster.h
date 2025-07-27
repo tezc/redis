@@ -239,28 +239,39 @@ int clusterNodeTlsPort(clusterNode *node);
  *  ASM_EVENT_HANDOFF
  *  ASM_EVENT_DONE
  *
- *  In case of ASM_EVENT_IMPORT_START, 'task_id' will be set to the task id of
- *  the import task. For this event, task_id should be NULL initially.
+ *  In case of ASM_EVENT_IMPORT_START, 'task_id' should be unique and should be
+ *  CLUSTER_NAMELEN characters long.
  *    Usage:
- *      sds task_id = NULL, err = NULL;
+ *      char *task_id = malloc(CLUSTER_NAMELEN + 1);
+ *      generateTaskID(task_id);
+ *      task_id[CLUSTER_NAMELEN] = '\0';
+ *
  *      slotRangeArray *sra  = zmalloc(sizeof(*sra) + sizeof(slotRange));
  *      sra->num_ranges = 1;
  *      sra->ranges[0].start = 0;
  *      sra->ranges[0].end = 1000;
  *
- *      if (clusterAsmProcess(&task_id, ASM_EVENT_IMPORT_START, sra, &err) != C_OK) {
- *          // Handle error
- *          sdsfree(err);
+ *      const char *err;
+ *      int ret = clusterAsmProcess(task_id, ASM_EVENT_IMPORT_START, sra, &err);
+ *      free(task_id);
+ *      free(sra);
+ *
+ *      if (ret != C_OK) {
+ *          perror(err);
  *          return;
  *      }
- *      // task_id is set to the task id of the import task
  *
- *  For other events, 'task_id' should be set to the task id of the task.
+ * In case of ASM_EVENT_CANCEL, returns the number of cancelled tasks.
+ * Otherwise, returns C_OK on success, C_ERR on failure. 'err' will be set to
+ * the error message.
  *
- * Returns C_OK on success, C_ERR on failure. 'err' will be set to the error
- * message and should be freed by the caller.
+ * Memory management:
+ *  - There is no ownership transfer of 'task_id', 'err' or `slotRangeArray`.
+ *  - `task_id` and `slotRangeArray` should be allocated and be freed by the
+ *     caller. Redis internally will make a copy of these.
+ *  - `err` is allocated by Redis and should NOT be freed by the caller.
  **/
-int clusterAsmProcess(sds *task_id, int event, void *arg, sds *err);
+int clusterAsmProcess(const char *task_id, int event, void *arg, char **err);
 
 /* Called when an ASM event occurs to notify implementation/plugin. (redis --> plugin)
  *
@@ -269,8 +280,11 @@ int clusterAsmProcess(sds *task_id, int event, void *arg, sds *err);
  *  ASM_EVENT_MIGRATE_STARTED
  *  ASM_EVENT_HANDOFF_PREP
  *
+ *  Memory management:
+ *  - Redis owns the `task_id` and `slotRangeArray`.
+ *
  *  Returns C_OK on success.
  **/
-int clusterAsmOnEvent(sds task_id, int event, void *arg);
+int clusterAsmOnEvent(const char *task_id, int event, void *arg);
 
 #endif /* __CLUSTER_H */

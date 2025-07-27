@@ -21,7 +21,7 @@ int asmMigrateInProgress(void);
 void asmFeedMigrationClient(robj **argv, int argc);
 int asmDebugSetFailPoint(char * channel, char *state);
 void asmImportIncrAppliedBytes(struct asmTask *task, size_t bytes);
-slotRangeArray *asmTaskGetSlotRanges(sds task_id);
+slotRangeArray *asmTaskGetSlotRanges(const char *task_id);
 int asmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err);
 size_t asmGetPeakSyncBufferSize(void);
 
