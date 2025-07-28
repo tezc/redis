@@ -6530,7 +6530,7 @@ int clusterAsmOnEvent(const char *task_id, int event, void *arg) {
     UNUSED(arg);
 
     slotRangeArray *slots = asmTaskGetSlotRanges(task_id);
-    sds str = createSlotRangesStr(slots);
+    sds str = slotRangeArrayToString(slots);
 
     switch (event) {
         case ASM_EVENT_IMPORT_STARTED:

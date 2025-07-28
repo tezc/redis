@@ -151,7 +151,11 @@ typedef struct slotRangeArray {
     int num_ranges;
     slotRange ranges[];
 } slotRangeArray;
-sds createSlotRangesStr(slotRangeArray *slot_ranges);
+slotRangeArray *slotRangeArrayCreate(int num_ranges);
+slotRangeArray *slotRangeArrayDup(slotRangeArray *sra);
+void slotRangeArraySet(slotRangeArray *sra, int idx, int start, int end);
+sds slotRangeArrayToString(slotRangeArray *sra);
+void slotRangeArrayFree(slotRangeArray *sra);
 int validateSlotRanges(slotRangeArray *sra, sds *err);
 slotRangeArray *parseSlotRangesOrReply(client *c, int argc, int pos);
 

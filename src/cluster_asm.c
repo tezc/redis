@@ -325,14 +325,6 @@ static int slotRangeArrayIsEqual(slotRangeArray *sra1, slotRangeArray *sra2) {
     return 1;
 }
 
-/* Copies the slot ranges array. */
-slotRangeArray *dupSlotRangeArray(slotRangeArray *sra) {
-    slotRangeArray *dup = zmalloc(sizeof(*dup) + sizeof(slotRange) * sra->num_ranges);
-    dup->num_ranges = sra->num_ranges;
-    memcpy(dup->ranges, sra->ranges, sizeof(slotRange) * sra->num_ranges);
-    return dup;
-}
-
 /* Returns the ASM task with the given ID, or NULL if no such task exists. */
 asmTask *lookupAsmTaskById(const char *id) {
     listIter li;
@@ -548,7 +540,7 @@ asmTask *asmCreateImportTask(const char *task_id, slotRangeArray *slot_ranges, s
 
     /* Create a slot migration task */
     asmTask *task = asmTaskCreate(task_id);
-    task->slot_ranges = dupSlotRangeArray(slot_ranges);
+    task->slot_ranges = slotRangeArrayDup(slot_ranges);
     task->state = ASM_NONE;
     task->operation = ASM_IMPORT;
     task->source_node = source;
@@ -556,7 +548,7 @@ asmTask *asmCreateImportTask(const char *task_id, slotRangeArray *slot_ranges, s
     memcpy(task->dest, getMyClusterId(), CLUSTER_NAMELEN);
 
     listAddNodeTail(asmManager->tasks, task);
-    sds slot_ranges_str = createSlotRangesStr(slot_ranges);
+    sds slot_ranges_str = slotRangeArrayToString(slot_ranges);
     serverLog(LL_NOTICE, "Import task created: src=%.40s, dest=%.40s, slots=%s",
                          task->source, task->dest, slot_ranges_str);
     sdsfree(slot_ranges_str);
@@ -637,7 +629,7 @@ static void replyTaskStatus(client *c, asmTask *task) {
     addReplyBulkCString(c, "id");
     addReplyBulkCString(c, task->id);
     addReplyBulkCString(c, "slots_range");
-    addReplyBulkSds(c, createSlotRangesStr(task->slot_ranges));
+    addReplyBulkSds(c, slotRangeArrayToString(task->slot_ranges));
     addReplyBulkCString(c, "source");
     addReplyBulkCBuffer(c, task->source, CLUSTER_NAMELEN);
     addReplyBulkCString(c, "dest");
@@ -783,7 +775,7 @@ void asmTaskSetFailed(asmTask *task, const char *fmt, ...) {
     task->error = error;
 
     /* Log the error */
-    sds slot_ranges_str = createSlotRangesStr(task->slot_ranges);
+    sds slot_ranges_str = slotRangeArrayToString(task->slot_ranges);
     serverLog(LL_WARNING, "%s task failed. slots=%s, err=%s",
               task->operation == ASM_IMPORT ? "Import" : "Migrate",
               slot_ranges_str, task->error);
@@ -1302,7 +1294,7 @@ void clusterSyncSlotsStreamEOF(client *c) {
 void asmStartImportTask(asmTask *task) {
     if (task->operation != ASM_IMPORT || task->state != ASM_NONE) return;
 
-    sds slot_ranges_str = createSlotRangesStr(task->slot_ranges);
+    sds slot_ranges_str = slotRangeArrayToString(task->slot_ranges);
     serverLog(LL_NOTICE, "Import task starting: src=%.40s, dest=%.40s, slots=%s",
               task->source, task->dest, slot_ranges_str);
     sdsfree(slot_ranges_str);
@@ -1418,7 +1410,7 @@ void clusterSyncSlotsCommand(client *c) {
         /* Wait for RDB channel to be ready */
         task->state = ASM_WAIT_RDBCHANNEL;
 
-        sds slot_ranges_str = createSlotRangesStr(slot_ranges);
+        sds slot_ranges_str = slotRangeArrayToString(slot_ranges);
         serverLog(LL_NOTICE, "Migrate task created: src=%.40s, dest=%.40s, slots=%s",
                               task->source, task->dest, slot_ranges_str);
         sdsfree(slot_ranges_str);
@@ -1914,7 +1906,7 @@ int asmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
 
     asmTask *task = lookupAsmTaskBySlotRangeArray(slot_ranges);
     if (!task) {
-        sds slot_ranges_str = createSlotRangesStr(slot_ranges);
+        sds slot_ranges_str = slotRangeArrayToString(slot_ranges);
         *err = sdscatprintf(sdsempty(), "No ASM task found for slots: %s", slot_ranges_str);
         sdsfree(slot_ranges_str);
         return C_ERR;
