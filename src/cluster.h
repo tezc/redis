@@ -143,6 +143,14 @@ int isValidAuxString(char *s, unsigned int length);
 void migrateCommand(client *c);
 void clusterCommand(client *c);
 ConnectionType *connTypeOfCluster(void);
+
+typedef struct slotRange {
+    unsigned short start, end;
+} slotRange;
+typedef struct slotRangeArray {
+    int num_ranges;
+    slotRange ranges[];
+} slotRangeArray;
 sds createSlotRangesStr(slotRangeArray *slot_ranges);
 int validateSlotRanges(slotRangeArray *sra, sds *err);
 slotRangeArray *parseSlotRangesOrReply(client *c, int argc, int pos);
