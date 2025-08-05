@@ -1270,6 +1270,12 @@ void clusterSyncSlotsSnapshotEOF(client *c) {
 void clusterSyncSlotsStreamEOF(client *c) {
     asmTask *task = c->task;
 
+    if (!task || task->operation != ASM_IMPORT) {
+        serverLog(LL_WARNING, "Unexpected CLUSTER SYNCSLOTS STREAM-EOF command");
+        freeClientAsync(c);
+        return;
+    }
+
     if (task->state == ASM_STREAMING_BUF) {
         /* We are still streaming the buffer to DB, mark the EOF received, and we
          * can takeover after streaming is done. Since we may release the context
@@ -1282,6 +1288,7 @@ void clusterSyncSlotsStreamEOF(client *c) {
     if (task->state != ASM_WAIT_STREAM_EOF) {
         serverLog(LL_WARNING, "Unexpected CLUSTER SYNCSLOTS STREAM-EOF state: %s",
                                asmTaskStateToString(task->state));
+        freeClientAsync(c);
         return;
     }
     serverLog(LL_NOTICE, "CLUSTER SYNCSLOTS STREAM-EOF received when waiting for STREAM-EOF");
@@ -1325,8 +1332,14 @@ void clusterSyncSlotsCommand(client *c) {
     /* Only internal clients are allowed to execute this command to avoid
      * potential attack, since some state changes are not well protected,
      * external clients may damage the slot migration state. */
-    if (!(c->flags & CLIENT_INTERNAL)) {
+    if (!(c->flags & (CLIENT_INTERNAL | CLIENT_MASTER))) {
         addReplyError(c, "CLUSTER SYNCSLOTS subcommands are only allowed for internal clients");
+        return;
+    }
+
+    /* Only allow CONF subcommand on replica. */
+    if (server.masterhost && strcasecmp(c->argv[2]->ptr, "conf")) {
+        serverLog(LL_NOTICE, "subcommand %s not allowed on replica", (char *)c->argv[2]->ptr);
         return;
     }
 
@@ -1540,6 +1553,7 @@ void clusterSyncSlotsCommand(client *c) {
             }
             /* Handle each option here */
             if (!strcasecmp(c->argv[j]->ptr, "node-id")) {
+                /* node-id <node-id> */
                 sds node_id = c->argv[j + 1]->ptr;
                 int node_id_len = (int) sdslen(node_id);
                 if (node_id_len != CLUSTER_NAMELEN) {
@@ -1556,6 +1570,32 @@ void clusterSyncSlotsCommand(client *c) {
 
                 if (c->node_id) sdsfree(c->node_id);
                 c->node_id = sdsdup(node_id);
+                addReply(c, shared.ok);
+            } else if (!strcasecmp(c->argv[j]->ptr, "slot-info")) {
+                /* slot_info slot:key_size:expire_size */
+                int count;
+                long long slot, key_size, expire_size;
+                sds slot_info = c->argv[j + 1]->ptr;
+                sds *parts = sdssplitlen(slot_info, sdslen(slot_info), ":", 1, &count);
+
+                /* Validate the slot info format, parse slot, key_size, expire_size */
+                if (parts == NULL || count != 3 ||
+                    (string2ll(parts[0], sdslen(parts[0]), &slot) == 0 || slot < 0 || slot >= CLUSTER_SLOTS) ||
+                    (string2ll(parts[1], sdslen(parts[1]), &key_size) == 0 || key_size < 0) ||
+                    (string2ll(parts[2], sdslen(parts[2]), &expire_size) == 0 || expire_size < 0))
+                {
+                    addReplyErrorFormat(c, "Invalid slot info: %s", slot_info);
+                    sdsfreesplitres(parts, count);
+                    return;
+                }
+
+                /* We resize individual slot specific dictionaries. */
+                redisDb *db = c->db;
+                serverAssert(db->id == 0); /* Only support DB 0 for cluster mode. */
+                kvstoreDictExpand(db->keys, slot, key_size);
+                kvstoreDictExpand(db->expires, slot, expire_size);
+
+                sdsfreesplitres(parts, count);
                 addReply(c, shared.ok);
             } else {
                 addReplyErrorFormat(c, "Unknown option %s", (char *)c->argv[j]->ptr);
@@ -1599,8 +1639,29 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
             slotRange *sr = &task->slot_ranges->ranges[j];
             /* Iterate all keys in the slot range */
             for (int k = sr->start; k <= sr->end; k++) {
+                int send_slot_info = 0;
                 kvs_di = kvstoreGetDictIterator(server.db->keys, k);
+
                 while ((de = kvstoreDictIteratorNext(kvs_di)) != NULL) {
+                    /* Send slot info before the first key in the slot */
+                    if (!send_slot_info) {
+                        /* Format slot info */
+                        char buf[128];
+                        int len = snprintf(buf, sizeof(buf), "%d:%zu:%zu",
+                                    k, kvstoreDictSize(db->keys, k),
+                                    kvstoreDictSize(db->expires, k));
+                        serverAssert(len > 0 && len < (int)sizeof(buf));
+
+                        /* Send slot info */
+                        if (rioWriteBulkCount(rdb, '*', 5) == 0) goto werr;
+                        if (rioWriteBulkString(rdb, "CLUSTER", 7) == 0) goto werr;
+                        if (rioWriteBulkString(rdb, "SYNCSLOTS", 9) == 0) goto werr;
+                        if (rioWriteBulkString(rdb, "CONF", 4) == 0) goto werr;
+                        if (rioWriteBulkString(rdb, "SLOT-INFO", 9) == 0) goto werr;
+                        if (rioWriteBulkString(rdb, buf, len) == 0) goto werr;
+                        send_slot_info = 1;
+                    }
+
                     /* Get the value object (of type kvobj) */
                     kvobj *o = dictGetKV(de);
 
