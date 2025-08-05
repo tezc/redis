@@ -1647,7 +1647,7 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
                     if (!send_slot_info) {
                         /* Format slot info */
                         char buf[128];
-                        int len = snprintf(buf, sizeof(buf), "%d:%zu:%zu",
+                        int len = snprintf(buf, sizeof(buf), "%d:%lu:%lu",
                                     k, kvstoreDictSize(db->keys, k),
                                     kvstoreDictSize(db->expires, k));
                         serverAssert(len > 0 && len < (int)sizeof(buf));
