@@ -1196,7 +1196,7 @@ write_error: /* Handle sendCommand() errors. */
 
 void asmImportSendACK(asmTask *task) {
     serverAssert(task->operation == ASM_IMPORT && task->state == ASM_WAIT_STREAM_EOF);
-    serverLog(LL_NOTICE, "Destination node applied offset is %lld", task->dest_offset);
+    serverLog(LL_DEBUG, "Destination node applied offset is %lld", task->dest_offset);
 
     char offset[64];
     ull2string(offset, sizeof(offset), task->dest_offset);
@@ -1338,10 +1338,7 @@ void clusterSyncSlotsCommand(client *c) {
     }
 
     /* Only allow CONF subcommand on replica. */
-    if (server.masterhost && strcasecmp(c->argv[2]->ptr, "conf")) {
-        serverLog(LL_NOTICE, "subcommand %s not allowed on replica", (char *)c->argv[2]->ptr);
-        return;
-    }
+    if (server.masterhost && strcasecmp(c->argv[2]->ptr, "conf")) return;
 
     if (!strcasecmp(c->argv[2]->ptr, "ranges") && c->argc >= 6) {
         /* CLUSTER SYNCSLOTS RANGES <ID> <start-slot> <end-slot> [<start-slot> <end-slot>] */
@@ -1512,7 +1509,7 @@ void clusterSyncSlotsCommand(client *c) {
                     return;
                 }
                 task->source_offset = offset;
-                serverLog(LL_NOTICE, "CLUSTER SYNCSLOTS ACK received, updated source offset to %lld, destination offset: %lld",
+                serverLog(LL_DEBUG, "CLUSTER SYNCSLOTS ACK received, updated source offset to %lld, destination offset: %lld",
                                      task->source_offset, task->dest_offset);
             }
         } else if (c->task && c->task->operation == ASM_MIGRATE) {
@@ -1769,7 +1766,7 @@ static void asmSyncBufferStreamYieldCallback(void *ctx) {
         /* Since this client is protected, freeClient just masks it as closed */
         freeClientAsync(c);
     }
-    serverLog(LL_NOTICE, "Yielding sending ACK during streaming buffer, applied offset: %zu",
+    serverLog(LL_DEBUG, "Yielding sending ACK during streaming buffer, applied offset: %zu",
                          context->applied_offset);
 }
 
