@@ -1521,7 +1521,7 @@ void clusterSyncSlotsCommand(client *c) {
                 return;
             }
             task->dest_offset = offset;
-            serverLog(LL_NOTICE, "CLUSTER SYNCSLOTS ACK received, updated destination offset to %lld, source offset: %lld",
+            serverLog(LL_DEBUG, "CLUSTER SYNCSLOTS ACK received, updated destination offset to %lld, source offset: %lld",
                                  task->dest_offset, task->source_offset);
 
             /* Pause write if needed */
@@ -1569,7 +1569,7 @@ void clusterSyncSlotsCommand(client *c) {
                 c->node_id = sdsdup(node_id);
                 addReply(c, shared.ok);
             } else if (!strcasecmp(c->argv[j]->ptr, "slot-info")) {
-                /* slot_info slot:key_size:expire_size */
+                /* slot-info slot:key_size:expire_size */
                 int count;
                 long long slot, key_size, expire_size;
                 sds slot_info = c->argv[j + 1]->ptr;
