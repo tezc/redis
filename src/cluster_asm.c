@@ -1611,23 +1611,40 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
                     robj key;
                     initStaticStringObject(key, kvobjGetKey(o));
 
-                    if (rioWriteBulkCount(rdb, '*', 5) == 0) goto werr;
-                    if (rioWriteBulkString(rdb, "RESTORE", 7) == 0) goto werr;
-                    if (rioWriteBulkObject(rdb, &key) == 0) goto werr;
-                    if (rioWriteBulkLongLong(rdb, expiretime == -1 ? 0 : expiretime) == 0) goto werr;
+                    if (o->type == OBJ_STRING) {
+                        /* Emit a SET command */
+                        static char cmd[]="*3\r\n$3\r\nSET\r\n";
+                        if (rioWrite(rdb, cmd, sizeof(cmd)-1) == 0) goto werr;
+                        /* Key and value */
+                        if (rioWriteBulkObject(rdb, &key) == 0) goto werr;
+                        if (rioWriteBulkObject(rdb, o) == 0) goto werr;
 
-                    /* Create the DUMP encoded representation. */
-                    rio payload;
-                    createDumpPayload(&payload, o, &key, i);
-                    sds buf = payload.io.buffer.ptr;
-                    if (rioWriteBulkString(rdb, buf, sdslen(buf)) == 0) {
+                        /* Save the expire time */
+                        if (expiretime != -1) {
+                            char cmd[]="*3\r\n$9\r\nPEXPIREAT\r\n";
+                            if (rioWrite(rdb, cmd, sizeof(cmd)-1) == 0) goto werr;
+                            if (rioWriteBulkObject(rdb, &key) == 0) goto werr;
+                            if (rioWriteBulkLongLong(rdb, expiretime) == 0) goto werr;
+                        }
+                    } else {
+                        if (rioWriteBulkCount(rdb, '*', 5) == 0) goto werr;
+                        if (rioWriteBulkString(rdb, "RESTORE", 7) == 0) goto werr;
+                        if (rioWriteBulkObject(rdb, &key) == 0) goto werr;
+                        if (rioWriteBulkLongLong(rdb, expiretime == -1 ? 0 : expiretime) == 0) goto werr;
+
+                        /* Create the DUMP encoded representation. */
+                        rio payload;
+                        createDumpPayload(&payload, o, &key, i);
+                        sds buf = payload.io.buffer.ptr;
+                        if (rioWriteBulkString(rdb, buf, sdslen(buf)) == 0) {
+                            sdsfree(payload.io.buffer.ptr);
+                            goto werr;
+                        }
                         sdsfree(payload.io.buffer.ptr);
-                        goto werr;
-                    }
-                    sdsfree(payload.io.buffer.ptr);
 
-                    /* Write ABSTTL */
-                    if (rioWriteBulkString(rdb, "ABSTTL", 6) == 0) goto werr;
+                        /* Write ABSTTL */
+                        if (rioWriteBulkString(rdb, "ABSTTL", 6) == 0) goto werr;
+                    }
 
                     /* Delay return if required (for testing) */
                     if (unlikely(server.rdb_key_save_delay)) {
