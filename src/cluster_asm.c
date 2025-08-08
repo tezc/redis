@@ -1611,22 +1611,8 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
                     robj key;
                     initStaticStringObject(key, kvobjGetKey(o));
 
-                    if (o->type == OBJ_STRING) {
-                        /* Emit a SET command */
-                        static char cmd[]="*3\r\n$3\r\nSET\r\n";
-                        if (rioWrite(rdb, cmd, sizeof(cmd)-1) == 0) goto werr;
-                        /* Key and value */
-                        if (rioWriteBulkObject(rdb, &key) == 0) goto werr;
-                        if (rioWriteBulkObject(rdb, o) == 0) goto werr;
-
-                        /* Save the expire time */
-                        if (expiretime != -1) {
-                            char cmd[]="*3\r\n$9\r\nPEXPIREAT\r\n";
-                            if (rioWrite(rdb, cmd, sizeof(cmd)-1) == 0) goto werr;
-                            if (rioWriteBulkObject(rdb, &key) == 0) goto werr;
-                            if (rioWriteBulkLongLong(rdb, expiretime) == 0) goto werr;
-                        }
-                    } else {
+                    /* If not supporting aof_rewrite, use RESTORE to import data*/
+                    if (o->type == OBJ_MODULE && ((moduleValue*)o->ptr)->type->aof_rewrite == NULL) {
                         if (rioWriteBulkCount(rdb, '*', 5) == 0) goto werr;
                         if (rioWriteBulkString(rdb, "RESTORE", 7) == 0) goto werr;
                         if (rioWriteBulkObject(rdb, &key) == 0) goto werr;
@@ -1644,6 +1630,9 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
 
                         /* Write ABSTTL */
                         if (rioWriteBulkString(rdb, "ABSTTL", 6) == 0) goto werr;
+                    } else {
+                        /* Use AOF format to import data */
+                        if (rewriteObject(rdb, &key, o, i, expiretime) == C_ERR) goto werr;
                     }
 
                     /* Delay return if required (for testing) */
