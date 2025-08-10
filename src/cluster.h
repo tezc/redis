@@ -154,6 +154,7 @@ typedef struct slotRangeArray {
 slotRangeArray *slotRangeArrayCreate(int num_ranges);
 slotRangeArray *slotRangeArrayDup(slotRangeArray *sra);
 void slotRangeArraySet(slotRangeArray *sra, int idx, int start, int end);
+int slotRangeArrayContains(slotRangeArray *sra, unsigned int slot);
 sds slotRangeArrayToString(slotRangeArray *sra);
 void slotRangeArrayFree(slotRangeArray *sra);
 int validateSlotRanges(slotRangeArray *sra, sds *err);
@@ -162,6 +163,7 @@ slotRangeArray *parseSlotRangesOrReply(client *c, int argc, int pos);
 #define CLUSTER_DELKEYS_NONE        (0)
 #define CLUSTER_DELKEYS_ASYNC       (1 << 0)
 #define CLUSTER_DELKEYS_BY_COMMAND  (1 << 1)
+#define CLUSTER_DELKEYS_NO_REPL     (1 << 2)
 unsigned int clusterDelKeysInSlot(unsigned int hashslot, int flags);
 unsigned int clusterDelKeysInSlotRangeArray(slotRangeArray *sra, int flags);
 

@@ -1607,8 +1607,10 @@ unsigned int clusterDelKeysInSlot(unsigned int hashslot, int flags) {
              * deletion of the key. */
             notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, server.db[0].id);
         } else {
-            /* Propagate the DEL command */
-            propagateDeletion(&server.db[0], key, server.lazyfree_lazy_server_del);
+            if (!(flags & CLUSTER_DELKEYS_NO_REPL)) {
+                /* Propagate the DEL command */
+                propagateDeletion(&server.db[0], key, server.lazyfree_lazy_server_del);
+            }
             /* The keys are not actually logically deleted from the database,
              * just moved to another node. The modules needs to know that these
              * keys are no longer available locally, so just send the keyspace
@@ -1699,6 +1701,13 @@ slotRangeArray *slotRangeArrayDup(slotRangeArray *sra) {
 void slotRangeArraySet(slotRangeArray *sra, int idx, int start, int end) {
     sra->ranges[idx].start = start;
     sra->ranges[idx].end = end;
+}
+
+int slotRangeArrayContains(slotRangeArray *sra, unsigned int slot) {
+    for (int i = 0; i < sra->num_ranges; i++)
+        if (sra->ranges[i].start <= slot && sra->ranges[i].end >= slot)
+            return 1;
+    return 0;
 }
 
 /* Create a slot range string in the format of: "1000-2000 3000-4000 ..." */
@@ -1850,5 +1859,5 @@ void readwriteCommand(client *c) {
 }
 
 void clusterCommonInit(void) {
-    clusterAsmInit();
+    asmInit();
 }

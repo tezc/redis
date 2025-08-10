@@ -13,7 +13,7 @@
 struct asmTask;
 struct slotRangeArray;
 
-void clusterAsmInit(void);
+void asmInit(void);
 void asmBeforeSleep(void);
 void asmCron(void);
 void asmStartSendBulkAndStream(struct asmTask *task);
@@ -34,6 +34,11 @@ int isSlotInAsmTask(int slot);
 
 void clusterMigrationCommand(client *c);
 void clusterSyncSlotsCommand(client *c);
+
+
+void asmActiveTrimCycle(int type);
+int asmActiveTrimIsInProgressFor(int slot);
+int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv, long long *key_mem_freed);
 
 #endif
 

@@ -12,6 +12,7 @@
 
 #include "server.h"
 #include "cluster.h"
+#include "cluster_asm.h"
 
 /*-----------------------------------------------------------------------------
  * Incremental collection of expired keys.
@@ -37,18 +38,26 @@ static double avg_ttl_factor[16] = {0.98, 0.9604, 0.941192, 0.922368, 0.903921, 
  * The parameter 'now' is the current time in milliseconds as is passed
  * to the function to avoid too many gettimeofday() syscalls. */
 int activeExpireCycleTryExpire(redisDb *db, kvobj *kv, long long now) {
-    if (now < kvobjGetExpire(kv))
-        return 0;
+    int deleted = 0;
 
     enterExecutionUnit(1, 0);
     sds key = kvobjGetKey(kv);
-    robj *keyobj = createStringObject(key,sdslen(key));
-    deleteExpiredKeyAndPropagate(db,keyobj);
-    decrRefCount(keyobj);
+    robj keyobj;
+    initStaticStringObject(keyobj, key);
+
+    server.current_key_slot = getKeySlot(key);
+    if (asmActiveTrimDelIfNeeded(db, &keyobj, NULL, NULL)) {
+        deleted = 1;
+    } else if (now >= kvobjGetExpire(kv)) {
+        deleteExpiredKeyAndPropagate(db, &keyobj);
+        deleted = 1;
+    }
+    server.current_key_slot = -1;
+
     exitExecutionUnit();
     /* Propagate the DEL command */
     postExecutionUnitOperations();
-    return 1;
+    return deleted;
 }
 
 /* Try to expire a few timed out keys. The algorithm used is adaptive and

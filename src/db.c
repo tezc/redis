@@ -861,7 +861,7 @@ long long emptyData(int dbnum, int flags, void(callback)(dict*)) {
     /* Make sure the WATCHed keys are affected by the FLUSH* commands.
      * Note that we need to call the function while the keys are still
      * there. */
-    signalFlushedDb(dbnum, async);
+    signalFlushedDb(dbnum, async, NULL);
 
     /* Empty redis database structure. */
     removed = emptyDbStructure(server.db, dbnum, async, callback);
@@ -951,7 +951,7 @@ void signalModifiedKey(client *c, redisDb *db, robj *key) {
     trackingInvalidateKey(c,key,1);
 }
 
-void signalFlushedDb(int dbid, int async) {
+void signalFlushedDb(int dbid, int async, slotRangeArray *slots) {
     int startdb, enddb;
     if (dbid == -1) {
         startdb = 0;
@@ -961,8 +961,8 @@ void signalFlushedDb(int dbid, int async) {
     }
 
     for (int j = startdb; j <= enddb; j++) {
-        scanDatabaseForDeletedKeys(&server.db[j], NULL);
-        touchAllWatchedKeysInDb(&server.db[j], NULL);
+        scanDatabaseForDeletedKeys(&server.db[j], NULL, slots);
+        touchAllWatchedKeysInDb(&server.db[j], NULL, slots);
     }
 
     trackingInvalidateKeysOnFlush(async);
@@ -2126,11 +2126,15 @@ void scanDatabaseForReadyKeys(redisDb *db) {
 /* Since we are unblocking XREADGROUP clients in the event the
  * key was deleted/overwritten we must do the same in case the
  * database was flushed/swapped. */
-void scanDatabaseForDeletedKeys(redisDb *emptied, redisDb *replaced_with) {
+void scanDatabaseForDeletedKeys(redisDb *emptied, redisDb *replaced_with, slotRangeArray *slots) {
     dictEntry *de;
     dictIterator *di = dictGetSafeIterator(emptied->blocking_keys);
     while((de = dictNext(di)) != NULL) {
         robj *key = dictGetKey(de);
+        /* Check if key belongs to the slot range. */
+        if (slots && !slotRangeArrayContains(slots, keyHashSlot(key->ptr, sdslen(key->ptr))))
+            continue;
+
         int existed = 0, exists = 0;
         int original_type = -1, curr_type = -1;
 
@@ -2171,12 +2175,12 @@ int dbSwapDatabases(int id1, int id2) {
 
     /* Swapdb should make transaction fail if there is any
      * client watching keys */
-    touchAllWatchedKeysInDb(db1, db2);
-    touchAllWatchedKeysInDb(db2, db1);
+    touchAllWatchedKeysInDb(db1, db2, NULL);
+    touchAllWatchedKeysInDb(db2, db1, NULL);
 
     /* Try to unblock any XREADGROUP clients if the key no longer exists. */
-    scanDatabaseForDeletedKeys(db1, db2);
-    scanDatabaseForDeletedKeys(db2, db1);
+    scanDatabaseForDeletedKeys(db1, db2, NULL);
+    scanDatabaseForDeletedKeys(db2, db1, NULL);
 
     /* Swap hash tables. Note that we don't swap blocking_keys,
      * ready_keys and watched_keys, since we want clients to
@@ -2217,10 +2221,10 @@ void swapMainDbWithTempDb(redisDb *tempDb) {
 
         /* Swapping databases should make transaction fail if there is any
          * client watching keys. */
-        touchAllWatchedKeysInDb(activedb, newdb);
+        touchAllWatchedKeysInDb(activedb, newdb, NULL);
 
         /* Try to unblock any XREADGROUP clients if the key no longer exists. */
-        scanDatabaseForDeletedKeys(activedb, newdb);
+        scanDatabaseForDeletedKeys(activedb, newdb, NULL);
 
         /* Swap hash tables. Note that we don't swap blocking_keys,
          * ready_keys and watched_keys, since clients 
@@ -2438,6 +2442,10 @@ void deleteEvictedKeyAndPropagate(redisDb *db, robj *keyobj, long long *key_mem_
     deleteKeyAndPropagate(db, keyobj, NOTIFY_EVICTED, key_mem_freed);
 }
 
+void propagateDeletion(redisDb *db, robj *key, int lazy) {
+    propagateDeletionEx(db,key,lazy,1);
+}
+
 /* Propagate an implicit key deletion into replicas and the AOF file.
  * When a key was deleted in the master by eviction, expiration or a similar
  * mechanism a DEL/UNLINK operation for this key is sent
@@ -2457,7 +2465,7 @@ void deleteEvictedKeyAndPropagate(redisDb *db, robj *keyobj, long long *key_mem_
  *    postExecutionUnitOperations, preferably just after a
  *    single deletion batch, so that DEL/UNLINK will NOT be wrapped
  *    in MULTI/EXEC */
-void propagateDeletion(redisDb *db, robj *key, int lazy) {
+void propagateDeletionEx(redisDb *db, robj *key, int lazy, int include_slaves) {
     robj *argv[2];
 
     argv[0] = lazy ? shared.unlink : shared.del;
@@ -2465,11 +2473,15 @@ void propagateDeletion(redisDb *db, robj *key, int lazy) {
     incrRefCount(argv[0]);
     incrRefCount(argv[1]);
 
+    int flags = PROPAGATE_AOF;
+    if (include_slaves)
+        flags |= PROPAGATE_REPL;
+
     /* If the master decided to delete a key we must propagate it to replicas no matter what.
      * Even if module executed a command without asking for propagation. */
     int prev_replication_allowed = server.replication_allowed;
     server.replication_allowed = 1;
-    alsoPropagate(db->id,argv,2,PROPAGATE_AOF|PROPAGATE_REPL);
+    alsoPropagate(db->id,argv,2,flags);
     server.replication_allowed = prev_replication_allowed;
 
     decrRefCount(argv[0]);
@@ -2527,6 +2539,9 @@ int keyIsExpired(redisDb *db, sds key, kvobj *kv) {
  */
 keyStatus expireIfNeeded(redisDb *db, robj *key, kvobj *kv, int flags) {
     serverAssert(key != NULL);
+
+    if (asmActiveTrimDelIfNeeded(db, key, kv, NULL)) return KEY_DELETED;
+
     sds keyname = key->ptr;
     if ((server.allow_access_expired) ||
         (flags & EXPIRE_ALLOW_ACCESS_EXPIRED) ||

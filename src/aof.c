@@ -11,6 +11,7 @@
 #include "bio.h"
 #include "rio.h"
 #include "functions.h"
+#include "cluster_asm.h"
 
 #include <signal.h>
 #include <fcntl.h>
@@ -2387,6 +2388,7 @@ int rewriteObject(rio *r, robj *key, robj *o, int dbid, long long expiretime) {
 
 int rewriteAppendOnlyFileRio(rio *aof) {
     dictEntry *de;
+    unsigned long long sharding_aof_skipped = 0;
     int j;
     long key_count = 0;
     long long updated_time = 0;
@@ -2421,6 +2423,14 @@ int rewriteAppendOnlyFileRio(rio *aof) {
             
             /* Get the expire time */
             expiretime = kvobjGetExpire(o);
+
+            if (server.cluster_enabled) {
+                int curr_slot = kvstoreIteratorGetCurrentDictIndex(kvs_it);
+                if (asmActiveTrimIsInProgressFor(curr_slot)) {
+                    sharding_aof_skipped++;
+                    continue;
+                }
+            }
             
             /* Set on stack string object for key */
             robj key;
@@ -2451,6 +2461,8 @@ int rewriteAppendOnlyFileRio(rio *aof) {
         }
         kvstoreIteratorRelease(kvs_it);
     }
+
+    serverLog(LL_NOTICE, "aofrw done, %llu keys skipped.", sharding_aof_skipped);
     return C_OK;
 
 werr:

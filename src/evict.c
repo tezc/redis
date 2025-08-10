@@ -15,6 +15,7 @@
 #include "atomicvar.h"
 #include "script.h"
 #include "cluster.h"
+#include "cluster_asm.h"
 #include <math.h>
 
 /* ----------------------------------------------------------------------------
@@ -562,6 +563,7 @@ int performEvictions(void) {
         int j, k, i;
         static unsigned int next_db = 0;
         sds bestkey = NULL;
+        int bestkey_slot;
         int bestdbid;
         redisDb *db;
         dictEntry *de;
@@ -615,6 +617,7 @@ int performEvictions(void) {
                 for (k = EVPOOL_SIZE-1; k >= 0; k--) {
                     if (pool[k].key == NULL) continue;
                     bestdbid = pool[k].dbid;
+                    bestkey_slot = pool[k].slot;
 
                     kvstore *kvs;
                     if (server.maxmemory_policy & MAXMEMORY_FLAG_ALLKEYS) {
@@ -664,6 +667,7 @@ int performEvictions(void) {
                 if (de) {
                     kvobj *kv = dictGetKV(de);
                     bestkey = kvobjGetKey(kv);
+                    bestkey_slot = slot;
                     bestdbid = j;
                     break;
                 }
@@ -677,7 +681,14 @@ int performEvictions(void) {
 
             enterExecutionUnit(1, 0);
             robj *keyobj = createStringObject(bestkey,sdslen(bestkey));
-            deleteEvictedKeyAndPropagate(db, keyobj, &key_mem_freed);
+
+            server.current_key_slot = bestkey_slot;
+            /* Try to lazy-trim before evicting */
+            if (!asmActiveTrimDelIfNeeded(db, keyobj, NULL, &key_mem_freed)) {
+                deleteEvictedKeyAndPropagate(db, keyobj, &key_mem_freed);
+            }
+            server.current_key_slot = -1;
+
             decrRefCount(keyobj);
             exitExecutionUnit();
             /* Propagate the DEL command */
