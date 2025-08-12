@@ -1616,6 +1616,10 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
     if (unlikely(asmDebugIsFailPointActive(ASM_MIGRATE_RDB_CHANNEL, ASM_SEND_BULK_AND_STREAM)))
         rioAbort(rdb); /* Simulate a failure */
 
+    /* Disable RDB compression for slots snapshot since compression is too
+     * expensive both in source and destination. */
+    server.rdb_compression = 0;
+
     for (int i = 0; i < server.dbnum; i++) {
         char selectcmd[] = "*2\r\n$6\r\nSELECT\r\n";
         redisDb *db = server.db + i;
