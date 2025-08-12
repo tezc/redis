@@ -5777,7 +5777,7 @@ sds genClusterInfoString(void) {
                 myself->slaveof->configEpoch : myself->configEpoch;
 
     info = sdscatprintf(info,
-        "cluster_state:%s\r\n"
+                        "cluster_state:%s\r\n"
         "cluster_slots_assigned:%d\r\n"
         "cluster_slots_ok:%d\r\n"
         "cluster_slots_pfail:%d\r\n"
@@ -5786,17 +5786,15 @@ sds genClusterInfoString(void) {
         "cluster_size:%d\r\n"
         "cluster_current_epoch:%llu\r\n"
         "cluster_my_epoch:%llu\r\n"
-        "cluster_slot_migration_sync_buffer_peak:%zu\r\n"
         , statestr[server.cluster->state],
-        slots_assigned,
-        slots_ok,
-        slots_pfail,
-        slots_fail,
-        dictSize(server.cluster->nodes),
-        server.cluster->size,
-        (unsigned long long) server.cluster->currentEpoch,
-        (unsigned long long) myepoch,
-        asmGetPeakSyncBufferSize()
+                        slots_assigned,
+                        slots_ok,
+                        slots_pfail,
+                        slots_fail,
+                        dictSize(server.cluster->nodes),
+                        server.cluster->size,
+                        (unsigned long long) server.cluster->currentEpoch,
+                        (unsigned long long) myepoch
     );
 
     /* Show stats about messages sent and received. */
@@ -5828,6 +5826,8 @@ sds genClusterInfoString(void) {
     info = sdscatprintf(info,
         "total_cluster_links_buffer_limit_exceeded:%llu\r\n",
         server.cluster->stat_cluster_links_buffer_limit_exceeded);
+
+    info = asmGenInfoString(info);
 
     return info;
 }

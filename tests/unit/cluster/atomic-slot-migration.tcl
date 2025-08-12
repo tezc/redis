@@ -26,6 +26,40 @@ proc migration_status {node_id task_id field} {
     return ""
 }
 
+proc wait_for_trim {node_id} {
+    wait_for_condition 1000 5 {
+        [CI $node_id cluster_active_trim_task_count] == 0
+    } else {
+        fail "trim task did not complete"
+    }
+}
+
+proc wait_for_asm_done_for {c1 c2} {
+    wait_for_condition 1000 5 {
+        [CI $c1 cluster_slot_migration_task_count] == 0 &&
+        [CI $c2 cluster_slot_migration_task_count] == 0 &&
+        [CI $c1 cluster_slot_migration_trim_task_count] == 0 &&
+        [CI $c2 cluster_slot_migration_trim_task_count] == 0
+    } else {
+        fail "trim task did not complete"
+    }
+}
+
+proc wait_for_asm_done {} {
+    set total_instances [expr {$::cluster_master_nodes + $::cluster_replica_nodes}]
+
+    for {set i 0} {$i < $total_instances} {incr i} {
+        wait_for_condition 1000 10 {
+            [CI $i cluster_slot_migration_task_count] == 0 &&
+            [CI $i cluster_slot_migration_trim_task_count] == 0
+        } else {
+            set migration_count [CI $i cluster_slot_migration_task_count]
+            set trim_count [CI $i cluster_slot_migration_trim_task_count]
+            fail "ASM tasks did not complete on instance $i: migration_tasks=$migration_count, trim_tasks=$trim_count"
+        }
+    }
+}
+
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000}} {
     test "Test IMPORT input validation" {
         # Invalid slot range
@@ -106,6 +140,62 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         assert_equal "tag22273" [R 0 get tag22273]
         assert_equal "tag9283" [R 0 get tag9283]
         R 1 config set rdb-key-save-delay 0
+        wait_for_asm_done
+    }
+
+    test "Test IMPORT not allowed if there is an overlapping trim" {
+        R 0 flushall
+        R 0 debug asm-trim-method active 1000000
+
+        R 0 debug populate 10000 {b} 100  ;# slot hash is 3300
+        R 1 CLUSTER MIGRATION IMPORT 3300 3300
+
+        wait_for_condition 1000 10 {
+            [CI 0 cluster_slot_migration_trim_task_count] == 1
+        } else {
+            fail "trim task did not start"
+        }
+
+        assert_error {*overlapping trim is in progress*} {R 0 CLUSTER MIGRATION IMPORT 3000 3500}
+        R 0 debug asm-trim-method default
+
+        # Revert the migration
+        wait_for_asm_done
+        R 0 CLUSTER MIGRATION IMPORT 3300 3300
+        R 0 flushall
+        wait_for_asm_done
+    }
+
+    test "Test IMPORT not allowed if there is a pending trim" {
+        R 0 flushall
+        R 0 debug asm-trim-method active 1000000
+
+        R 0 debug populate 100 "{b}" 100  ;# slot hash is 3300
+        R 0 debug populate 100 "{f}" 100  ;# slot hash is 3168
+        R 1 CLUSTER MIGRATION IMPORT 3300 3300
+
+        wait_for_condition 1000 10 {
+            [CI 0 cluster_slot_migration_trim_task_count] == 1 &&
+            [CI 1 cluster_slot_migration_task_count] == 0
+        } else {
+            fail "trim task did not start1"
+        }
+
+        R 1 CLUSTER MIGRATION IMPORT 3168 3168
+
+        wait_for_condition 1000 10 {
+            [CI 0 cluster_slot_migration_trim_task_count] == 2
+        } else {
+            fail "trim task did not start2"
+        }
+
+        assert_error {*overlapping trim is in progress*} {R 0 CLUSTER MIGRATION IMPORT 3100 3200}
+        R 0 debug asm-trim-method default
+        # Revert the migration
+        wait_for_asm_done
+        R 0 CLUSTER MIGRATION IMPORT 3300 3300 3168 3168
+        wait_for_asm_done
+        R 0 flushall
     }
 
     test "Simple slot migration" {
@@ -160,6 +250,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         assert_equal [string repeat c 100] [R 3 get $slot101_key]
 
         R 0 config set rdb-key-save-delay 0
+        wait_for_asm_done
     }
 
     proc asm_basic_error_handling_test {operation channel all_states} {
@@ -342,6 +433,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # Reset configurations
         R 0 config set client-output-buffer-limit "replica 0 0 0"
         R 0 config set rdb-key-save-delay 0
+        wait_for_asm_done
     }
 
     test "Expired key is not deleted and SCAN/KEYS/RANDOMKEY hide keys in importing slots" {
