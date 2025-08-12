@@ -108,8 +108,6 @@ void createDumpPayload(rio *payload, robj *o, robj *key, int dbid);
 int startBgsaveForReplication(int mincapa, int req);
 void createReplicationBacklogIfNeeded(void);
 static void asmSyncBufferReadFromConn(connection *conn);
-void asmTaskSetFailed(asmTask *task, const char *fmt, ...);
-int clusterAsmCancel(const char *task_id);
 
 void clusterAsmInit(void) {
     asmManager = zcalloc(sizeof(*asmManager));
@@ -300,6 +298,26 @@ int asmKeyBelongsToCurrentNode(kvobj *kv) {
     return 1;
 }
 
+size_t asmGetImportingBufferSize(void) {
+    if (!asmManager || listLength(asmManager->tasks) == 0) return 0;
+
+    asmTask *task = listNodeValue(listFirst(asmManager->tasks));
+    if (task->operation == ASM_IMPORT)
+        return task->sync_buffer.mem_used;
+
+    return 0;
+}
+
+size_t asmGetMigratingBufferSize(void) {
+    if (!asmManager || listLength(asmManager->tasks) == 0) return 0;
+
+    asmTask *task = listNodeValue(listFirst(asmManager->tasks));
+    if (task->operation == ASM_MIGRATE && task->main_channel_client)
+        return getClientOutputBufferMemoryUsage(task->main_channel_client);
+
+    return 0;
+}
+
 static int compareSlotRange(const void *a, const void *b) {
     const slotRange *sa = a;
     const slotRange *sb = b;
@@ -367,6 +385,15 @@ static int slotRangeArrayOverlaps(slotRangeArray *sra, slotRange *req) {
         slotRange *sr = &sra->ranges[i];
         if (sr->start <= req->end && sr->end >= req->start)
             return 1;
+    }
+    return 0;
+}
+
+/* Returns 1 if the two slot range arrays overlap, 0 otherwise. */
+static int slotRangeArraysOverlap(slotRangeArray *sra1, slotRangeArray *sra2) {
+    for (int i = 0; i < sra1->num_ranges; i++) {
+        slotRange *sr1 = &sra1->ranges[i];
+        if (slotRangeArrayOverlaps(sra2, sr1)) return 1;
     }
     return 0;
 }
@@ -972,7 +999,7 @@ void asmRdbChannelSyncWithSource(connection *conn) {
 
             task->rdb_channel_state = ASM_RDBCHANNEL_TRANSFER;
             client *c = createClient(conn);
-            c->flags |= (CLIENT_MASTER | CLIENT_INTERNAL);
+            c->flags |= (CLIENT_MASTER | CLIENT_INTERNAL | CLIENT_ASM_IMPORTING);
             c->querybuf = sdsempty();
             c->authenticated = 1;
             c->user = NULL;
@@ -1380,9 +1407,15 @@ void clusterSyncSlotsCommand(client *c) {
             zfree(task->slot_ranges); /* Will be set again later */
             task->retry_count++;
         } else if (task) {
-            addReplyError(c, "Another migration task is already in progress");
-            zfree(slot_ranges);
-            return;
+            if (task->state == ASM_FAILED) {
+                /* Cancel the failed task, and create new one. */
+                asmTaskCancel(task);
+                task = NULL;
+            } else {
+                addReplyError(c, "Another migration task is already in progress");
+                zfree(slot_ranges);
+                return;
+            }
         }
 
         /* Create the migrate slots task and add it to the list,
@@ -1390,6 +1423,7 @@ void clusterSyncSlotsCommand(client *c) {
         if (task == NULL) {
             task = asmTaskCreate(task_id);
             task->start_time = server.mstime; /* Start immediately */
+            serverAssert(listLength(asmManager->tasks) == 0);
             listAddNodeTail(asmManager->tasks, task);
         }
 
@@ -1398,19 +1432,13 @@ void clusterSyncSlotsCommand(client *c) {
         memcpy(task->source, getMyClusterNode()->name, CLUSTER_NAMELEN);
         if (c->node_id) memcpy(task->dest, c->node_id, CLUSTER_NAMELEN);
 
-        clusterNode *dst = clusterLookupNode(task->dest, CLUSTER_NAMELEN);
-        if (dst) {
-            int port = server.tls_replication ? dst->tls_port : dst->tcp_port;
-            c->slave_listening_port = port;
-        }
-
         task->main_channel_client = c;
         c->task = task;
 
         /* We mark the main channel client as a replica, so this client is limited
          * by the client output buffer settings for replicas. The replstate has no
          * real significance, just to prevent it from going online. */
-        c->flags |= (CLIENT_SLAVE | CLIENT_REPL_MIGRATION_DEST);
+        c->flags |= (CLIENT_SLAVE | CLIENT_ASM_MIGRATING);
         c->replstate = SLAVE_STATE_WAIT_RDB_CHANNEL;
         if (server.repl_disable_tcp_nodelay)
             connDisableTcpNoDelay(c->conn);  /* Non critical if it fails. */
@@ -1465,12 +1493,11 @@ void clusterSyncSlotsCommand(client *c) {
         }
 
         /* Mark the client as a slave to generate slots snapshot */
-        c->flags |= (CLIENT_SLAVE | CLIENT_REPL_RDB_CHANNEL | CLIENT_REPL_RDBONLY | CLIENT_REPL_MIGRATION_DEST);
+        c->flags |= (CLIENT_SLAVE | CLIENT_REPL_RDB_CHANNEL | CLIENT_REPL_RDBONLY | CLIENT_ASM_MIGRATING);
         c->slave_capa |= SLAVE_CAPA_EOF;
         c->slave_req |= (SLAVE_REQ_SLOTS_SNAPSHOT | SLAVE_REQ_RDB_CHANNEL);
         c->replstate = SLAVE_STATE_WAIT_BGSAVE_START;
         c->repldbfd = -1;
-        c->slave_listening_port = task->main_channel_client->slave_listening_port;
         if (server.repl_disable_tcp_nodelay)
             connDisableTcpNoDelay(c->conn); /* Non critical if it fails. */
         listAddNodeTail(server.slaves, c);
@@ -1791,7 +1818,7 @@ void asmSyncBufferStreamToDb(asmTask *task) {
     /* The buffered stream from the main channel connection into
      * the database is processed by a fake client. */
     client *c = createClient(task->main_channel_conn);
-    c->flags |= (CLIENT_MASTER | CLIENT_INTERNAL);
+    c->flags |= (CLIENT_MASTER | CLIENT_INTERNAL | CLIENT_ASM_IMPORTING);
     c->querybuf = sdsempty();
     c->authenticated = 1;
     c->user = NULL;
@@ -1922,6 +1949,8 @@ void asmCron(void) {
 
 /* Cancel a specific task if ID is provided, otherwise cancel all tasks. */
 int clusterAsmCancel(const char *task_id) {
+    if (asmManager == NULL) return 0;
+
     if (task_id) {
         asmTask *task = lookupAsmTaskById(task_id);
         if (!task) return 0; /* Not found */
@@ -1941,6 +1970,25 @@ int clusterAsmCancel(const char *task_id) {
         }
         return num_cancelled;
     }
+}
+
+/* Cancel all tasks that overlap with the given slot ranges.
+ * If slot_ranges is NULL, cancel all tasks. */
+int clusterAsmCancelBySlotRangeArray(struct slotRangeArray *slot_ranges) {
+    if (asmManager == NULL) return 0;
+
+    int num_cancelled = 0;
+    listIter li;
+    listNode *ln;
+    listRewind(asmManager->tasks, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        asmTask *task = listNodeValue(ln);
+        if (!slot_ranges || slotRangeArraysOverlap(task->slot_ranges, slot_ranges)) {
+            asmTaskCancel(task);
+            num_cancelled++;
+        }
+    }
+    return num_cancelled;
 }
 
 int clusterAsmHandoff(const char *task_id, sds *err) {

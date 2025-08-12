@@ -4620,7 +4620,7 @@ int isReadyToShutdown(void) {
     listRewind(server.slaves, &li);
     while ((ln = listNext(&li)) != NULL) {
         client *replica = listNodeValue(ln);
-        if (replica->flags & CLIENT_REPL_MIGRATION_DEST) continue;
+        if (replica->flags & CLIENT_ASM_MIGRATING) continue;
         if (replica->repl_ack_off != server.master_repl_offset) return 0;
     }
     return 1;
@@ -6009,6 +6009,8 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "allocator_rss_bytes:%zd\r\n", mh->allocator_rss_bytes,
             "rss_overhead_ratio:%.2f\r\n", mh->rss_extra,
             "rss_overhead_bytes:%zd\r\n", mh->rss_extra_bytes,
+            "asm_migrating_buffer:%zu\r\n", mh->asm_migrating_buffer,
+            "asm_importing_buffer:%zu\r\n", mh->asm_importing_buffer,
             /* The next field (mem_fragmentation_ratio) is the total RSS
              * overhead, including fragmentation, but not just it. This field
              * (and the next one) is named like that just for backward
@@ -6327,6 +6329,10 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
                  * replica has an associated main-channel replica in
                  * server.slaves list, we'll list main channel replica only. */
                 if (replicationCheckHasMainChannel(slave))
+                    continue;
+
+                /* Don't list migration destination replicas. */
+                if (slave->flags & CLIENT_ASM_MIGRATING)
                     continue;
 
                 if (!slaveip) {

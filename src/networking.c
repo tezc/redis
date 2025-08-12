@@ -562,8 +562,13 @@ void afterErrorReply(client *c, const char *s, size_t len, int flags) {
             to = "AOF-loading-client";
             from = "server";
         } else if (ctype == CLIENT_TYPE_MASTER) {
-            to = "master";
-            from = "replica";
+            if (c->flags & CLIENT_ASM_IMPORTING) {
+                to = "source";
+                from = "destination";
+            } else {
+                to = "master";
+                from = "replica";
+            }
         } else {
             to = "replica";
             from = "master";
@@ -580,6 +585,10 @@ void afterErrorReply(client *c, const char *s, size_t len, int flags) {
             showLatestBacklog();
         }
         server.stat_unexpected_error_replies++;
+
+        /* If there is an ASM import task in progress, we need to close the client
+         * to let this task fail. */
+        if (c->flags & CLIENT_ASM_IMPORTING) freeClientAsync(c);
 
         /* Based off the propagation error behavior, check if we need to panic here. There
          * are currently two checked cases:
@@ -2686,7 +2695,8 @@ void commandProcessed(client *c) {
             c->repl_applied += applied;
 
             /* Update the atomic slot migration task's applied bytes. */
-            if (c->task) asmImportIncrAppliedBytes(c->task, applied);
+            if (c->flags & CLIENT_ASM_MIGRATING)
+                asmImportIncrAppliedBytes(c->task, applied);
         }
     }
 }
@@ -3139,10 +3149,17 @@ sds catClientInfoString(sds s, client *client) {
     if (client->flags & CLIENT_SLAVE) {
         if (client->flags & CLIENT_MONITOR)
             *p++ = 'O';
+        else if (client->flags & CLIENT_ASM_MIGRATING)
+            *p++ = 'm';
         else
             *p++ = 'S';
     }
-    if (client->flags & CLIENT_MASTER) *p++ = 'M';
+    if (client->flags & CLIENT_MASTER) {
+        if (client->flags & CLIENT_ASM_IMPORTING)
+            *p++ = 'i';
+        else
+            *p++ = 'M';
+    }
     if (client->flags & CLIENT_PUBSUB) *p++ = 'P';
     if (client->flags & CLIENT_MULTI) *p++ = 'x';
     if (client->flags & CLIENT_BLOCKED) *p++ = 'b';
@@ -4249,7 +4266,7 @@ static inline int clientTypeIsSlave(client *c) {
     /* Even though MONITOR clients and ASM destination RDB/main channels are marked
      * as replicas, we want the expose them as normal clients. */
     if (unlikely((c->flags & CLIENT_SLAVE) &&
-        !(c->flags & (CLIENT_MONITOR | CLIENT_REPL_MIGRATION_DEST))))
+        !(c->flags & (CLIENT_MONITOR | CLIENT_ASM_MIGRATING))))
     {
         return 1;
     }
