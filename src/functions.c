@@ -740,7 +740,7 @@ void functionRestoreCommand(client *c) {
     }
 
     uint16_t rdbver;
-    if (verifyDumpPayload((unsigned char*)data, data_len, &rdbver) != C_OK) {
+    if (verifyDumpPayload((unsigned char*)data, data_len, &rdbver, 0) != C_OK) {
         addReplyError(c, "DUMP payload version or checksum are wrong");
         return;
     }

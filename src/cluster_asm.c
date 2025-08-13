@@ -1692,6 +1692,9 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
 
                         /* Write ABSTTL */
                         if (rioWriteBulkString(rdb, "ABSTTL", 6) == 0) goto werr;
+
+                        /* Write SKIPVALIDATION */
+                        if (rioWriteBulkString(rdb, "SKIPVALIDATION", 14) == 0) goto werr;
                     } else {
                         /* Use AOF format to import data */
                         if (rewriteObject(rdb, &key, o, i, expiretime) == C_ERR) goto werr;

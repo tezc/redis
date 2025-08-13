@@ -4056,7 +4056,7 @@ void askingCommand(client *c);
 void readonlyCommand(client *c);
 void readwriteCommand(client *c);
 void sflushCommand(client *c);
-int verifyDumpPayload(unsigned char *p, size_t len, uint16_t *rdbver_ptr);
+int verifyDumpPayload(unsigned char *p, size_t len, uint16_t *rdbver_ptr, int skip_validation);
 void dumpCommand(client *c);
 void objectCommand(client *c);
 void memoryCommand(client *c);

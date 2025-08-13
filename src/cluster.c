@@ -115,7 +115,7 @@ void createDumpPayload(rio *payload, robj *o, robj *key, int dbid) {
  * If the DUMP payload looks valid C_OK is returned, otherwise C_ERR
  * is returned. If rdbver_ptr is not NULL, its populated with the value read
  * from the input buffer. */
-int verifyDumpPayload(unsigned char *p, size_t len, uint16_t *rdbver_ptr) {
+int verifyDumpPayload(unsigned char *p, size_t len, uint16_t *rdbver_ptr, int skip_validation) {
     unsigned char *footer;
     uint16_t rdbver;
     uint64_t crc;
@@ -131,7 +131,7 @@ int verifyDumpPayload(unsigned char *p, size_t len, uint16_t *rdbver_ptr) {
     }
     if (rdbver > RDB_VERSION) return C_ERR;
 
-    if (server.skip_checksum_validation)
+    if (skip_validation || server.skip_checksum_validation)
         return C_OK;
 
     /* Verify CRC64 */
@@ -161,12 +161,13 @@ void dumpCommand(client *c) {
     return;
 }
 
-/* RESTORE key ttl serialized-value [REPLACE] [ABSTTL] [IDLETIME seconds] [FREQ frequency] */
+/* RESTORE key ttl serialized-value [REPLACE] [ABSTTL] [IDLETIME seconds] [FREQ frequency] [SKIPVALIDATION] */
 void restoreCommand(client *c) {
     long long ttl, lfu_freq = -1, lru_idle = -1, lru_clock = -1;
     rio payload;
     int j, type, replace = 0, absttl = 0;
     robj *obj;
+    int skip_validation = 0;
 
     /* Parse additional options */
     for (j = 4; j < c->argc; j++) {
@@ -196,6 +197,8 @@ void restoreCommand(client *c) {
                 return;
             }
             j++; /* Consume additional arg. */
+        } else if (!strcasecmp(c->argv[j]->ptr,"skipvalidation")) {
+            skip_validation = 1;
         } else {
             addReplyErrorObject(c,shared.syntaxerr);
             return;
@@ -218,7 +221,8 @@ void restoreCommand(client *c) {
     }
 
     /* Verify RDB version and data checksum. */
-    if (verifyDumpPayload(c->argv[3]->ptr,sdslen(c->argv[3]->ptr),NULL) == C_ERR)
+    if (verifyDumpPayload(c->argv[3]->ptr,sdslen(c->argv[3]->ptr),NULL,
+                          skip_validation) == C_ERR)
     {
         addReplyError(c,"DUMP payload version or checksum are wrong");
         return;
