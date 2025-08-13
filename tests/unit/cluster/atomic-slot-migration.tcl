@@ -553,7 +553,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 config set rdb-key-save-delay 1000000
 
         # flushall, flushdb, sflush
-        for {set i 0} {$i < 3} {incr i} {
+        foreach flushcmd {flushall flushdb sflush} {
             # write some keys on R 0
             set slot0_key "06S"
             set slot1_key "Qi"
@@ -562,21 +562,22 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
             # start slot migration
             set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
-            wait_for_condition 2000 10 {
+            wait_for_condition 1000 50 {
                 [string match {*send-bulk-and-stream*} [migration_status 0 $task_id state]]
             } else {
                 fail "ASM task did not start"
             }
 
-            if {$i == 0} {
+            if {$::verbose} { puts "flush command: $flushcmd"}
+            if {$flushcmd == "flushall"} {
                 R 1 flushall
-            } elseif {$i == 1} {
+            } elseif {$flushcmd == "flushdb"} {
                 R 1 flushdb
-            } else {
+            } elseif {$flushcmd == "sflush"} {
                 R 0 sflush 10 110
             }
 
-            # flush* will cancel the task
+            # flush-like will cancel the task
             wait_for_condition 1000 50 {
                 [string match {*canceled*} [migration_status 0 $task_id state]] ||
                 [string match {*canceled*} [migration_status 1 $task_id state]]

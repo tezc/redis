@@ -1086,7 +1086,7 @@ void clusterReset(int hard) {
     resetManualFailover();
 
     /* Cancel all ASM tasks */
-    clusterAsmCancel(NULL);
+    clusterAsmCancel(NULL, "CLUSTER RESET");
 
     /* Unassign all the slots. */
     for (j = 0; j < CLUSTER_SLOTS; j++) clusterDelSlot(j);
@@ -5321,7 +5321,8 @@ void clusterSetMaster(clusterNode *n) {
         myself->flags &= ~(CLUSTER_NODE_MASTER|CLUSTER_NODE_MIGRATE_TO);
         myself->flags |= CLUSTER_NODE_SLAVE;
         clusterCloseAllSlots();
-        clusterAsmCancel(NULL); /* Cancel all ASM tasks when turning into slave */
+        /* Cancel all ASM tasks when switching into slave */
+        clusterAsmCancel(NULL, "switching to replica");
     } else {
         if (myself->slaveof)
             clusterNodeRemoveSlave(myself->slaveof,myself);

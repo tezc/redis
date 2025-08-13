@@ -1089,7 +1089,7 @@ int flushCommandCommon(client *c, int type, int flags, slotRangeArray *sra) {
     }
 
     /* Cancel all ASM tasks that overlap with the given slot ranges. */
-    clusterAsmCancelBySlotRangeArray(sra);
+    clusterAsmCancelBySlotRangeArray(sra, c->argv[0]->ptr);
 
     if (type == FLUSH_TYPE_ALL) {
         flushAllDataAndResetRDB(flags | EMPTYDB_NOFUNCTIONS);

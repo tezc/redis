@@ -28,8 +28,8 @@ size_t asmGetPeakSyncBufferSize(void);
 int asmKeyBelongsToCurrentNode(kvobj *kv);
 size_t asmGetImportingBufferSize(void);
 size_t asmGetMigratingBufferSize(void);
-int clusterAsmCancel(const char *task_id);
-int clusterAsmCancelBySlotRangeArray(struct slotRangeArray *slot_ranges);
+int clusterAsmCancel(const char *task_id, const char *reason);
+int clusterAsmCancelBySlotRangeArray(struct slotRangeArray *slot_ranges, const char *reason);
 
 void clusterMigrationCommand(client *c);
 void clusterSyncSlotsCommand(client *c);

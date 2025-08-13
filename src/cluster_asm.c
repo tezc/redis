@@ -644,7 +644,7 @@ static void clusterMigrationCommandCancel(client *c) {
         return;
     }
 
-    num_cancelled = clusterAsmCancel(task_id);
+    num_cancelled = clusterAsmCancel(task_id, "user request");
     addReplyLongLong(c, num_cancelled);
 }
 
@@ -840,10 +840,10 @@ void asmTaskComplete(asmTask *task) {
     }
 }
 
-void asmTaskCancel(asmTask *task) {
+void asmTaskCancel(asmTask *task, const char *reason) {
     if (task->state == ASM_CANCELED) return;
 
-    asmTaskSetFailed(task, "Cancelled by user");
+    asmTaskSetFailed(task, "Cancelled due to %s", reason);
     task->state = ASM_CANCELED;
     asmTaskComplete(task);
 }
@@ -988,6 +988,12 @@ void asmRdbChannelSyncWithSource(connection *conn) {
         err = receiveSynchronousResponse(conn);
         /* The destination node did not reply */
         if (err == NULL) goto no_response_error;
+
+        /* Ignore `\n` that may be sent to keep the connection alive */
+        if (sdslen(err) == 0) {
+            sdsfree(err);
+            return;
+        }
 
         /* Check `+SLOTSSNAPSHOT` reply */
         if (!strncmp(err, "+SLOTSSNAPSHOT", strlen("+SLOTSSNAPSHOT"))) {
@@ -1409,7 +1415,7 @@ void clusterSyncSlotsCommand(client *c) {
         } else if (task) {
             if (task->state == ASM_FAILED) {
                 /* Cancel the failed task, and create new one. */
-                asmTaskCancel(task);
+                asmTaskCancel(task, "new task requested");
                 task = NULL;
             } else {
                 addReplyError(c, "Another migration task is already in progress");
@@ -1948,14 +1954,14 @@ void asmCron(void) {
 }
 
 /* Cancel a specific task if ID is provided, otherwise cancel all tasks. */
-int clusterAsmCancel(const char *task_id) {
+int clusterAsmCancel(const char *task_id, const char *reason) {
     if (asmManager == NULL) return 0;
 
     if (task_id) {
         asmTask *task = lookupAsmTaskById(task_id);
         if (!task) return 0; /* Not found */
 
-        asmTaskCancel(task);
+        asmTaskCancel(task, reason);
         return 1;
     } else {
         int num_cancelled = 0;
@@ -1965,7 +1971,7 @@ int clusterAsmCancel(const char *task_id) {
         listRewind(asmManager->tasks, &li);
         while ((ln = listNext(&li)) != NULL) {
             asmTask *task = listNodeValue(ln);
-            asmTaskCancel(task);
+            asmTaskCancel(task, reason);
             num_cancelled++;
         }
         return num_cancelled;
@@ -1974,7 +1980,7 @@ int clusterAsmCancel(const char *task_id) {
 
 /* Cancel all tasks that overlap with the given slot ranges.
  * If slot_ranges is NULL, cancel all tasks. */
-int clusterAsmCancelBySlotRangeArray(struct slotRangeArray *slot_ranges) {
+int clusterAsmCancelBySlotRangeArray(struct slotRangeArray *slot_ranges, const char *reason) {
     if (asmManager == NULL) return 0;
 
     int num_cancelled = 0;
@@ -1984,7 +1990,7 @@ int clusterAsmCancelBySlotRangeArray(struct slotRangeArray *slot_ranges) {
     while ((ln = listNext(&li)) != NULL) {
         asmTask *task = listNodeValue(ln);
         if (!slot_ranges || slotRangeArraysOverlap(task->slot_ranges, slot_ranges)) {
-            asmTaskCancel(task);
+            asmTaskCancel(task, reason);
             num_cancelled++;
         }
     }
@@ -2065,7 +2071,7 @@ int clusterAsmProcess(const char *task_id, int event, void *arg, char **err) {
             ret = asmCreateImportTask(task_id, arg, &errsds) ? C_OK : C_ERR;
             break;
         case ASM_EVENT_CANCEL:
-            num_cancelled = clusterAsmCancel(task_id);
+            num_cancelled = clusterAsmCancel(task_id, "user request");
             if (arg) *((int *)arg) = num_cancelled;
             ret = C_OK;
             break;
