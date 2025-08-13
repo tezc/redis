@@ -1673,8 +1673,14 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
                     robj key;
                     initStaticStringObject(key, kvobjGetKey(o));
 
-                    /* If not supporting aof_rewrite, use RESTORE to import data*/
-                    if (o->type == OBJ_MODULE && ((moduleValue*)o->ptr)->type->aof_rewrite == NULL) {
+                    /* If non-string object that is not too big or module object that
+                     * not supporting aof_rewrite, use RESTORE to import data.
+                     * Generally RDB binary format is more efficient, but it may cause
+                     * block in the destination if the object is too large, so fall back
+                     * to AOF format if necessary. */
+                    if ((o->type != OBJ_STRING && getObjectLength(o) <= AOF_REWRITE_ITEMS_PER_CMD) ||
+                        (o->type == OBJ_MODULE && ((moduleValue*)o->ptr)->type->aof_rewrite == NULL))
+                    {
                         if (rioWriteBulkCount(rdb, '*', 6) == 0) goto werr;
                         if (rioWriteBulkString(rdb, "RESTORE", 7) == 0) goto werr;
                         if (rioWriteBulkObject(rdb, &key) == 0) goto werr;
