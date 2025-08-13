@@ -1675,7 +1675,7 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
 
                     /* If not supporting aof_rewrite, use RESTORE to import data*/
                     if (o->type == OBJ_MODULE && ((moduleValue*)o->ptr)->type->aof_rewrite == NULL) {
-                        if (rioWriteBulkCount(rdb, '*', 5) == 0) goto werr;
+                        if (rioWriteBulkCount(rdb, '*', 6) == 0) goto werr;
                         if (rioWriteBulkString(rdb, "RESTORE", 7) == 0) goto werr;
                         if (rioWriteBulkObject(rdb, &key) == 0) goto werr;
                         if (rioWriteBulkLongLong(rdb, expiretime == -1 ? 0 : expiretime) == 0) goto werr;
