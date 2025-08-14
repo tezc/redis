@@ -422,7 +422,7 @@ static asmTask *lookupAsmTaskBySlotRange(slotRange *req) {
  *
  * Returns the source node if validation succeeds.
  * Otherwise, returns NULL and sets 'err' variable. */
-static clusterNode *validateImportSlotRanges(slotRangeArray *slot_ranges, sds *err) {
+static clusterNode *validateImportSlotRanges(slotRangeArray *slot_ranges, sds *err, asmTask *current) {
     clusterNode *source = NULL;
     unsigned char *slots = zcalloc(CLUSTER_SLOTS);
 
@@ -430,7 +430,7 @@ static clusterNode *validateImportSlotRanges(slotRangeArray *slot_ranges, sds *e
 
     /* Ensure this is a master node */
     if (!clusterNodeIsMaster(getMyClusterNode())) {
-        *err = sdsnew("Slot migration not allowed on replica.");
+        *err = sdsnew("slot migration not allowed on replica.");
         goto out;
     }
 
@@ -439,7 +439,7 @@ static clusterNode *validateImportSlotRanges(slotRangeArray *slot_ranges, sds *e
         if (getImportingSlotSource(i) != NULL ||
             getMigratingSlotDest(i) != NULL)
         {
-            *err = sdsnew("All slot states must be STABLE to start a slot migration task.");
+            *err = sdsnew("all slot states must be STABLE to start a slot migration task.");
             goto out;
         }
     }
@@ -447,9 +447,10 @@ static clusterNode *validateImportSlotRanges(slotRangeArray *slot_ranges, sds *e
     for (int i = 0; i < slot_ranges->num_ranges; i++) {
         slotRange *sr = &slot_ranges->ranges[i];
 
-        /* Ensure no import task overlaps with this slot range. */
+        /* Ensure no import task overlaps with this slot range.
+         * Skip check current task that is running for this slot range. */
         asmTask *task = lookupAsmTaskBySlotRange(sr);
-        if (task && task->operation == ASM_IMPORT) {
+        if (task && task != current && task->operation == ASM_IMPORT) {
             *err = sdscatprintf(sdsempty(),
                                 "overlapping import exists for slot range: %d-%d",
                                 sr->start, sr->end);
@@ -551,7 +552,7 @@ asmTask *asmCreateImportTask(const char *task_id, slotRangeArray *slot_ranges, s
     *err = NULL;
     /* Validate that the slot ranges are valid and that migration can be
      * initiated for them. */
-    source = validateImportSlotRanges(slot_ranges, err);
+    source = validateImportSlotRanges(slot_ranges, err, NULL);
     if (!source)
         return NULL;
 
@@ -819,6 +820,9 @@ void asmTaskSetFailed(asmTask *task, const char *fmt, ...) {
 void asmTaskComplete(asmTask *task) {
     listNode *ln = listFirst(asmManager->tasks);
     serverAssert(ln->value == task);
+
+    /* Should never access it */
+    task->source_node = NULL;
 
     task->done_time = server.mstime;
     asmManager->total_done_tasks++;
@@ -1203,7 +1207,7 @@ void asmSyncWithSource(connection *conn) {
         connSetPrivateData(task->rdb_channel_conn, task);
         serverLog(LL_NOTICE,
             "RDB channel connection to source node %.40s established, waiting for AUTH reply...",
-            clusterNodeGetName(task->source_node));
+            task->source);
 
         /* Main channel waits for the new event */
         connSetReadHandler(conn, NULL);
@@ -1333,8 +1337,36 @@ void clusterSyncSlotsStreamEOF(client *c) {
 /* Start the import task. */
 void asmStartImportTask(asmTask *task) {
     if (task->operation != ASM_IMPORT || task->state != ASM_NONE) return;
-
     sds slot_ranges_str = slotRangeArrayToString(task->slot_ranges);
+
+    /* Detect if the cluster topology is change. We should cancel the task if we can
+     * not schedule it, and update the source node if needed. */
+    sds err = NULL;
+    clusterNode *source = validateImportSlotRanges(task->slot_ranges, &err, task);
+    if (!source) {
+        serverLog(LL_WARNING, "Cancel the import task for slots: %s, occur error: %s",
+                              slot_ranges_str, err);
+        asmTaskCancel(task, "cluster topology changed");
+        sdsfree(slot_ranges_str);
+        sdsfree(err);
+        return;
+    }
+    /* Now I'm the owner of the slot range, cancel the import task. */
+    if (source == getMyClusterNode()) {
+        serverLog(LL_NOTICE, "Cancel the import task for slots: %s, since this node is"
+                             " already the owner of the slot range", slot_ranges_str);
+        asmTaskCancel(task, "slots owned by myselef");
+        sdsfree(slot_ranges_str);
+        return;
+    }
+    /* Change the source node if needed. */
+    if (source != task->source_node) {
+        task->source_node = source;
+        memcpy(task->source, source->name, CLUSTER_NAMELEN);
+        serverLog(LL_NOTICE, "Import slots %s task source node changed to %.40s",
+                             slot_ranges_str, source->name);
+    }
+
     serverLog(LL_NOTICE, "Import task starting: src=%.40s, dest=%.40s, slots=%s",
               task->source, task->dest, slot_ranges_str);
     sdsfree(slot_ranges_str);
@@ -1367,11 +1399,22 @@ void clusterSyncSlotsCommand(client *c) {
      * external clients may damage the slot migration state. */
     if (!(c->flags & (CLIENT_INTERNAL | CLIENT_MASTER))) {
         addReplyError(c, "CLUSTER SYNCSLOTS subcommands are only allowed for internal clients");
+        c->flags |= CLIENT_CLOSE_AFTER_REPLY;
         return;
     }
 
-    /* Only allow CONF subcommand on replica. */
-    if (server.masterhost && strcasecmp(c->argv[2]->ptr, "conf")) return;
+    /* On replica, only allow master client to execute CONF subcommand. */
+    if (server.masterhost) {
+        if (!(c->flags & CLIENT_MASTER)) {
+            /* Not master client, reject all subcommands and close the connection. */
+            addReplyError(c, "CLUSTER SYNCSLOTS subcommands are only allowed for master");
+            c->flags |= CLIENT_CLOSE_AFTER_REPLY;
+            return;
+        } else {
+            /* Only allow CONF subcommand on replica. */
+            if (strcasecmp(c->argv[2]->ptr, "conf")) return;
+        }
+    }
 
     if (!strcasecmp(c->argv[2]->ptr, "ranges") && c->argc >= 6) {
         /* CLUSTER SYNCSLOTS RANGES <ID> <start-slot> <end-slot> [<start-slot> <end-slot>] */
@@ -1386,7 +1429,7 @@ void clusterSyncSlotsCommand(client *c) {
         /* Validate that the slot ranges are valid and that migration can be
          * initiated for them. */
         sds err = NULL;
-        clusterNode *source = validateImportSlotRanges(slot_ranges, &err);
+        clusterNode *source = validateImportSlotRanges(slot_ranges, &err, NULL);
         if (!source) {
             addReplyErrorSds(c, err);
             zfree(slot_ranges);

@@ -586,10 +586,6 @@ void afterErrorReply(client *c, const char *s, size_t len, int flags) {
         }
         server.stat_unexpected_error_replies++;
 
-        /* If there is an ASM import task in progress, we need to close the client
-         * to let this task fail. */
-        if (c->flags & CLIENT_ASM_IMPORTING) freeClientAsync(c);
-
         /* Based off the propagation error behavior, check if we need to panic here. There
          * are currently two checked cases:
          * * If this command was from our master and we are not a writable replica.
