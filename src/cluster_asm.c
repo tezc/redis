@@ -990,11 +990,12 @@ void asmRdbChannelSyncWithSource(connection *conn) {
 
     if (task->rdb_channel_state == ASM_RDBCHANNEL_REPLY) {
         err = receiveSynchronousResponse(conn);
-        /* The destination node did not reply */
+        /* The source node did not reply */
         if (err == NULL) goto no_response_error;
 
-        /* Ignore `\n` that may be sent to keep the connection alive */
+        /* Ignore ‘\n' sent from the source node to keep the connection alive. */
         if (sdslen(err) == 0) {
+            serverLog(LL_DEBUG, "Received an empty line in RDBCHANNEL reply, slots snapshot delivery will start later");
             sdsfree(err);
             return;
         }
@@ -1355,7 +1356,7 @@ void asmStartImportTask(asmTask *task) {
     if (source == getMyClusterNode()) {
         serverLog(LL_NOTICE, "Cancel the import task for slots: %s, since this node is"
                              " already the owner of the slot range", slot_ranges_str);
-        asmTaskCancel(task, "slots owned by myselef");
+        asmTaskCancel(task, "slots owned by myself");
         sdsfree(slot_ranges_str);
         return;
     }
