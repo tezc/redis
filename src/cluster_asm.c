@@ -2053,7 +2053,7 @@ int clusterAsmCancelBySlotRangeArray(struct slotRangeArray *slot_ranges, const c
     return num_cancelled;
 }
 
-/* Check if the slot is in an ASM task. */
+/* Check if the slot is in an active ASM task. */
 int isSlotInAsmTask(int slot) {
     slotRange req = {slot, slot};
     if (!asmManager) return 0;

@@ -4620,6 +4620,7 @@ int isReadyToShutdown(void) {
     listRewind(server.slaves, &li);
     while ((ln = listNext(&li)) != NULL) {
         client *replica = listNodeValue(ln);
+        /* Don't count migration destination replicas. */
         if (replica->flags & CLIENT_ASM_MIGRATING) continue;
         if (replica->repl_ack_off != server.master_repl_offset) return 0;
     }
@@ -4667,6 +4668,8 @@ int finishShutdown(void) {
     listRewind(server.slaves, &replicas_iter);
     while ((replicas_list_node = listNext(&replicas_iter)) != NULL) {
         client *replica = listNodeValue(replicas_list_node);
+        /* Don't count migration destination replicas. */
+        if (replica->flags & CLIENT_ASM_MIGRATING) continue;
         num_replicas++;
         if (replica->repl_ack_off != server.master_repl_offset) {
             num_lagging_replicas++;
