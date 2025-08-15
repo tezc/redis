@@ -108,6 +108,7 @@ void createDumpPayload(rio *payload, robj *o, robj *key, int dbid);
 int startBgsaveForReplication(int mincapa, int req);
 void createReplicationBacklogIfNeeded(void);
 static void asmSyncBufferReadFromConn(connection *conn);
+static void asmTaskCancel(asmTask *task, const char *reason);
 
 void clusterAsmInit(void) {
     asmManager = zcalloc(sizeof(*asmManager));
@@ -561,10 +562,20 @@ asmTask *asmCreateImportTask(const char *task_id, slotRangeArray *slot_ranges, s
         return NULL;
     }
 
+    /* Only support a single task at a time now. */
     if (listLength(asmManager->tasks) != 0) {
-        *err = sdsnew("another ASM task is already in progress");
-        return NULL;
+        asmTask *current = listNodeValue(listFirst(asmManager->tasks));
+        if (current->state == ASM_FAILED) {
+            /* We can create a new task only if the current one is failed,
+             * cancel the failed task to create a new one. */
+            asmTaskCancel(current, "new task requested");
+        } else {
+            *err = sdsnew("another ASM task is already in progress");
+            return NULL;
+        }
     }
+    /* There should be no task in progress. */
+    serverAssert(listLength(asmManager->tasks) == 0);
 
     /* Create a slot migration task */
     asmTask *task = asmTaskCreate(task_id);
@@ -844,7 +855,7 @@ void asmTaskComplete(asmTask *task) {
     }
 }
 
-void asmTaskCancel(asmTask *task, const char *reason) {
+static void asmTaskCancel(asmTask *task, const char *reason) {
     if (task->state == ASM_CANCELED) return;
 
     asmTaskSetFailed(task, "Cancelled due to %s", reason);
@@ -1458,7 +1469,8 @@ void clusterSyncSlotsCommand(client *c) {
             task->retry_count++;
         } else if (task) {
             if (task->state == ASM_FAILED) {
-                /* Cancel the failed task, and create new one. */
+                /* We can create a new task only if the current one is failed,
+                 * cancel the failed task to create a new one. */
                 asmTaskCancel(task, "new task requested");
                 task = NULL;
             } else {
@@ -2041,6 +2053,22 @@ int clusterAsmCancelBySlotRangeArray(struct slotRangeArray *slot_ranges, const c
     return num_cancelled;
 }
 
+/* Check if the slot is in an ASM task. */
+int isSlotInAsmTask(int slot) {
+    slotRange req = {slot, slot};
+    if (!asmManager) return 0;
+
+    listIter li;
+    listNode *ln;
+    listRewind(asmManager->tasks, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        asmTask *task = listNodeValue(ln);
+        if (slotRangeArrayOverlaps(task->slot_ranges, &req))
+            return 1;
+    }
+    return 0;
+}
+
 int clusterAsmHandoff(const char *task_id, sds *err) {
     serverAssert(task_id);
 
@@ -2057,15 +2085,22 @@ int clusterAsmHandoff(const char *task_id, sds *err) {
     return C_OK;
 }
 
-int asmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
-    /* TODO: Validation, cancel asmTasks if required */
-
+/* Notify Redis that the config is updated for the given slot ranges.
+ * If `current` is provided, it should match the task found for the slot ranges.
+ * If `current` is NULL, any task found will be used, if no task is found, it means
+ * the config update is not related to current ASM task, but this node learned about
+ * the config update from cluster protocol, and we need to cancel any conflicting
+ * tasks that overlap with the slot ranges. */
+int asmNotifyConfigUpdated(asmTask *current, slotRangeArray *slot_ranges, sds *err) {
     asmTask *task = lookupAsmTaskBySlotRangeArray(slot_ranges);
+    if (current != NULL) serverAssert(task == current);
     if (!task) {
-        sds slot_ranges_str = slotRangeArrayToString(slot_ranges);
-        *err = sdscatprintf(sdsempty(), "No ASM task found for slots: %s", slot_ranges_str);
-        sdsfree(slot_ranges_str);
-        return C_ERR;
+        /* Cancel asmTasks that overlap with the slot ranges, since the cluster topology
+         * has changed. That may be because another node with different slot config and
+         * higher configEpoch takes over the slot ranges, e.g., a slot is updated through
+         * CLUSTER SETSLOT <slot> NODE <node-id> directly. */
+        clusterAsmCancelBySlotRangeArray(slot_ranges, "cluster topology changed");
+        return C_OK;
     }
 
     if (task->operation == ASM_IMPORT && task->state == ASM_TAKEOVER) {
@@ -2085,6 +2120,9 @@ int asmNotifyConfigUpdated(slotRangeArray *slot_ranges, sds *err) {
         *err = sdscatprintf(sdsempty(),
                             "ASM task is not in the correct state for config update: %s",
                             asmTaskStateToString(task->state));
+        /* Cancel asmTasks that overlap with the slot ranges, since the cluster topology
+         * has changed and the task is not in the correct state to complete. */
+        clusterAsmCancelBySlotRangeArray(slot_ranges, "cluster topology changed");
         return C_ERR;
     }
 
@@ -2100,7 +2138,7 @@ int clusterAsmDone(const char *task_id, sds *err) {
         *err = sdscatprintf(sdsempty(), "No ASM task found for id: %s", task_id);
         return C_ERR;
     }
-    return asmNotifyConfigUpdated(task->slot_ranges, err);
+    return asmNotifyConfigUpdated(task, task->slot_ranges, err);
 }
 
 int clusterAsmProcess(const char *task_id, int event, void *arg, char **err) {

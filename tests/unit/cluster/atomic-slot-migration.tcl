@@ -578,7 +578,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # flushall, flushdb, sflush
         foreach flushcmd {flushall flushdb sflush} {
-            # write some keys on R 0
+            # write some keys on R 1
             set slot0_key "06S"
             set slot1_key "Qi"
             R 1 set $slot0_key "a"
@@ -612,7 +612,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # Since sflush is executed on the source, the task is only canceled on the source.
         # The destination node will retry the import task, and eventually the slot 0-100
-        # migration will succeed.
+        # migration to #0 will succeed.
         R 1 config set rdb-key-save-delay 0
         wait_for_condition 1000 50 {
             [string match {*done*} [migration_status 0 $task_id state]] &&
@@ -620,5 +620,53 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         } else {
             fail "ASM task did not finish"
         }
+    }
+
+    test "CLUSTER SETSLOT command when there is a slot migration task" {
+        R 0 config set rdb-key-save-delay 1000000
+        # write some keys on R 0
+        set slot0_key "06S"
+        set slot1_key "Qi"
+        R 0 set $slot0_key "a"
+        R 0 set $slot1_key "b"
+
+        # start slot migration from 0 to 1
+        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
+        wait_for_condition 1000 20 {
+            [string match {*send-bulk-and-stream*} [migration_status 0 $task_id state]]
+        } else {
+            fail "ASM task did not start"
+        }
+
+        # Cluster SETSLOT command is not allowed when there is a slot migration task
+        # on the slot. #0 and #1 are having migration task now.
+        foreach instance {0 1} {     
+            set node_id [R $instance cluster myid]
+
+            catch {R $instance cluster setslot 0 migrating $node_id} err
+            assert_match {*in an active atomic slot migration*} $err
+
+            catch {R $instance cluster setslot 0 importing $node_id} err
+            assert_match {*in an active atomic slot migration*} $err
+
+            catch {R $instance cluster setslot 0 stable} err
+            assert_match {*in an active atomic slot migration*} $err
+
+            catch {R $instance cluster setslot 0 node $node_id} err
+            assert_match {*in an active atomic slot migration*} $err
+        }
+
+        # CLUSTER SETSLOT on other node will cancel the migration task
+        R 2 CLUSTER BUMPEPOCH
+        R 2 cluster setslot 0 node [R 2 cluster myid]
+        wait_for_condition 1000 50 {
+            [string match {*canceled*} [migration_status 0 $task_id state]] &&
+            [string match {*canceled*} [migration_status 1 $task_id state]]
+        } else {
+            fail "ASM task did not cancel"
+        }
+
+        # setslot back to #0
+        R 0 cluster setslot 0 node [R 0 cluster myid]
     }
 }
