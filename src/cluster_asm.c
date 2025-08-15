@@ -2069,6 +2069,44 @@ int clusterAsmCancelBySlotRangeArray(struct slotRangeArray *slot_ranges, const c
     return num_cancelled;
 }
 
+/* Cancel the task that overlap with the given slot. */
+int clusterAsmCancelBySlot(int slot, const char *reason) {
+    slotRange req = {slot, slot};
+    if (asmManager == NULL) return 0;
+
+    /* Cancel it if found. */
+    asmTask *task = lookupAsmTaskBySlotRange(&req);
+    if (task) asmTaskCancel(task, reason);
+
+    return task ? 1 : 0;
+}
+
+/* Cancel all tasks that involve the given node. */
+int clusterAsmCancelByNode(void *node, const char *reason) {
+    if (asmManager == NULL || node == NULL) return 0;
+
+    /* If the node to be deleted is myself, cancel all tasks. */
+    clusterNode *n = node;
+    if (n == getMyClusterNode()) return clusterAsmCancel(NULL, reason);
+
+    int num_cancelled = 0;
+    listIter li;
+    listNode *ln;
+    listRewind(asmManager->tasks, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        asmTask *task = listNodeValue(ln);
+        /* Cancel the task if the source node is the one to be deleted, or
+         * the dest node is the one to be deleted. */
+        if (task->source_node == n || !memcmp(task->dest, n->name, CLUSTER_NAMELEN) ||
+            !memcmp(task->source, n->name, CLUSTER_NAMELEN))
+        {
+            asmTaskCancel(task, reason);
+            num_cancelled++;
+        }
+    }
+    return num_cancelled;
+}
+
 /* Check if the slot is in an active ASM task. */
 int isSlotInAsmTask(int slot) {
     slotRange req = {slot, slot};

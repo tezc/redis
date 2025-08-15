@@ -1540,7 +1540,8 @@ void clusterAddNode(clusterNode *node) {
  * 2) Remove all the failure reports sent by this node and referenced by
  *    other nodes.
  * 3) Remove the node from the owning shard
- * 4) Free the node with freeClusterNode() that will in turn remove it
+ * 4) Cancel all ASM tasks that involve the node.
+ * 5) Free the node with freeClusterNode() that will in turn remove it
  *    from the hash table and from the list of slaves of its master, if
  *    it is a slave node.
  */
@@ -1572,7 +1573,10 @@ void clusterDelNode(clusterNode *delnode) {
     /* 3) Remove the node from the owning shard */
     clusterRemoveNodeFromShard(delnode);
 
-    /* 4) Free the node, unlinking it from the cluster. */
+    /* 4) Cancel all ASM tasks that involve the node. */
+    clusterAsmCancelByNode(delnode, "node deleted");
+
+    /* 5) Free the node, unlinking it from the cluster. */
     freeClusterNode(delnode);
 }
 
@@ -5680,6 +5684,9 @@ void clusterUpdateSlots(client *c, unsigned char *slots, int del) {
              * state as now we are the real owner of the slot. */
             if (server.cluster->importing_slots_from[j])
                 server.cluster->importing_slots_from[j] = NULL;
+
+            /* Cancel any ASM task that overlaps with the slot. */
+            clusterAsmCancelBySlot(j, "cluster slots updated");
 
             retval = del ? clusterDelSlot(j) :
                            clusterAddSlot(myself,j);
