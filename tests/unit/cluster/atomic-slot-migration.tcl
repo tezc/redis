@@ -656,7 +656,12 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             assert_match {*in an active atomic slot migration*} $err
         }
 
-        # CLUSTER SETSLOT on other node will cancel the migration task
+        # CLUSTER SETSLOT on other node will cancel the migration task, we update
+        # the owner of slot 0 (that is migrating from #0 to #1) to #2 on #2, we
+        # bump the config epoch to make sure the change can update #0 and #1
+        # slot configuration, so #0 and #1 will cancel the migration task.
+        # BTW, if config epoch is not bumped, the slot config of #2 may be
+        # updated by #0 and #1.
         R 2 CLUSTER BUMPEPOCH
         R 2 cluster setslot 0 node [R 2 cluster myid]
         wait_for_condition 1000 50 {
@@ -666,7 +671,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             fail "ASM task did not cancel"
         }
 
-        # setslot back to #0
+        # set slot 0 back to #0
         R 0 cluster setslot 0 node [R 0 cluster myid]
+        R 1 cluster setslot 0 node [R 0 cluster myid]
+        R 2 cluster setslot 0 node [R 0 cluster myid]
     }
 }
