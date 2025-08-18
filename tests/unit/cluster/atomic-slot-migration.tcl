@@ -703,7 +703,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_cluster_state "ok"
     }
 
-    # This test needs more than 60s, maybe you can skip when testing
+    # NOTE: this test needs more than 60s, maybe you can skip when testing
     test "CLUSTER FORGET command cancels a slot migration task" {
         R 0 config set rdb-key-save-delay 0
         # Migrate all slot on #0 to #1, so we can forget #0
