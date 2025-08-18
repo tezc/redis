@@ -35,7 +35,7 @@ proc slot_key {slot {suffix ""}} {
 }
 
 # Populate a slot with keys
-# TODO: Merge with populate()
+# TODO: Consider merging with populate()
 proc populate_slot {num args} {
     # Default values
     set prefix "key:"
@@ -227,12 +227,12 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
     }
 
     test "Simple slot migration with write load" {
-        # Perform slot migration while write traffic is active and verify data
-        # consistency. Trimming is disabled on source nodes to ensure no updates
-        # are lost during migration. Data integrity is verified using
-        # DEBUG DIGEST command.
+        # Perform slot migration while traffic is on and verify data consistency.
+        # Trimming is disabled on source nodes so, we can compare the dbs after
+        # migration via DEBUG DIGEST to ensure no data loss during migration.
         # Steps:
-        # 1. Populate slot 0 on node-0 and slot 6000 on node-1
+        # 1. Disable trimming on both nodes
+        # 2. Populate slot 0 on node-0 and slot 6000 on node-1
         # 2. Start write traffic on both nodes
         # 3. Migrate slot 0 from node-0 to node-1
         # 4. Migrate slot 6000 from node-1 to node-0
@@ -255,7 +255,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             set load_handle0 [start_write_load "127.0.0.1" $port 100 $key]
         }
 
-        # Start write traffic on node10
+        # Start write traffic on node-1
         # Throws -MOVED error once asm is completed, catch block will ignore it.
         catch {
             # Start the slot 6000 write load on the R 1
