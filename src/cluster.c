@@ -1747,16 +1747,16 @@ int slotRangeArrayIsEqual(slotRangeArray *sra1, slotRangeArray *sra2) {
 /* Add a slot to the slot range array.
  * Usage:
  *     slotRangeArray *sra = NULL
- *     sra = slotRangeArrayBuild(sra, 1000);
- *     sra = slotRangeArrayBuild(sra, 1001);
- *     sra = slotRangeArrayBuild(sra, 1003);
- *     sra = slotRangeArrayBuild(sra, 1004);
- *     sra = slotRangeArrayBuild(sra, 1005);
+ *     sra = slotRangeArrayAppend(sra, 1000);
+ *     sra = slotRangeArrayAppend(sra, 1001);
+ *     sra = slotRangeArrayAppend(sra, 1003);
+ *     sra = slotRangeArrayAppend(sra, 1004);
+ *     sra = slotRangeArrayAppend(sra, 1005);
  *
  *     Result: 1000-1001, 1003-1005
  *     Note: `slot` must be greater than the previous slot.
  * */
-slotRangeArray *slotRangeArrayBuild(slotRangeArray *sra, int slot) {
+slotRangeArray *slotRangeArrayAppend(slotRangeArray *sra, int slot) {
     if (sra == NULL) {
         sra = slotRangeArrayCreate(4);
         sra->ranges[0].start = slot;
@@ -1883,7 +1883,7 @@ void sflushCommand(client *c) {
         slotRange *sr = &slot_ranges->ranges[i];
         for (int slot = sr->start; slot <= sr->end; slot++)
             if (clusterIsMySlot(slot))
-                myslots = slotRangeArrayBuild(myslots, slot);
+                myslots = slotRangeArrayAppend(myslots, slot);
     }
     zfree(slot_ranges);
 

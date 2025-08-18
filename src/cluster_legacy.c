@@ -2389,7 +2389,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
                  * detect that the slot was moved from us to the sender, and
                  * send ASM_REQUEST_CONFIG_UPDATED request to ASM later. */
                 if (server.cluster->slots[j] == myself && sender != myself)
-                    sra = slotRangeArrayBuild(sra, j);
+                    sra = slotRangeArrayAppend(sra, j);
 
                 /* Was this slot mine, and still contains keys? Mark it as
                  * a dirty slot. */

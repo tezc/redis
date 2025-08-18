@@ -157,7 +157,7 @@ slotRangeArray *slotRangeArrayDup(slotRangeArray *sra);
 void slotRangeArraySet(slotRangeArray *sra, int idx, int start, int end);
 sds slotRangeArrayToString(slotRangeArray *sra);
 int slotRangeArrayIsEqual(slotRangeArray *sra1, slotRangeArray *sra2);
-slotRangeArray *slotRangeArrayBuild(slotRangeArray *sra, int slot);
+slotRangeArray *slotRangeArrayAppend(slotRangeArray *sra, int slot);
 int slotRangeArrayContains(slotRangeArray *sra, unsigned int slot);
 void slotRangeArrayFree(slotRangeArray *sra);
 int validateSlotRanges(slotRangeArray *sra, sds *err);
