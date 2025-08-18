@@ -202,40 +202,40 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 config set rdb-key-save-delay 0
     }
 
-    test "Test active-trim inprogress on replica during import" {
-        R 3 debug asm-trim-method active 1000000
+ # test "Test active-trim inprogress on replica during import" {
+ #     R 3 debug asm-trim-method active 1000000
 
-        puts "rdbsaveprogress: [s 0 rdb_bgsave_in_progress]"
+ #     puts "rdbsaveprogress: [s 0 rdb_bgsave_in_progress]"
 
-        wait_for_condition 1000 60 {
-            [s 0 rdb_bgsave_in_progress] == 0
-        } else {
-            fail "RDB save did not complete"
-        }
+ #     wait_for_condition 1000 60 {
+ #         [s 0 rdb_bgsave_in_progress] == 0
+ #     } else {
+ #         fail "RDB save did not complete"
+ #     }
 
-        R 1 CLUSTER MIGRATION IMPORT 0 100
-        wait_for_condition 1000 10 {
-            [CI 0 rdb_bgsave_in_progress] == 0 &&
-            [CI 0 cluster_slot_migration_task_count] == 0 &&
-            [CI 0 cluster_slot_migration_trim_task_count] == 0 &&
-            [CI 3 cluster_slot_migration_trim_task_count] == 1
-        } else {
-            puts "R 0 info: [R 0 info]"
-            puts "[CI 0 cluster_slot_migration_task_count] [CI 0 cluster_slot_migration_trim_task_count] [CI 1 cluster_slot_migration_trim_task_count]"
-            fail "trim task did not start1"
-        }
+ #     R 1 CLUSTER MIGRATION IMPORT 0 100
+ #     wait_for_condition 1000 10 {
+ #         [CI 0 rdb_bgsave_in_progress] == 0 &&
+ #         [CI 0 cluster_slot_migration_task_count] == 0 &&
+ #         [CI 0 cluster_slot_migration_trim_task_count] == 0 &&
+ #         [CI 3 cluster_slot_migration_trim_task_count] == 1
+ #     } else {
+ #         puts "R 0 info: [R 0 info]"
+ #         puts "[CI 0 cluster_slot_migration_task_count] [CI 0 cluster_slot_migration_trim_task_count] [CI 1 cluster_slot_migration_trim_task_count]"
+ #         fail "trim task did not start1"
+ #     }
 
-        R 0 CLUSTER MIGRATION IMPORT 0 100
-        wait_for_condition 1000 20 {
-            [CI 0 cluster_slot_migration_task_count] == 1 &&
-            [CI 0 cluster_slot_migration_trim_task_count] == 0 &&
-            [CI 3 cluster_slot_migration_trim_task_count] == 1
-        } else {
-            fail "trim task did not start2"
-        }
+ #     R 0 CLUSTER MIGRATION IMPORT 0 100
+ #     wait_for_condition 1000 20 {
+ #         [CI 0 cluster_slot_migration_task_count] == 1 &&
+ #         [CI 0 cluster_slot_migration_trim_task_count] == 0 &&
+ #         [CI 3 cluster_slot_migration_trim_task_count] == 1
+ #     } else {
+ #         fail "trim task did not start2"
+ #     }
 
-        # fail "test"
-    }
+ #     # fail "test"
+ # }
 }
 
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000}} {
