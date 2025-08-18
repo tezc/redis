@@ -5686,7 +5686,7 @@ void clusterUpdateSlots(client *c, unsigned char *slots, int del) {
                 server.cluster->importing_slots_from[j] = NULL;
 
             /* Cancel any ASM task that overlaps with the slot. */
-            clusterAsmCancelBySlot(j, "cluster slots updated");
+            clusterAsmCancelBySlot(j, "slots configuration updated");
 
             retval = del ? clusterDelSlot(j) :
                            clusterAddSlot(myself,j);
@@ -6107,11 +6107,11 @@ int clusterCommandSpecial(client *c) {
 
         if ((slot = getSlotOrReply(c, c->argv[2])) == -1) return 1;
 
-        /* Don't allow old style slot migration if the slot is in an ASM task. */
+        /* Don't allow legacy slot migration if the slot is in an ASM task. */
         if (isSlotInAsmTask(slot)) {
-            addReplyErrorFormat(c, "Slot %d is in an active atomic slot migration, "
-                "cannot use CLUSTER SETSLOT now, if you persist in using this command, "
-                "please use CLUSTER MIGRATION CANCEL to cancel the task first", slot);
+            addReplyErrorFormat(c, "Slot %d is currently in an active atomic slot migration. "
+                "CLUSTER SETSLOT cannot be used at this time. To perform a legacy slot migration "
+                "instead, first cancel the ongoing task with CLUSTER MIGRATION CANCEL", slot);
             return 1;
         }
 

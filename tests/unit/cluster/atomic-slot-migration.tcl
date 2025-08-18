@@ -26,7 +26,7 @@ proc migration_status {node_id task_id field} {
     return ""
 }
 
-start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000}} {
+start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000 cluster-allow-replica-migration no}} {
     test "Test IMPORT input validation" {
         # Invalid slot range
         assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION IMPORT}
@@ -666,6 +666,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 2 cluster setslot 0 node [R 2 cluster myid]
         wait_for_condition 1000 50 {
             [string match {*canceled*} [migration_status 0 $task_id state]] &&
+            [string match {*slots configuration updated*} [migration_status 0 $task_id last_error]] &&
             [string match {*canceled*} [migration_status 1 $task_id state]]
         } else {
             fail "ASM task did not cancel"
@@ -675,5 +676,78 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 cluster setslot 0 node [R 0 cluster myid]
         R 1 cluster setslot 0 node [R 0 cluster myid]
         R 2 cluster setslot 0 node [R 0 cluster myid]
+    }
+
+    test "CLUSTER DELSLOTSRANGE command cancels a slot migration task" {
+        # start slot migration from 0 to 1
+        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
+        wait_for_condition 1000 20 {
+            [string match {*send-bulk-and-stream*} [migration_status 0 $task_id state]]
+        } else {
+            fail "ASM task did not start"
+        }
+
+        R 0 cluster delslotsrange 0 100
+        wait_for_condition 1000 50 {
+            [string match {*canceled*} [migration_status 0 $task_id state]] &&
+            [string match {*slots configuration updated*} [migration_status 0 $task_id last_error]] &&
+            [string match {*failed*} [migration_status 1 $task_id state]]
+        } else {
+            fail "ASM task did not cancel"
+        }
+        R 1 cluster migration cancel id $task_id
+
+        # add the slots back
+        R 0 cluster addslotsrange 0 100
+        wait_for_cluster_propagation
+        wait_for_cluster_state "ok"
+    }
+
+    # This test needs more than 60s, maybe you can skip when testing
+    test "CLUSTER FORGET command cancels a slot migration task" {
+        R 0 config set rdb-key-save-delay 0
+        # Migrate all slot on #0 to #1, so we can forget #0
+        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 5461 7000 8000]
+        wait_for_condition 1000 50 {
+            [string match {*done*} [migration_status 0 $task_id state]] &&
+            [string match {*done*} [migration_status 1 $task_id state]]
+        } else {
+            fail "ASM task did not finish"
+        }
+
+        R 1 config set rdb-key-save-delay 1000000
+        # start slot migration from 1 to 0
+        set task_id [R 0 CLUSTER MIGRATION IMPORT 0 5461]
+        wait_for_condition 1000 20 {
+            [string match {*send-bulk-and-stream*} [migration_status 1 $task_id state]]
+        } else {
+            fail "ASM task did not start"
+        }
+
+        # Forget #0 on #1, the migration task on #1 will be canceled due to node deleted,
+        # and the importing task on #0 will be failed
+        R 1 cluster forget [R 0 cluster myid]
+        wait_for_condition 1000 50 {
+            [string match {*canceled*} [migration_status 1 $task_id state]] &&
+            [string match {*node deleted*} [migration_status 1 $task_id last_error]] &&
+            [string match {*failed*} [migration_status 0 $task_id state]]
+        } else {
+            fail "ASM task did not cancel"
+        }
+
+        # Add #0 back into cluster
+        # NOTE: this will cost 60s to let #0 join the cluster since
+        # other nodes add #0 into black list for 60s after FORGET.
+        R 1 config set rdb-key-save-delay 1000000
+        R 1 cluster meet "127.0.0.1" [lindex [R 0 config get port] 1]
+
+        # the importing task on #0 will be retried, and eventually succeed
+        # since now #0 is back in the cluster
+        wait_for_condition 2000 50 {
+            [string match {*done*} [migration_status 0 $task_id state]] &&
+            [string match {*done*} [migration_status 1 $task_id state]]
+        } else {
+            fail "ASM task did not finish"
+        }
     }
 }
