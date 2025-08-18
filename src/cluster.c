@@ -1638,6 +1638,10 @@ unsigned int clusterDelKeysInSlotRangeArray(slotRangeArray *sra, int flags) {
     return j;
 }
 
+int clusterIsMySlot(int slot) {
+    return getMyClusterNode() == getNodeBySlot(slot);
+}
+
 void replySlotsFlushAndFree(client *c, slotRangeArray *sra) {
     addReplyArrayLen(c, sra->num_ranges);
     for (int i = 0 ; i < sra->num_ranges ; i++) {
@@ -1701,6 +1705,51 @@ slotRangeArray *slotRangeArrayDup(slotRangeArray *sra) {
 void slotRangeArraySet(slotRangeArray *sra, int idx, int start, int end) {
     sra->ranges[idx].start = start;
     sra->ranges[idx].end = end;
+}
+
+/* Add a slot to the slot range array.
+ * Usage:
+ *     slotRangeArray *sra = NULL
+ *     sra = slotRangeArrayBuild(sra, 1000);
+ *     sra = slotRangeArrayBuild(sra, 1001);
+ *     sra = slotRangeArrayBuild(sra, 1003);
+ *     sra = slotRangeArrayBuild(sra, 1004);
+ *     sra = slotRangeArrayBuild(sra, 1005);
+ *
+ *     Result: 1000-1001, 1003-1005
+ *
+ *     Note: `slot` must be greater than the previous slot.
+ * */
+slotRangeArray *slotRangeArrayBuild(slotRangeArray *sra, int slot) {
+    if (sra == NULL) {
+        sra = slotRangeArrayCreate(4);
+        sra->ranges[0].start = slot;
+        sra->ranges[0].end = slot;
+        sra->num_ranges = 1;
+        return sra;
+    }
+
+    serverAssert(sra->num_ranges >= 0 && sra->num_ranges <= CLUSTER_SLOTS);
+    serverAssert(slot > sra->ranges[sra->num_ranges - 1].end);
+
+    /* Check if we can extend the last range */
+    slotRange *last = &sra->ranges[sra->num_ranges - 1];
+    if (slot == last->end + 1) {
+        last->end = slot;
+        return sra;
+    }
+
+    /* Calculate current capacity and reallocate if needed */
+    int cap = (int) ((zmalloc_size(sra) - sizeof(slotRangeArray))/ sizeof(slotRange));
+    if (sra->num_ranges >= cap)
+        sra = zrealloc(sra, sizeof(slotRangeArray) + sizeof(slotRange) * cap * 2);
+
+    /* Add new single-slot range */
+    sra->ranges[sra->num_ranges].start = slot;
+    sra->ranges[sra->num_ranges].end = slot;
+    sra->num_ranges++;
+
+    return sra;
 }
 
 int slotRangeArrayContains(slotRangeArray *sra, unsigned int slot) {

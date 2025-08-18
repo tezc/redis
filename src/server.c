@@ -4335,6 +4335,7 @@ int processCommand(client *c) {
 
     if ((c->flags & CLIENT_MASTER) && is_write_command) {
         if (asmActiveTrimIsInProgressFor(c->slot)) {
+            serverLog(LL_WARNING, "Blocking master client for as there is active trim in progress for slot %d", c->slot);
             /* Block master client */
             blockPostponeClient(c);
             return C_OK;

@@ -1619,6 +1619,7 @@ void unlinkClient(client *c) {
             else
                 connShutdown(c->conn);
         }
+        serverLog(LL_WARNING, "closing connection of client: %lu fd: %d", c->id, c->conn->fd);
         connClose(c->conn);
         c->conn = NULL;
     }
@@ -1728,6 +1729,8 @@ static void resetReusableQueryBuf(client *c) {
 void freeClient(client *c) {
     listNode *ln;
 
+    serverLog(LL_WARNING, "Freeing client id=%lu", c->id);
+
     /* If a client is protected, yet we need to free it right now, make sure
      * to at least use asynchronous freeing. */
     if (c->flags & CLIENT_PROTECTED) {
@@ -1755,6 +1758,7 @@ void freeClient(client *c) {
                               c);
     }
 
+    serverLog(LL_WARNING, "Calling asmcallback for client id=%lu", c->id);
     asmCallbackOnFreeClient(c);
 
     /* Notify module system that this client auth status changed. */
@@ -1841,6 +1845,7 @@ void freeClient(client *c) {
     /* Unlink the client: this will close the socket, remove the I/O
      * handlers, and remove references of the client from different
      * places where active clients may be referenced. */
+    serverLog(LL_WARNING, "Unlinking client id=%lu", c->id);
     unlinkClient(c);
 
     /* Master/slave cleanup Case 1:
@@ -1985,7 +1990,10 @@ int freeClientsInAsyncFreeQueue(void) {
     while ((ln = listNext(&li)) != NULL) {
         client *c = listNodeValue(ln);
 
-        if (c->flags & CLIENT_PROTECTED) continue;
+        if (c->flags & CLIENT_PROTECTED) {
+            serverLog(LL_WARNING, "Client id=%lu fd=%d is protected, can't free it.", c->id, c->conn ? c->conn->fd : -1);
+            continue;
+        }
 
         c->flags &= ~CLIENT_CLOSE_ASAP;
         freeClient(c);

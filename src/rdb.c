@@ -3934,6 +3934,7 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
                 continue;
             replicationSetupSlaveForFullResync(slave, getPsyncInitialOffset());
             conns[numconns++] = slave->conn;
+            serverLog(LL_NOTICE, "bgsave to fd: %d", slave->conn->fd);
             if (rdb_channel) {
                 /* Put the socket in blocking mode to simplify RDB transfer. */
                 connSendTimeout(slave->conn, server.repl_timeout * 1000);

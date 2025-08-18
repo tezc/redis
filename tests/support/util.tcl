@@ -634,32 +634,49 @@ proc stop_bg_complex_data {handle} {
 # Write num keys with the given key prefix and value size (in bytes). If idx is
 # given, it's the index (AKA level) used with the srv procedure and it specifies
 # to which Redis instance to write the keys.
-proc populate {num {prefix key:} {size 3} {idx 0} {prints false} {expires 0}} {
-    r $idx deferred 1
+proc populate {num {prefix key:} {size 3} {idx 0} {prints false} {expires 0} {slot -1}} {
+    # If slot is specified, use slot prefix from table
+    if {$slot >= 0} {
+        global slot_prefixes
+        if {[dict exists $slot_prefixes $slot]} {
+            set prefix [dict get $slot_prefixes $slot]
+        } else {
+            error "Slot $slot not supported in slot_prefixes table, add it manually"
+        }
+    }
+
+    # Try R first (cluster), fallback to r (single instance)
+    if {[catch {R $idx ping}]} {
+        set redis_cmd "r"
+    } else {
+        set redis_cmd "R"
+    }
+
+    $redis_cmd $idx deferred 1
     if {$num > 16} {set pipeline 16} else {set pipeline $num}
     set val [string repeat A $size]
     for {set j 0} {$j < $pipeline} {incr j} {
         if {$expires > 0} {
-            r $idx set $prefix$j $val ex $expires
+            $redis_cmd $idx set $prefix$j $val ex $expires
         } else {
-            r $idx set $prefix$j $val
+            $redis_cmd $idx set $prefix$j $val
         }
         if {$prints} {puts $j}
     }
     for {} {$j < $num} {incr j} {
         if {$expires > 0} {
-            r $idx set $prefix$j $val ex $expires
+            $redis_cmd $idx set $prefix$j $val ex $expires
         } else {
-            r $idx set $prefix$j $val
+            $redis_cmd $idx set $prefix$j $val
         }
-        r $idx read
+        $redis_cmd $idx read
         if {$prints} {puts $j}
     }
     for {set j 0} {$j < $pipeline} {incr j} {
-        r $idx read
+        $redis_cmd $idx read
         if {$prints} {puts $j}
     }
-    r $idx deferred 0
+    $redis_cmd $idx deferred 0
 }
 
 proc get_child_pid {idx} {

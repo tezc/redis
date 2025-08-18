@@ -2446,9 +2446,11 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
         sra->ranges[sra->num_ranges].end = CLUSTER_SLOTS - 1;
         sra->num_ranges++;
     }
+    int handled_by_asm = 0;
     if (sra->num_ranges > 0 && server.masterhost == NULL) {
         sds err = NULL;
-        if (asmNotifyConfigUpdated(NULL, sra, &err) != C_OK) {
+        handled_by_asm = (asmNotifyConfigUpdated(NULL, sra, &err) == C_OK);
+        if (!handled_by_asm) {
             serverLog(LL_WARNING, "ASM config update failed: %s", err);
             sdsfree(err);
         }
@@ -2495,7 +2497,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
         clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG|
                              CLUSTER_TODO_UPDATE_STATE|
                              CLUSTER_TODO_FSYNC_CONFIG);
-    } else if (dirty_slots_count) {
+    } else if (dirty_slots_count && !handled_by_asm) {
         /* If we are here, we received an update message which removed
          * ownership for certain slots we still have keys about, but still
          * we are serving some slots, so this master node was not demoted to
@@ -4274,6 +4276,9 @@ void clusterFailoverReplaceYourMaster(void) {
 
     /* 5) If there was a manual failover in progress, clear the state. */
     resetManualFailover();
+
+    /* 6) Check if we have keys in slots that does not belong to this node. */
+    asmTrimSlotsIfNeeded();
 }
 
 /* This function is called if we are a slave node and our master serving
@@ -5317,12 +5322,11 @@ void clusterSetMaster(clusterNode *n) {
     serverAssert(n != myself);
     serverAssert(myself->numslots == 0);
 
-    if (clusterNodeIsMaster(myself)) {
+    int was_master = clusterNodeIsMaster(myself);
+    if (was_master) {
         myself->flags &= ~(CLUSTER_NODE_MASTER|CLUSTER_NODE_MIGRATE_TO);
         myself->flags |= CLUSTER_NODE_SLAVE;
         clusterCloseAllSlots();
-        /* Cancel all ASM tasks when switching into slave */
-        clusterAsmCancel(NULL, "switching to replica");
     } else {
         if (myself->slaveof)
             clusterNodeRemoveSlave(myself->slaveof,myself);
@@ -5333,6 +5337,10 @@ void clusterSetMaster(clusterNode *n) {
     replicationSetMaster(n->ip, getNodeDefaultReplicationPort(n));
     removeAllNotOwnedShardChannelSubscriptions();
     resetManualFailover();
+
+    /* Cancel all ASM tasks when switching into slave */
+    if (was_master)
+        clusterAsmCancel(NULL, "switching to replica");
 }
 
 /* -----------------------------------------------------------------------------
@@ -6537,6 +6545,7 @@ int clusterAllowFailoverCmd(client *c) {
 
 void clusterPromoteSelfToMaster(void) {
     replicationUnsetMaster();
+    asmTrimSlotsIfNeeded();
 }
 
 int clusterAsmOnEvent(const char *task_id, int event, void *arg) {

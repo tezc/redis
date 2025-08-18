@@ -125,7 +125,7 @@ static void asmSyncBufferReadFromConn(connection *conn);
 static void asmTaskCancel(asmTask *task, const char *reason);
 void asmTaskSetFailed(asmTask *task, const char *fmt, ...);
 void asmActiveTrimSchedule(slotRangeArray *slots);
-void asmTrimSlots(slotRangeArray *slots);
+static void propagateTrimslots(slotRangeArray *slots);
 
 void asmInit(void) {
     asmManager = zcalloc(sizeof(*asmManager));
@@ -309,12 +309,27 @@ size_t asmGetPeakSyncBufferSize(void) {
 }
 
 sds asmGenInfoString(sds info) {
+    int active_tasks = 0;
+
+    listIter li;
+    listNode *ln;
+    listRewind(asmManager->tasks, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        asmTask *task = listNodeValue(ln);
+        if (task->operation == ASM_IMPORT ||
+            (task->operation == ASM_MIGRATE && task->state != ASM_FAILED))
+        {
+            active_tasks++;
+        }
+    }
+
+
     return sdscatprintf(info,
-                        "cluster_slot_migration_task_count:%lu\r\n"
+                        "cluster_slot_migration_task_count:%d\r\n"
                         "cluster_slot_migration_total_done_tasks:%lld\r\n"
                         "cluster_slot_migration_sync_buffer_peak:%zu\r\n"
                         "cluster_slot_migration_trim_task_count:%lu\r\n",
-                        listLength(asmManager->tasks),
+                        active_tasks,
                         asmManager->total_done_tasks,
                         asmGetPeakSyncBufferSize(),
                         listLength(asmManager->active_trim_tasks));
@@ -863,6 +878,11 @@ void asmImportSetFailed(asmTask *task) {
     /* Mark the task as failed and notify the cluster */
     task->state = ASM_FAILED;
     clusterAsmOnEvent(task->id, ASM_EVENT_IMPORT_FAILED, NULL);
+
+    if (server.masterhost == NULL) {
+        asmTrimSlots(task->slot_ranges);
+        propagateTrimslots(task->slot_ranges);
+    }
 }
 
 void asmMigrateSetFailed(asmTask *task) {
@@ -871,11 +891,15 @@ void asmMigrateSetFailed(asmTask *task) {
 
     /* Close the RDB and main channel clients*/
     if (task->rdb_channel_client) {
+        serverLog(LL_WARNING, "Migrate task failed, close RDB channel client: %lu",
+                             (unsigned long) task->rdb_channel_client->id);
         freeClientAsync(task->rdb_channel_client);
         task->rdb_channel_client->task = NULL;
         task->rdb_channel_client = NULL;
     }
     if (task->main_channel_client) {
+        serverLog(LL_WARNING, "Migrate task failed, close main channel client: %lu",
+                             (unsigned long) task->main_channel_client->id);
         freeClientAsync(task->main_channel_client);
         task->main_channel_client->task = NULL;
         task->main_channel_client = NULL;
@@ -2208,7 +2232,7 @@ static void propagateTrimslots(slotRangeArray *slots) {
      * Even if module executed a command without asking for propagation. */
     int prev_replication_allowed = server.replication_allowed;
     server.replication_allowed = 1;
-    alsoPropagate(-1, argv, argc, PROPAGATE_REPL);
+    alsoPropagate(-1, argv, argc, PROPAGATE_AOF | PROPAGATE_REPL);
     server.replication_allowed = prev_replication_allowed;
     exitExecutionUnit();
     postExecutionUnitOperations();
@@ -2316,11 +2340,7 @@ int clusterAsmProcess(const char *task_id, int event, void *arg, char **err) {
     return ret;
 }
 
-int asmActiveTrimTaskCount(void) {
-    return listLength(asmManager->active_trim_tasks);
-}
-
-void asmStartBgTrim(slotRangeArray *slots) {
+void asmBackgroundTrimSchedule(slotRangeArray *slots) {
     RedisModuleFlushSlotsInfoV1 fsi = {
             REDISMODULE_FLUSHSLOTSINFO_VERSION, 0,
             (RedisModuleSlotRangeArray *) slots
@@ -2356,6 +2376,29 @@ void asmStartBgTrim(slotRangeArray *slots) {
     sdsfree(str);
 }
 
+
+
+int asmTrimSlotsIfNeeded(void) {
+    if (!server.cluster_enabled || server.masterhost != NULL) return 0;
+
+    slotRangeArray *sra = NULL;
+    for (int i = 0; i < CLUSTER_SLOTS; i++) {
+        if (clusterIsMySlot(i)) continue;
+        if (kvstoreDictSize(server.db[0].keys, i) == 0) continue;
+        sra = slotRangeArrayBuild(sra, i);
+    }
+
+    if (!sra) return 0;
+
+    serverLog(LL_NOTICE,
+              "Detected keys in slots that does not belong to this node. "
+              "Scheduling trim for slots: %s", slotRangeArrayToString(sra));
+    asmTrimSlots(sra);
+    propagateTrimslots(sra);
+    slotRangeArrayFree(sra);
+    return 1;
+}
+
 void asmTrimSlots(slotRangeArray *slots) {
     if (asmManager->debug_trim_method == ASM_DEBUG_TRIM_NONE)
         return;
@@ -2366,7 +2409,7 @@ void asmTrimSlots(slotRangeArray *slots) {
     if (activetrim)
         asmActiveTrimSchedule(slots);
     else
-        asmStartBgTrim(slots);
+        asmBackgroundTrimSchedule(slots);
 }
 
 void asmActiveTrimStart(void) {
@@ -2453,7 +2496,6 @@ void asmActiveTrimDeleteKey(redisDb *db, robj *keyobj) {
     int static_key = keyobj->refcount == OBJ_STATIC_REFCOUNT;
     if (static_key) keyobj = createStringObject(keyobj->ptr, sdslen(keyobj->ptr));
 
-    propagateDeletionEx(db, keyobj, server.lazyfree_lazy_expire, 0);
     dbDelete(db, keyobj);
     notifyKeyspaceEvent(NOTIFY_TRIMMED, "trimmed",keyobj,db->id);
     asmManager->active_trim_keys_trimmed++;
@@ -2566,7 +2608,8 @@ int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv, long long *key_m
         return 0;
     }
 
-    if (key_mem_freed) *key_mem_freed = (long long) zmalloc_used_memory() - freeMemoryGetNotCountedMemory();
+    if (key_mem_freed)
+        *key_mem_freed = (long long) zmalloc_used_memory() - freeMemoryGetNotCountedMemory();
 
     if (key) {
         asmActiveTrimDeleteKey(db, key);
@@ -2576,11 +2619,11 @@ int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv, long long *key_m
         decrRefCount(tmpkey);
     }
 
-    if (key_mem_freed) *key_mem_freed -= (long long) zmalloc_used_memory() - freeMemoryGetNotCountedMemory();
+    if (key_mem_freed)
+        *key_mem_freed -= (long long) zmalloc_used_memory() - freeMemoryGetNotCountedMemory();
 
     return 1;
 }
-
 
 void trimslotsCommand(client *c) {
     if (c->argc < 5) {
@@ -2610,6 +2653,8 @@ void trimslotsCommand(client *c) {
         clusterDelKeysInSlotRangeArray(slots, CLUSTER_DELKEYS_NO_REPL);
     else
         asmTrimSlots(slots);
+
+    forceCommandPropagation(c, PROPAGATE_REPL | PROPAGATE_AOF);
 
     slotRangeArrayFree(slots);
     addReply(c, shared.ok);

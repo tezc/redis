@@ -131,6 +131,7 @@ const char *clusterNodePreferredEndpoint(clusterNode *n);
 long long clusterNodeReplOffset(clusterNode *node);
 clusterNode *clusterLookupNode(const char *name, int length);
 const char *clusterGetSecret(size_t *len);
+int clusterIsMySlot(int slot);
 
 /* functions with shared implementations */
 clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, int argc, int *hashslot, uint64_t cmd_flags, int *error_code);
@@ -152,6 +153,7 @@ typedef struct slotRangeArray {
     slotRange ranges[];
 } slotRangeArray;
 slotRangeArray *slotRangeArrayCreate(int num_ranges);
+slotRangeArray *slotRangeArrayBuild(slotRangeArray *sra, int slot);
 slotRangeArray *slotRangeArrayDup(slotRangeArray *sra);
 void slotRangeArraySet(slotRangeArray *sra, int idx, int start, int end);
 int slotRangeArrayContains(slotRangeArray *sra, unsigned int slot);

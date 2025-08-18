@@ -32,6 +32,7 @@ sds asmGenInfoString(sds info);
 int asmKeyBelongsToCurrentNode(kvobj *kv);
 size_t asmGetImportingBufferSize(void);
 size_t asmGetMigratingBufferSize(void);
+void asmTrimSlots(struct slotRangeArray *slots);
 int clusterAsmCancel(const char *task_id, const char *reason);
 int clusterAsmCancelBySlotRangeArray(struct slotRangeArray *slot_ranges, const char *reason);
 int isSlotInAsmTask(int slot);
@@ -44,7 +45,7 @@ void asmActiveTrimCycle(int type);
 int asmActiveTrimIsInProgressFor(int slot);
 int asmActiveTrimOverlaps(struct slotRange *req);
 int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv, long long *key_mem_freed);
-int asmActiveTrimTaskCount(void);
+int asmTrimSlotsIfNeeded(void);
 
 #endif
 

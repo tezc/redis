@@ -1,3 +1,98 @@
+
+set ::slot_prefixes [dict create \
+    0 "{06S}" \
+    1 "{Qi}" \
+    2 "{5L5}" \
+    3 "{4Iu}" \
+    4 "{4gY}" \
+    5 "{460}" \
+    6 "{1Y7}" \
+    7 "{1LV}" \
+]
+
+# Helper functions
+proc slot_prefix {slot} {
+    return [dict get $::slot_prefixes $slot]
+}
+
+proc slot_key {slot {suffix ""}} {
+    return "[slot_prefix $slot]$suffix"
+}
+proc populate_slot {num args} {
+    # Default values
+    set prefix "key:"
+    set size 3
+    set idx 0
+    set prints false
+    set expires 0
+    set slot -1
+
+    # Parse named arguments
+    foreach {key value} $args {
+        switch -- $key {
+            -prefix { set prefix $value }
+            -size { set size $value }
+            -idx { set idx $value }
+            -prints { set prints $value }
+            -expires { set expires $value }
+            -slot { set slot $value }
+            default { error "Unknown option: $key" }
+        }
+    }
+
+    # If slot is specified, use slot prefix from table
+    if {$slot >= 0} {
+        if {[dict exists $::slot_prefixes $slot]} {
+            set prefix [dict get $::slot_prefixes $slot]
+        } else {
+            error "Slot $slot not supported in slot_prefixes table, add it manually"
+        }
+    }
+
+    # Try R first (cluster), fallback to r (single instance)
+    if {[catch {R $idx ping}]} {
+        set redis_cmd "r"
+    } else {
+        set redis_cmd "R"
+    }
+
+    $redis_cmd $idx deferred 1
+    if {$num > 16} {set pipeline 16} else {set pipeline $num}
+    set val [string repeat A $size]
+    for {set j 0} {$j < $pipeline} {incr j} {
+        if {$expires > 0} {
+            $redis_cmd $idx set $prefix$j $val ex $expires
+        } else {
+            $redis_cmd $idx set $prefix$j $val
+        }
+        if {$prints} {puts $j}
+    }
+    for {} {$j < $num} {incr j} {
+        if {$expires > 0} {
+            $redis_cmd $idx set $prefix$j $val ex $expires
+        } else {
+            $redis_cmd $idx set $prefix$j $val
+        }
+        $redis_cmd $idx read
+        if {$prints} {puts $j}
+    }
+    for {set j 0} {$j < $pipeline} {incr j} {
+        $redis_cmd $idx read
+        if {$prints} {puts $j}
+    }
+    $redis_cmd $idx deferred 0
+}
+
+proc wait_for_failover {node_id} {
+    wait_for_condition 1000 50 {
+        [string match "*master*" [R $node_id role]]
+    } else {
+        fail "Failover did not complete"
+    }
+    wait_for_cluster_propagation
+}
+
+
 proc migration_status {node_id task_id field} {
     set status [R $node_id CLUSTER MIGRATION STATUS]
 
@@ -57,6 +152,89 @@ proc wait_for_asm_done {} {
             set trim_count [CI $i cluster_slot_migration_trim_task_count]
             fail "ASM tasks did not complete on instance $i: migration_tasks=$migration_count, trim_tasks=$trim_count"
         }
+    }
+}
+
+start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000}} {
+    test "Test active-trim clears partially imported keys on cancel" {
+        # Rdb delivery will take a long time
+        R 0 debug asm-trim-method active 1000000
+        R 0 config set rdb-key-save-delay 1000000
+        populate_slot 250 -slot 0
+        populate_slot 250 -slot 1
+        populate_slot 250 -slot 3
+        populate_slot 250 -slot 4
+
+        R 1 CLUSTER MIGRATION IMPORT 0 100
+        R 1 CLUSTER MIGRATION CANCEL ALL
+        wait_for_asm_done
+
+        assert_equal 1000 [R 0 dbsize]
+        assert_equal 1000 [R 3 dbsize]
+        assert_equal 0 [R 1 dbsize]
+        assert_equal 0 [R 4 dbsize]
+        R 0 debug asm-trim-method default
+        R 0 config set rdb-key-save-delay 0
+    }
+
+    test "Test active-trim clears partially imported keys on failover" {
+        # Rdb delivery will take a long time
+        R 0 debug asm-trim-method active 1000000
+        R 0 config set rdb-key-save-delay 1000000
+        populate_slot 250 -slot 0
+        populate_slot 250 -slot 1
+        populate_slot 250 -slot 3
+        populate_slot 250 -slot 4
+
+        R 1 CLUSTER MIGRATION IMPORT 0 100
+        R 4 CLUSTER FAILOVER
+        wait_for_failover 4
+        wait_for_asm_done
+
+        assert_equal 1000 [R 0 dbsize]
+        assert_equal 1000 [R 3 dbsize]
+        assert_equal 0 [R 1 dbsize]
+        assert_equal 0 [R 4 dbsize]
+
+        R 1 CLUSTER FAILOVER
+        wait_for_failover 1
+        R 0 debug asm-trim-method default
+        R 0 config set rdb-key-save-delay 0
+    }
+
+    test "Test active-trim inprogress on replica during import" {
+        R 3 debug asm-trim-method active 1000000
+
+        puts "rdbsaveprogress: [s 0 rdb_bgsave_in_progress]"
+
+        wait_for_condition 1000 60 {
+            [s 0 rdb_bgsave_in_progress] == 0
+        } else {
+            fail "RDB save did not complete"
+        }
+
+        R 1 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_condition 1000 10 {
+            [CI 0 rdb_bgsave_in_progress] == 0 &&
+            [CI 0 cluster_slot_migration_task_count] == 0 &&
+            [CI 0 cluster_slot_migration_trim_task_count] == 0 &&
+            [CI 3 cluster_slot_migration_trim_task_count] == 1
+        } else {
+            puts "R 0 info: [R 0 info]"
+            puts "[CI 0 cluster_slot_migration_task_count] [CI 0 cluster_slot_migration_trim_task_count] [CI 1 cluster_slot_migration_trim_task_count]"
+            fail "trim task did not start1"
+        }
+
+        R 0 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_condition 1000 20 {
+            [CI 0 cluster_slot_migration_task_count] == 1 &&
+            [CI 0 cluster_slot_migration_trim_task_count] == 0 &&
+            [CI 3 cluster_slot_migration_trim_task_count] == 1
+        } else {
+            fail "trim task did not start2"
+        }
+
+        # fail "test"
     }
 }
 
@@ -157,28 +335,28 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         }
 
         assert_error {*overlapping trim is in progress*} {R 0 CLUSTER MIGRATION IMPORT 3000 3500}
-        R 0 debug asm-trim-method default
+        R 0 debug asm-trim-method bg
 
         # Revert the migration
         wait_for_asm_done
         R 0 CLUSTER MIGRATION IMPORT 3300 3300
-        R 0 flushall
         wait_for_asm_done
+        R 0 flushall
     }
 
     test "Test IMPORT not allowed if there is a pending trim" {
         R 0 flushall
         R 0 debug asm-trim-method active 1000000
 
-        R 0 debug populate 100 "{b}" 100  ;# slot hash is 3300
-        R 0 debug populate 100 "{f}" 100  ;# slot hash is 3168
+        populate 100 "{f}" 100 0   ;# slot hash is 3168
+        populate 100 "{b}" 100 0  ;# slot hash is 3300
         R 1 CLUSTER MIGRATION IMPORT 3300 3300
 
         wait_for_condition 1000 10 {
             [CI 0 cluster_slot_migration_trim_task_count] == 1 &&
             [CI 1 cluster_slot_migration_task_count] == 0
         } else {
-            fail "trim task did not start1"
+            fail "trim task did not start1 [CI 0 cluster_slot_migration_trim_task_count] [CI 1 cluster_slot_migration_task_count] "
         }
 
         R 1 CLUSTER MIGRATION IMPORT 3168 3168
@@ -186,11 +364,11 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_condition 1000 10 {
             [CI 0 cluster_slot_migration_trim_task_count] == 2
         } else {
-            fail "trim task did not start2"
+            fail "trim task did not start2 [CI 0 cluster_slot_migration_trim_task_count]"
         }
 
         assert_error {*overlapping trim is in progress*} {R 0 CLUSTER MIGRATION IMPORT 3100 3200}
-        R 0 debug asm-trim-method default
+        R 0 debug asm-trim-method bg
         # Revert the migration
         wait_for_asm_done
         R 0 CLUSTER MIGRATION IMPORT 3300 3300 3168 3168
@@ -583,6 +761,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         } else {
             fail "ASM task did not complete successfully"
         }
+        wait_for_asm_done
 
         # after migration, these big keys should be evicted
         for {set j 0} {$j < 100} {incr j} { R 1 ping } ;# trigger eviction
@@ -621,6 +800,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         } else {
             fail "ASM task did not cancel"
         }
+        wait_for_asm_done
 
         # We can restart ASM tasks on new master, migrate slot 0-100 from 1 to 3
         R 1 config set rdb-key-save-delay 0
@@ -631,6 +811,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         } else {
             fail "ASM task did not finish"
         }
+        wait_for_asm_done
 
         # migrate slot 0-100 from 3 to 1
         R 3 config set rdb-key-save-delay 1000000
@@ -712,6 +893,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         } else {
             fail "ASM task did not finish"
         }
+        wait_for_asm_done
     }
 
     test "CLUSTER SETSLOT command when there is a slot migration task" {
@@ -769,3 +951,5 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 2 cluster setslot 0 node [R 0 cluster myid]
     }
 }
+
+
