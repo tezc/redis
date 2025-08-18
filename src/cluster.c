@@ -1647,7 +1647,7 @@ void replySlotsFlushAndFree(client *c, slotRangeArray *sra) {
         addReplyLongLong(c, sra->ranges[i].start);
         addReplyLongLong(c, sra->ranges[i].end);
     }
-    zfree(sra);
+    slotRangeArrayFree(sra);
 }
 
 /* Checks that slot ranges are well-formed and non-overlapping. */

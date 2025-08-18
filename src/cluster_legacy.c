@@ -2431,7 +2431,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
             sdsfree(err);
         }
     }
-    zfree(sra);
+    slotRangeArrayFree(sra);
 
     /* After updating the slots configuration, don't do any actual change
      * in the state of the server if a module disabled Redis Cluster
