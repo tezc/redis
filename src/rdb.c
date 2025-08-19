@@ -21,6 +21,7 @@
 #include "functions.h"
 #include "intset.h"  /* Compact integer set structure */
 #include "bio.h"
+#include "cluster_asm.h"
 
 #include <math.h>
 #include <fcntl.h>
@@ -1368,7 +1369,7 @@ werr:
     return -1;
 }
 
-ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
+ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter, unsigned long long *sharding_repl_skipped) {
     dictEntry *de;
     ssize_t written = 0;
     ssize_t res;
@@ -1417,6 +1418,11 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
         long long expire;
         size_t rdb_bytes_before_key = rdb->processed_bytes;
 
+        if (asmActiveTrimIsInProgressFor(curr_slot)) {
+            (*sharding_repl_skipped)++;
+            continue;
+        }
+
         initStaticStringObject(key,kvobjGetKey(kv));
         expire = kvobjGetExpire(kv);
         if ((res = rdbSaveKeyValuePair(rdb, &key, kv, expire, dbid)) < 0) goto werr;
@@ -1459,6 +1465,7 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     char magic[10];
     uint64_t cksum;
     long key_counter = 0;
+    unsigned long long sharding_repl_skipped = 0;
     int j;
 
     if (server.rdb_checksum)
@@ -1474,7 +1481,7 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     /* save all databases, skip this if we're in functions-only mode */
     if (!(req & SLAVE_REQ_RDB_EXCLUDE_DATA)) {
         for (j = 0; j < server.dbnum; j++) {
-            if (rdbSaveDb(rdb, j, rdbflags, &key_counter) == -1) goto werr;
+            if (rdbSaveDb(rdb, j, rdbflags, &key_counter, &sharding_repl_skipped) == -1) goto werr;
         }
     }
 
@@ -1488,6 +1495,7 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     cksum = rdb->cksum;
     memrev64ifbe(&cksum);
     if (rioWrite(rdb,&cksum,8) == 0) goto werr;
+    serverLog(LL_NOTICE, "BGSAVE done, %ld keys saved, %llu keys skipped, %lu bytes written.", key_counter, sharding_repl_skipped, rdb->processed_bytes);
     return C_OK;
 
 werr:
@@ -3926,6 +3934,7 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
                 continue;
             replicationSetupSlaveForFullResync(slave, getPsyncInitialOffset());
             conns[numconns++] = slave->conn;
+            serverLog(LL_NOTICE, "bgsave to fd: %d", slave->conn->fd);
             if (rdb_channel) {
                 /* Put the socket in blocking mode to simplify RDB transfer. */
                 connSendTimeout(slave->conn, server.repl_timeout * 1000);

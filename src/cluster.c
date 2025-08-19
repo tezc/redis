@@ -1607,8 +1607,10 @@ unsigned int clusterDelKeysInSlot(unsigned int hashslot, int flags) {
              * deletion of the key. */
             notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, server.db[0].id);
         } else {
-            /* Propagate the DEL command */
-            propagateDeletion(&server.db[0], key, server.lazyfree_lazy_server_del);
+            if (!(flags & CLUSTER_DELKEYS_NO_REPL)) {
+                /* Propagate the DEL command */
+                propagateDeletion(&server.db[0], key, server.lazyfree_lazy_server_del);
+            }
             /* The keys are not actually logically deleted from the database,
              * just moved to another node. The modules needs to know that these
              * keys are no longer available locally, so just send the keyspace

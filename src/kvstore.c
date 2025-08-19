@@ -31,6 +31,7 @@
 #include "kvstore.h"
 #include "redisassert.h"
 #include "monotonic.h"
+#include "server.h"
 
 #define UNUSED(V) ((void) V)
 
@@ -135,7 +136,7 @@ static int getAndClearDictIndexFromCursor(kvstore *kvs, unsigned long long *curs
  * Time complexity is O(log(kvs->num_dicts)). Take care to call it only after 
  * adding or removing keys from the kvstore.
  */
-static void cumulativeKeyCountAdd(kvstore *kvs, int didx, long delta) {
+static void cumulativeKeyCountAdd(kvstore *kvs, int didx, long long delta) {
     kvs->key_count += delta;
 
     dict *d = kvstoreGetDict(kvs, didx);
@@ -631,6 +632,37 @@ int kvstoreNumAllocatedDicts(kvstore *kvs) {
 
 int kvstoreNumDicts(kvstore *kvs) {
     return kvs->num_dicts;
+}
+
+int kvstoreMoveDict(kvstore *kvs, kvstore *dst, int didx) {
+    serverAssert(kvs->num_dicts == dst->num_dicts);
+    serverAssert(dst->dicts[didx] == NULL);
+
+    dict *d = kvs->dicts[didx];
+    if (d == NULL) return 0;
+
+    /* Adjust source kvstore */
+    kvs->allocated_dicts -= 1;
+    cumulativeKeyCountAdd(kvs, didx, -((long long)dictSize(d)));
+    kvstoreDictBucketChanged(d, -((long long) dictBuckets(d)));
+    /* If rehashing, move the dict to the destination kvstore's rehashing list. */
+    if (dictIsRehashing(d))
+        kvstoreDictRehashingCompleted(d);
+    /* Clear dict from source kvstore and create a new one if needed */
+    kvs->dicts[didx] = NULL;
+    if (!(kvs->flags & (KVSTORE_ALLOCATE_DICTS_ON_DEMAND | KVSTORE_FREE_EMPTY_DICTS)))
+        createDictIfNeeded(kvs, didx);
+
+    /* Move dict to destination kvstore */
+    dst->dicts[didx] = d;
+    dst->dicts[didx]->type = &dst->dtype;
+    dst->allocated_dicts += 1;
+    cumulativeKeyCountAdd(dst, didx, dictSize(d));
+    kvstoreDictBucketChanged(d, dictBuckets(d));
+    if (dictIsRehashing(dst->dicts[didx]))
+        kvstoreDictRehashingStarted(dst->dicts[didx]);
+
+    return 1;
 }
 
 /* Returns kvstore iterator that can be used to iterate through sub-dictionaries.

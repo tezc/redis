@@ -234,11 +234,12 @@ This flag should not be used directly by the module.
 #define REDISMODULE_NOTIFY_LOADED (1<<12)     /* module only key space notification, indicate a key loaded from rdb */
 #define REDISMODULE_NOTIFY_MODULE (1<<13)     /* d, module key space notification */
 #define REDISMODULE_NOTIFY_NEW (1<<14)        /* n, new key notification */
+#define REDISMODULE_NOTIFY_TRIMMED (1<<15)    /* trimmed by reshard trimming */
 
 /* Next notification flag, must be updated when adding new flags above!
 This flag should not be used directly by the module.
  * Use RedisModule_GetKeyspaceNotificationFlagsAll instead. */
-#define _REDISMODULE_NOTIFY_NEXT (1<<15)
+#define _REDISMODULE_NOTIFY_NEXT (1<<16)
 
 #define REDISMODULE_NOTIFY_ALL (REDISMODULE_NOTIFY_GENERIC | REDISMODULE_NOTIFY_STRING | REDISMODULE_NOTIFY_LIST | REDISMODULE_NOTIFY_SET | REDISMODULE_NOTIFY_HASH | REDISMODULE_NOTIFY_ZSET | REDISMODULE_NOTIFY_EXPIRED | REDISMODULE_NOTIFY_EVICTED | REDISMODULE_NOTIFY_STREAM | REDISMODULE_NOTIFY_MODULE)      /* A */
 
@@ -505,7 +506,9 @@ typedef void (*RedisModuleEventLoopOneShotFunc)(void *user_data);
 #define REDISMODULE_EVENT_EVENTLOOP 15
 #define REDISMODULE_EVENT_CONFIG 16
 #define REDISMODULE_EVENT_KEY 17
-#define _REDISMODULE_EVENT_NEXT 18 /* Next event flag, should be updated if a new event added. */
+#define REDISMODULE_EVENT_SHARDING 18
+#define REDISMODULE_EVENT_FLUSHSLOTS 19
+#define _REDISMODULE_EVENT_NEXT 20 /* Next event flag, should be updated if a new event added. */
 
 typedef struct RedisModuleEvent {
     uint64_t id;        /* REDISMODULE_EVENT_... defines. */
@@ -694,6 +697,16 @@ static const RedisModuleEvent
 #define _REDISMODULE_SUBEVENT_CRON_LOOP_NEXT 0
 #define _REDISMODULE_SUBEVENT_SWAPDB_NEXT 0
 
+#define REDISMODULE_SUBEVENT_SHARDING_SLOT_RANGE_CHANGED 0
+#define REDISMODULE_SUBEVENT_SHARDING_TRIMMING_STARTED 1
+#define REDISMODULE_SUBEVENT_SHARDING_TRIMMING_ENDED 2
+#define _REDISMODULE_SUBEVENT_SHARDING_NEXT 3
+
+#define REDISMODULE_SUBEVENT_FLUSHSLOTS_BGTRIM_STARTED 0
+#define REDISMODULE_SUBEVENT_FLUSHSLOTS_ACTIVETRIM_STARTED 1
+#define REDISMODULE_SUBEVENT_FLUSHSLOTS_ACTIVETRIM_ENDED 2
+#define _REDISMODULE_SUBEVENT_FLUSHSLOTS_NEXT 3
+
 /* RedisModuleClientInfo flags. */
 #define REDISMODULE_CLIENTINFO_FLAG_SSL (1<<0)
 #define REDISMODULE_CLIENTINFO_FLAG_PUBSUB (1<<1)
@@ -822,6 +835,29 @@ typedef struct RedisModuleKeyInfo {
 } RedisModuleKeyInfoV1;
 
 #define RedisModuleKeyInfo RedisModuleKeyInfoV1
+
+typedef struct RedisModuleSlotRange {
+    uint16_t start;
+    uint16_t end;
+} RedisModuleSlotRange;
+
+typedef struct RedisModuleSlotRangeArray {
+    int32_t num_ranges;
+    RedisModuleSlotRange ranges[];
+} RedisModuleSlotRangeArray;
+
+#define REDISMODULE_FLUSHSLOTSINFO_VERSION 1
+
+typedef struct RedisModuleFlushSlotsInfo {
+    uint64_t version;       /* Not used since this structure is never passed
+                               from the module to the core right now. Here
+                               for future compatibility. */
+    int32_t dbnum;          /* Flushed database number, -1 for ALL. */
+
+    RedisModuleSlotRangeArray* slots;
+} RedisModuleFlushSlotsInfoV1;
+
+#define RedisModuleFlushSlotsInfo RedisModuleFlushSlotsInfoV1
 
 typedef enum {
     REDISMODULE_ACL_LOG_AUTH = 0, /* Authentication failure */
