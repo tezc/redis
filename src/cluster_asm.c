@@ -261,7 +261,7 @@ sds asmCatInfoString(sds info) {
         }
     }
 
-    return sdscatprintf(info,
+    return sdscatprintf(info ? info : sdsempty(),
                         "cluster_slot_migration_task_count:%d\r\n"
                         "cluster_slot_migration_total_done_tasks:%lld\r\n"
                         "cluster_slot_migration_sync_buffer_peak:%zu\r\n",
