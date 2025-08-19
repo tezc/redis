@@ -104,7 +104,7 @@ void clusterPromoteSelfToMaster(void) {
 
 sds genClusterInfoString(void) {
     sds info = clusterPlugin->genClusterInfoString();
-    info = asmGenInfoString(info);
+    info = asmCatInfoString(info);
     return info;
 }
 
