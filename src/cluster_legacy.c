@@ -5805,7 +5805,7 @@ sds genClusterInfoString(void) {
         "total_cluster_links_buffer_limit_exceeded:%llu\r\n",
         server.cluster->stat_cluster_links_buffer_limit_exceeded);
 
-    info = asmGenInfoString(info);
+    info = asmCatInfoString(info);
 
     return info;
 }

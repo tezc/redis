@@ -67,38 +67,31 @@ proc populate_slot {num args} {
         }
     }
 
-    # Try R first (cluster), fallback to r (single instance)
-    if {[catch {R $idx ping}]} {
-        set redis_cmd "r"
-    } else {
-        set redis_cmd "R"
-    }
-
-    $redis_cmd $idx deferred 1
+    R $idx deferred 1
     if {$num > 16} {set pipeline 16} else {set pipeline $num}
     set val [string repeat A $size]
     for {set j 0} {$j < $pipeline} {incr j} {
         if {$expires > 0} {
-            $redis_cmd $idx set $prefix$j $val ex $expires
+            R $idx set $prefix$j $val ex $expires
         } else {
-            $redis_cmd $idx set $prefix$j $val
+            R $idx set $prefix$j $val
         }
         if {$prints} {puts $j}
     }
     for {} {$j < $num} {incr j} {
         if {$expires > 0} {
-            $redis_cmd $idx set $prefix$j $val ex $expires
+            R $idx set $prefix$j $val ex $expires
         } else {
-            $redis_cmd $idx set $prefix$j $val
+            R $idx set $prefix$j $val
         }
-        $redis_cmd $idx read
+        R $idx read
         if {$prints} {puts $j}
     }
     for {set j 0} {$j < $pipeline} {incr j} {
-        $redis_cmd $idx read
+        R $idx read
         if {$prints} {puts $j}
     }
-    $redis_cmd $idx deferred 0
+    R $idx deferred 0
 }
 
 # Wait for all ASM tasks to complete in the cluster

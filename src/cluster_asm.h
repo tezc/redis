@@ -31,7 +31,7 @@ size_t asmGetMigratingBufferSize(void);
 int clusterAsmCancel(const char *task_id, const char *reason);
 int clusterAsmCancelBySlotRangeArray(struct slotRangeArray *slot_ranges, const char *reason);
 int isSlotInAsmTask(int slot);
-sds asmGenInfoString(sds info);
+sds asmCatInfoString(sds info);
 int asmDebugSetTrimMethod(const char *method);
 int asmCanTrimSlots(void);
 

@@ -246,7 +246,7 @@ int asmDebugIsFailPointActive(int channel, int state) {
     return 0;
 }
 
-sds asmGenInfoString(sds info) {
+sds asmCatInfoString(sds info) {
     int active_tasks = 0;
 
     listIter li;
