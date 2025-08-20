@@ -496,6 +496,22 @@ int asmMigrateInProgress(void) {
     return 0;
 }
 
+/* Returns 1 if an import task is in progress, 0 otherwise. */
+int asmImportInProgress(void) {
+    listIter li;
+    listNode *ln;
+
+    if (!asmManager || listLength(asmManager->tasks) == 0)
+        return 0;
+
+    listRewind(asmManager->tasks, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        asmTask *task = listNodeValue(ln);
+        if (task->operation == ASM_IMPORT) return 1;
+    }
+    return 0;
+}
+
 /* Returns 1 if the task is in a state where it can receive replication stream
 *  for the slot range, 0 otherwise. */
 int asmCanFeedMigrationClient(asmTask *task) {

@@ -662,7 +662,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # slot configuration, so #0 and #1 will cancel the migration task.
         # BTW, if config epoch is not bumped, the slot config of #2 may be
         # updated by #0 and #1.
-        R 2 CLUSTER BUMPEPOCH
+        R 2 cluster bumpepoch
         R 2 cluster setslot 0 node [R 2 cluster myid]
         wait_for_condition 1000 50 {
             [string match {*canceled*} [migration_status 0 $task_id state]] &&
@@ -673,9 +673,11 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         }
 
         # set slot 0 back to #0
+        R 2 cluster setslot 0 node [R 0 cluster myid]
         R 0 cluster setslot 0 node [R 0 cluster myid]
         R 1 cluster setslot 0 node [R 0 cluster myid]
-        R 2 cluster setslot 0 node [R 0 cluster myid]
+        wait_for_cluster_propagation
+        wait_for_cluster_state "ok"
     }
 
     test "CLUSTER DELSLOTSRANGE command cancels a slot migration task" {
@@ -738,7 +740,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # Add #0 back into cluster
         # NOTE: this will cost 60s to let #0 join the cluster since
         # other nodes add #0 into black list for 60s after FORGET.
-        R 1 config set rdb-key-save-delay 1000000
+        R 1 config set rdb-key-save-delay 0
         R 1 cluster meet "127.0.0.1" [lindex [R 0 config get port] 1]
 
         # the importing task on #0 will be retried, and eventually succeed
@@ -749,5 +751,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         } else {
             fail "ASM task did not finish"
         }
+
+        # make sure #0 is completely back to the cluster
+        wait_for_cluster_propagation
+        wait_for_cluster_state "ok"
     }
 }

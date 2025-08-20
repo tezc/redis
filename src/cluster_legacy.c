@@ -2702,6 +2702,7 @@ void clusterProcessPingExtensions(clusterMsg *hdr, clusterLink *link) {
             if (n && n != myself && !(nodeIsSlave(myself) && myself->slaveof == n)) {
                 sds id = sdsnewlen(forgotten_node_ext->name, CLUSTER_NAMELEN);
                 dictEntry *de = dictAddOrFind(server.cluster->nodes_black_list, id);
+                if (dictGetKey(de) != id) sdsfree(id);
                 uint64_t expire = server.unixtime + ntohu64(forgotten_node_ext->ttl);
                 dictSetUnsignedIntegerVal(de, expire);
                 clusterDelNode(n);
@@ -3299,6 +3300,8 @@ int clusterProcessPacket(clusterLink *link) {
         /* This message is acceptable only if I'm a master and the sender
          * is one of my slaves. */
         if (!sender || sender->slaveof != myself) return 1;
+        /* Cancel all ASM tasks when starting manual failover */
+        clusterAsmCancel(NULL, "manual failover");
         /* Manual failover requested from slaves. Initialize the state
          * accordingly. */
         resetManualFailover();
