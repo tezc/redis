@@ -2364,6 +2364,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
         return;
     }
 
+    slotRangeArray *sra = NULL;
     for (j = 0; j < CLUSTER_SLOTS; j++) {
         if (bitmapTestBit(slots,j)) {
             sender_slots++;
@@ -2391,9 +2392,8 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
                  * will broadcast a PONG message to all the nodes. We need to
                  * detect that the slot was moved from us to the sender, and
                  * send ASM_REQUEST_CONFIG_UPDATED request to ASM later. */
-                if (server.cluster->slots[j] == myself && sender != myself) {
-                    asm_detect_updated_slots[j] = 1;
-                }
+                if (server.cluster->slots[j] == myself && sender != myself)
+                    sra = slotRangeArrayAppend(sra, j);
 
                 /* Was this slot mine, and still contains keys? Mark it as
                  * a dirty slot. */
@@ -2427,37 +2427,15 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
         }
     }
 
-    /* Transform the bitmap to a list of slot ranges, and send a request to ASM. */
-    slotRangeArray *sra = zmalloc(sizeof(*sra) + sizeof(slotRange) * CLUSTER_SLOTS);
-    sra->num_ranges = 0;
-    int start = -1;
-    for (int i = 0; i < CLUSTER_SLOTS; i++) {
-        if (asm_detect_updated_slots[i]) {
-            if (start == -1) {
-                start = i;
-            }
-        } else {
-            if (start != -1) {
-                sra->ranges[sra->num_ranges].start = start;
-                sra->ranges[sra->num_ranges].end = i - 1;
-                sra->num_ranges++;
-                start = -1;
-            }
-        }
-    }
-    if (start != -1) {
-        sra->ranges[sra->num_ranges].start = start;
-        sra->ranges[sra->num_ranges].end = CLUSTER_SLOTS - 1;
-        sra->num_ranges++;
-    }
-    if (sra->num_ranges > 0 && server.masterhost == NULL) {
+    /* Notify ASM about the config update */
+    if (sra && sra->num_ranges > 0 && server.masterhost == NULL) {
         sds err = NULL;
         if (asmNotifyConfigUpdated(NULL, sra, &err) != C_OK) {
             serverLog(LL_WARNING, "ASM config update failed: %s", err);
             sdsfree(err);
         }
     }
-    zfree(sra);
+    slotRangeArrayFree(sra);
 
     /* After updating the slots configuration, don't do any actual change
      * in the state of the server if a module disabled Redis Cluster
@@ -2499,7 +2477,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
         clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG|
                              CLUSTER_TODO_UPDATE_STATE|
                              CLUSTER_TODO_FSYNC_CONFIG);
-    } else if (dirty_slots_count) {
+    } else if (dirty_slots_count && asmCanTrimSlots()) {
         /* If we are here, we received an update message which removed
          * ownership for certain slots we still have keys about, but still
          * we are serving some slots, so this master node was not demoted to
@@ -5796,7 +5774,6 @@ sds genClusterInfoString(void) {
         "cluster_size:%d\r\n"
         "cluster_current_epoch:%llu\r\n"
         "cluster_my_epoch:%llu\r\n"
-        "cluster_slot_migration_sync_buffer_peak:%zu\r\n"
         , statestr[server.cluster->state],
         slots_assigned,
         slots_ok,
@@ -5805,8 +5782,7 @@ sds genClusterInfoString(void) {
         dictSize(server.cluster->nodes),
         server.cluster->size,
         (unsigned long long) server.cluster->currentEpoch,
-        (unsigned long long) myepoch,
-        asmGetPeakSyncBufferSize()
+        (unsigned long long) myepoch
     );
 
     /* Show stats about messages sent and received. */
@@ -5838,6 +5814,8 @@ sds genClusterInfoString(void) {
     info = sdscatprintf(info,
         "total_cluster_links_buffer_limit_exceeded:%llu\r\n",
         server.cluster->stat_cluster_links_buffer_limit_exceeded);
+
+    info = asmCatInfoString(info);
 
     return info;
 }
