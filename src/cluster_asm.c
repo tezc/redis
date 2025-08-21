@@ -1430,6 +1430,7 @@ void asmStartImportTask(asmTask *task) {
     {
         serverLog(LL_DEBUG, "Can not start import task for slots: %s since server is paused",
                             slot_ranges_str);
+        sdsfree(slot_ranges_str);
         return;
     }
 
