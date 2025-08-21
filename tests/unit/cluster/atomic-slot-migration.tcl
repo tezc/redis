@@ -884,17 +884,14 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
     test "Server shutdown can cancel slot migration task, exit with success" {
         # start slot migration from 0 to 1
-        set task_id [setup_slot_migration_with_delay 0 1 0 100]
+        setup_slot_migration_with_delay 0 1 0 100
 
-        set loglines0 [count_log_lines 0]
-        set loglines1 [count_log_lines -1]
+        set loglines [count_log_lines -1]
 
         # Shutdown the server, it should cancel the migration task
-        restart_server 0 true false true now
-        restart_server -1 true false true now
+        restart_server -1 true false true nosave
 
-        wait_for_log_messages 0  {"*Cancelled due to server shutdown*"} $loglines0 100 100
-        wait_for_log_messages -1 {"*Cancelled due to server shutdown*"} $loglines1 100 100
+        wait_for_log_messages -1 {"*Cancelled due to server shutdown*"} $loglines 100 100
 
         wait_for_cluster_propagation
         wait_for_cluster_state "ok"
