@@ -4517,7 +4517,8 @@ void pauseActions(pause_purpose purpose, mstime_t end, uint32_t actions) {
     /* Assert that there is no import task in progress when we are pausing.
      * otherwise we break the promise that no writes are performed, maybe
      * causing data lost during a failover. */
-    if (isPausedActions(PAUSE_ACTION_REPLICA))
+    if (isPausedActions(PAUSE_ACTION_CLIENT_ALL) ||
+        isPausedActions(PAUSE_ACTION_CLIENT_WRITE))
         serverAssert(!asmImportInProgress());
 }
 

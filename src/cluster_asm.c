@@ -1423,6 +1423,16 @@ void asmStartImportTask(asmTask *task) {
     if (task->operation != ASM_IMPORT || task->state != ASM_NONE) return;
     sds slot_ranges_str = slotRangeArrayToString(task->slot_ranges);
 
+    /* Cannot start import task since pause action is performed. Otherwise, we will
+     * break the promise that no writes are performed during the pause. */
+    if (isPausedActions(PAUSE_ACTION_CLIENT_ALL) ||
+        isPausedActions(PAUSE_ACTION_CLIENT_WRITE))
+    {
+        serverLog(LL_DEBUG, "Can not start import task for slots: %s since server is paused",
+                            slot_ranges_str);
+        return;
+    }
+
     /* Detect if the cluster topology is change. We should cancel the task if we can
      * not schedule it, and update the source node if needed. */
     sds err = NULL;

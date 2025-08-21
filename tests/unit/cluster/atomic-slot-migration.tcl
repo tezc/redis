@@ -858,13 +858,28 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         set task_id [setup_slot_migration_with_delay 0 1 0 100]
 
         # CLIENT PAUSE happens on the destination node, #1 will cancel the importing task
-        R 1 client pause 100 all
+        R 1 client pause 100000 write ;# pause 100s
         wait_for_condition 1000 50 {
             [string match {*canceled*} [migration_status 1 $task_id state]] &&
             [string match {*client pause*} [migration_status 1 $task_id last_error]]
         } else {
             fail "ASM task did not cancel"
         }
+
+        # start task again
+        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
+        after 200 ;# give some time to have chance to schedule the task
+        # the task should not start since server is paused
+        assert {[string match {*none*} [migration_status 1 $task_id state]]}
+
+        # unpause the server, the task should start
+        R 1 client unpause
+        wait_for_asm_done
+
+        # migrate back to original node #0
+        R 1 config set rdb-key-save-delay 0
+        R 0 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_asm_done
     }
 
     test "Server shutdown can cancel slot migration task, exit with success" {
