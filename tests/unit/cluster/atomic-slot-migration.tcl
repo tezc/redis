@@ -133,6 +133,30 @@ proc migration_status {node_id task_id field} {
     return $field_value
 }
 
+# Setup slot migration test with keys and 2s delay, then start migration
+# Returns the task_id for the migration
+proc setup_slot_migration_with_delay {src_node dst_node start_slot end_slot} {
+    # Two keys on the start slot
+    set key1 [slot_key $start_slot key1]
+    set key2 [slot_key $start_slot key2]
+    R $src_node set $key1 "a"
+    R $src_node set $key2 "b"
+
+    # we set a delay to ensure migration takes time for testing,
+    # two keys cost 2s to save
+    R $src_node config set rdb-key-save-delay 1000000
+
+    # migrate slot range from src_node to dst_node
+    set task_id [R $dst_node CLUSTER MIGRATION IMPORT $start_slot $end_slot]
+    wait_for_condition 2000 10 {
+        [string match {*send-bulk-and-stream*} [migration_status $src_node $task_id state]]
+    } else {
+        fail "ASM task did not start"
+    }
+
+    return $task_id
+}
+
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000 cluster-allow-replica-migration no}} {
     test "Test IMPORT input validation" {
         # Invalid slot range
@@ -642,20 +666,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
     }
 
     test "Failover will cancel slot migration tasks" {
-        set slot0_key "06S"
-        set slot1_key "Qi"
-        R 1 set $slot0_key "a"
-        R 1 set $slot1_key "b"
-        # we set a delay to failover
-        R 1 config set rdb-key-save-delay 1000000
-
         # migrate slot 0-100 from 1 to 0
-        set task_id [R 0 CLUSTER MIGRATION IMPORT 0 100]
-        wait_for_condition 2000 10 {
-            [string match {*send-bulk-and-stream*} [migration_status 1 $task_id state]]
-        } else {
-            fail "ASM task did not start"
-        }
+        set task_id [setup_slot_migration_with_delay 1 0 0 100]
 
         # FAILOVER happens on the destination node, instance #3 become master, #0 become slave
         R 3 cluster failover
@@ -669,6 +681,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # the source node will be failed
         wait_for_condition 1000 50 {
             [string match {*canceled*} [migration_status 0 $task_id state]] &&
+            [string match {*failover*} [migration_status 0 $task_id last_error]] &&
             [string match {*failed*} [migration_status 1 $task_id state]]
         } else {
             fail "ASM task did not cancel"
@@ -680,13 +693,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_asm_done
 
         # migrate slot 0-100 from 3 to 1
-        R 3 config set rdb-key-save-delay 1000000
-        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
-        wait_for_condition 2000 10 {
-            [string match {*send-bulk-and-stream*} [migration_status 3 $task_id state]]
-        } else {
-            fail "ASM task did not start"
-        }
+        set task_id [setup_slot_migration_with_delay 3 1 0 100]
 
         # FAILOVER happens on the source node, instance #3 become slave, #0 become master
         R 0 cluster failover
@@ -712,19 +719,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # flushall, flushdb, sflush
         foreach flushcmd {flushall flushdb sflush} {
-            # write some keys on R 1
-            set slot0_key "06S"
-            set slot1_key "Qi"
-            R 1 set $slot0_key "a"
-            R 1 set $slot1_key "b"
-
             # start slot migration from 1 to 0
-            set task_id [R 0 CLUSTER MIGRATION IMPORT 0 100]
-            wait_for_condition 1000 20 {
-                [string match {*send-bulk-and-stream*} [migration_status 1 $task_id state]]
-            } else {
-                fail "ASM task did not start"
-            }
+            set task_id [setup_slot_migration_with_delay 1 0 0 100]
 
             if {$::verbose} { puts "flush command: $flushcmd"}
             if {$flushcmd == "flushall"} {
@@ -752,20 +748,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
     }
 
     test "CLUSTER SETSLOT command when there is a slot migration task" {
-        R 0 config set rdb-key-save-delay 1000000
-        # write some keys on R 0
-        set slot0_key "06S"
-        set slot1_key "Qi"
-        R 0 set $slot0_key "a"
-        R 0 set $slot1_key "b"
-
-        # start slot migration from 0 to 1
-        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
-        wait_for_condition 1000 20 {
-            [string match {*send-bulk-and-stream*} [migration_status 0 $task_id state]]
-        } else {
-            fail "ASM task did not start"
-        }
+        # Setup slot migration test from node 0 to node 1
+        set task_id [setup_slot_migration_with_delay 0 1 0 100]
 
         # Cluster SETSLOT command is not allowed when there is a slot migration task
         # on the slot. #0 and #1 are having migration task now.
@@ -802,21 +786,15 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         }
 
         # set slot 0 back to #0
-        R 2 cluster setslot 0 node [R 0 cluster myid]
+        R 0 cluster bumpepoch
         R 0 cluster setslot 0 node [R 0 cluster myid]
-        R 1 cluster setslot 0 node [R 0 cluster myid]
         wait_for_cluster_propagation
         wait_for_cluster_state "ok"
     }
 
     test "CLUSTER DELSLOTSRANGE command cancels a slot migration task" {
         # start slot migration from 0 to 1
-        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
-        wait_for_condition 1000 20 {
-            [string match {*send-bulk-and-stream*} [migration_status 0 $task_id state]]
-        } else {
-            fail "ASM task did not start"
-        }
+        set task_id [setup_slot_migration_with_delay 0 1 0 100]
 
         R 0 cluster delslotsrange 0 100
         wait_for_condition 1000 50 {
@@ -841,14 +819,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         set task_id [R 1 CLUSTER MIGRATION IMPORT 0 5461]
         wait_for_asm_done
 
-        R 1 config set rdb-key-save-delay 1000000
         # start slot migration from 1 to 0
-        set task_id [R 0 CLUSTER MIGRATION IMPORT 0 5461]
-        wait_for_condition 1000 20 {
-            [string match {*send-bulk-and-stream*} [migration_status 1 $task_id state]]
-        } else {
-            fail "ASM task did not start"
-        }
+        set task_id [setup_slot_migration_with_delay 1 0 0 5461]
 
         # Forget #0 on #1, the migration task on #1 will be canceled due to node deleted,
         # and the importing task on #0 will be failed
@@ -877,6 +849,38 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         }
 
         # make sure #0 is completely back to the cluster
+        wait_for_cluster_propagation
+        wait_for_cluster_state "ok"
+    }
+
+    test "CLIENT PAUSE can cancel slot migration task" {
+        # start slot migration from 0 to 1
+        set task_id [setup_slot_migration_with_delay 0 1 0 100]
+
+        # CLIENT PAUSE happens on the destination node, #1 will cancel the importing task
+        R 1 client pause 100 all
+        wait_for_condition 1000 50 {
+            [string match {*canceled*} [migration_status 1 $task_id state]] &&
+            [string match {*client pause*} [migration_status 1 $task_id last_error]]
+        } else {
+            fail "ASM task did not cancel"
+        }
+    }
+
+    test "Server shutdown can cancel slot migration task, exit with success" {
+        # start slot migration from 0 to 1
+        set task_id [setup_slot_migration_with_delay 0 1 0 100]
+
+        set loglines0 [count_log_lines 0]
+        set loglines1 [count_log_lines -1]
+
+        # Shutdown the server, it should cancel the migration task
+        restart_server 0 true false true now
+        restart_server -1 true false true now
+
+        wait_for_log_messages 0  {"*Cancelled due to server shutdown*"} $loglines0 100 100
+        wait_for_log_messages -1 {"*Cancelled due to server shutdown*"} $loglines1 100 100
+
         wait_for_cluster_propagation
         wait_for_cluster_state "ok"
     }

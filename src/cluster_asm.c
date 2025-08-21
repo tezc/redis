@@ -1866,7 +1866,8 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
 
                     /* Delay return if required (for testing) */
                     if (unlikely(server.rdb_key_save_delay)) {
-                        rioFlush(rdb); /* Send buffer to the destination ASAP. */
+                        /* Send buffer to the destination ASAP. */
+                        if (rioFlush(rdb) == 0) goto werr;
                         debugDelay(server.rdb_key_save_delay);
                     }
                 }
