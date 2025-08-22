@@ -1428,8 +1428,12 @@ void asmStartImportTask(asmTask *task) {
     if (isPausedActions(PAUSE_ACTION_CLIENT_ALL) ||
         isPausedActions(PAUSE_ACTION_CLIENT_WRITE))
     {
-        serverLog(LL_DEBUG, "Can not start import task for slots: %s since server is paused",
-                            slot_ranges_str);
+        static time_t last_log = 0;
+        if (server.unixtime - last_log >= 5) { /* Log every 5 seconds to avoid spam */
+            serverLog(LL_NOTICE, "Can not start import task for slots: %s since server is paused",
+                                 slot_ranges_str);
+            last_log = server.unixtime;
+        }
         sdsfree(slot_ranges_str);
         return;
     }
@@ -2181,8 +2185,9 @@ int clusterAsmCancelByNode(void *node, const char *reason) {
         asmTask *task = listNodeValue(ln);
         /* Cancel the task if the source node is the one to be deleted, or
          * the dest node is the one to be deleted. */
-        if (task->source_node == n || !memcmp(task->dest, n->name, CLUSTER_NAMELEN) ||
-            !memcmp(task->source, n->name, CLUSTER_NAMELEN))
+        if (task->source_node == n ||
+            !memcmp(task->dest, clusterNodeGetName(n), CLUSTER_NAMELEN) ||
+            !memcmp(task->source, clusterNodeGetName(n), CLUSTER_NAMELEN))
         {
             asmTaskCancel(task, reason);
             num_cancelled++;
