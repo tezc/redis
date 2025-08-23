@@ -2428,11 +2428,13 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
     }
 
     /* Notify ASM about the config update */
-    int handled_by_asm = 0;
+    struct asmTask *asm_task = NULL;
     if (sra && sra->num_ranges > 0 && server.masterhost == NULL) {
         sds err = NULL;
-        handled_by_asm = (asmNotifyConfigUpdated(NULL, sra, &err) == C_OK);
-        if (!handled_by_asm) {
+        asm_task = asmLookupTaskBySlotRangeArray(sra);
+        if (!asm_task) {
+            clusterAsmCancelBySlotRangeArray(sra, "slots configuration updated");
+        } else if (asmNotifyConfigUpdated(asm_task, sra, &err) != C_OK) {
             serverLog(LL_WARNING, "ASM config update failed: %s", err);
             sdsfree(err);
         }
@@ -2479,7 +2481,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
         clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG|
                              CLUSTER_TODO_UPDATE_STATE|
                              CLUSTER_TODO_FSYNC_CONFIG);
-    } else if (dirty_slots_count && asmCanTrimSlots() && !handled_by_asm) {
+    } else if (dirty_slots_count && !asm_task) {
         /* If we are here, we received an update message which removed
          * ownership for certain slots we still have keys about, but still
          * we are serving some slots, so this master node was not demoted to

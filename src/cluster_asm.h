@@ -41,6 +41,7 @@ int isSlotInAsmTask(int slot);
 sds asmCatInfoString(sds info);
 void clusterMigrationCommand(client *c);
 void clusterSyncSlotsCommand(client *c);
+struct asmTask *asmLookupTaskBySlotRangeArray(struct slotRangeArray *sra);
 
 
 void asmActiveTrimCycle(int type);
@@ -50,6 +51,7 @@ int asmActiveTrimOverlaps(struct slotRange *req);
 int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv, long long *key_mem_freed);
 int asmTrimSlotsIfNeeded(void);
 int asmCanTrimSlots(void);
+void asmActiveTrimCancelAll(void);
 
 #endif
 

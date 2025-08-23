@@ -61,10 +61,10 @@ struct asmManager {
     int debug_trim_delay;         /* Sleep before trimming each key */
 
     /* A way to disable active trimming for debugging and testing */
-    unsigned long long active_trim_keys_trimmed;
-    unsigned long long active_trim_keys_scanned;
+    unsigned long long active_trim_started;
+    unsigned long long active_trim_cancelled;
+    unsigned long long active_trim_keys_deleted;
     unsigned long long active_trim_keys_total;
-    unsigned long long active_trim_repl_filtered;
     list *active_trim_tasks;
 };
 
@@ -139,6 +139,8 @@ void clusterAsmInit(void) {
     asmManager->debug_trim_method = ASM_DEBUG_TRIM_ACTIVE;
     asmManager->debug_trim_delay = 0;
     asmManager->active_trim_tasks = listCreate();
+    asmManager->active_trim_started = 0;
+    asmManager->active_trim_cancelled = 0;
     listSetFreeMethod(asmManager->active_trim_tasks, (void (*)(void*))slotRangeArrayFree);
 }
 
@@ -286,11 +288,17 @@ sds asmCatInfoString(sds info) {
                         "cluster_slot_migration_task_count:%d\r\n"
                         "cluster_slot_migration_total_done_tasks:%lld\r\n"
                         "cluster_slot_migration_sync_buffer_peak:%zu\r\n"
-                        "cluster_slot_migration_trim_task_count:%lu\r\n",
+                        "cluster_slot_migration_trim_tasks:%lu\r\n"
+                        "cluster_slot_migration_trim_started:%llu\r\n"
+                        "cluster_slot_migration_trim_cancelled:%llu\r\n"
+                        "cluster_slot_migration_trim_keys_deleted:%llu\r\n",
                         active_tasks,
                         asmManager->total_done_tasks,
                         asmGetPeakSyncBufferSize(),
-                        listLength(asmManager->active_trim_tasks));
+                        listLength(asmManager->active_trim_tasks),
+                        asmManager->active_trim_started,
+                        asmManager->active_trim_cancelled,
+                        asmManager->active_trim_keys_deleted);
 }
 
 void asmTaskReset(asmTask *task) {
@@ -397,7 +405,7 @@ size_t asmGetMigratingBufferSize(void) {
 }
 
 /* Returns the ASM task with the given ID, or NULL if no such task exists. */
-static asmTask *lookupAsmTaskAt(list *tasks, const char *id) {
+static asmTask *asmLookupTaskAt(list *tasks, const char *id) {
     listIter li;
     listNode *ln;
 
@@ -410,13 +418,13 @@ static asmTask *lookupAsmTaskAt(list *tasks, const char *id) {
 }
 
 /* Returns the ASM task with the given ID, or NULL if no such task exists. */
-asmTask *lookupAsmTaskById(const char *id) {
-    return lookupAsmTaskAt(asmManager->tasks, id);
+asmTask *asmLookupTaskById(const char *id) {
+    return asmLookupTaskAt(asmManager->tasks, id);
 }
 
 /* Returns the ASM task that is identical to the given slot range array, or NULL
  * if no such task exists. */
-asmTask *lookupAsmTaskBySlotRangeArray(slotRangeArray *sra) {
+asmTask *asmLookupTaskBySlotRangeArray(slotRangeArray *sra) {
     listIter li;
     listNode *ln;
 
@@ -432,7 +440,7 @@ asmTask *lookupAsmTaskBySlotRangeArray(slotRangeArray *sra) {
 /* Returns the slot range array for the given task ID */
 slotRangeArray *asmTaskGetSlotRanges(const char *task_id) {
     asmTask *task = NULL;
-    if (!task_id || (task = lookupAsmTaskById(task_id)) == NULL) return NULL;
+    if (!task_id || (task = asmLookupTaskById(task_id)) == NULL) return NULL;
 
     return task->slot_ranges;
 }
@@ -790,8 +798,8 @@ static void clusterMigrationCommandStatus(client *c) {
             return;
         }
         sds id = c->argv[4]->ptr;
-        asmTask *task = lookupAsmTaskAt(asmManager->tasks, id);
-        if (!task) task = lookupAsmTaskAt(asmManager->done_tasks, id);
+        asmTask *task = asmLookupTaskAt(asmManager->tasks, id);
+        if (!task) task = asmLookupTaskAt(asmManager->done_tasks, id);
         if (!task) {
             addReplyArrayLen(c, 0);
             return;
@@ -2152,7 +2160,7 @@ int clusterAsmCancel(const char *task_id, const char *reason) {
     if (asmManager == NULL) return 0;
 
     if (task_id) {
-        asmTask *task = lookupAsmTaskById(task_id);
+        asmTask *task = asmLookupTaskById(task_id);
         if (!task) return 0; /* Not found */
 
         asmTaskCancel(task, reason);
@@ -2249,7 +2257,7 @@ int isSlotInAsmTask(int slot) {
 int clusterAsmHandoff(const char *task_id, sds *err) {
     serverAssert(task_id);
 
-    asmTask *task = lookupAsmTaskById(task_id);
+    asmTask *task = asmLookupTaskById(task_id);
     if (!task || task->state != ASM_HANDOFF_PREP) {
         *err = sdscatprintf(sdsempty(), "No suitable ASM task found for id: %s, task_state: %s",
                             task_id, task ? asmTaskStateToString(task->state) : "null");
@@ -2269,7 +2277,7 @@ int clusterAsmHandoff(const char *task_id, sds *err) {
  * the config update from cluster protocol, and we need to cancel any conflicting
  * tasks that overlap with the slot ranges. */
 int asmNotifyConfigUpdated(asmTask *current, slotRangeArray *slot_ranges, sds *err) {
-    asmTask *task = lookupAsmTaskBySlotRangeArray(slot_ranges);
+    asmTask *task = asmLookupTaskBySlotRangeArray(slot_ranges);
     if (current != NULL) serverAssert(task == current);
     if (!task) {
         /* Cancel asmTasks that overlap with the slot ranges, since slots configuration
@@ -2313,7 +2321,7 @@ int asmNotifyConfigUpdated(asmTask *current, slotRangeArray *slot_ranges, sds *e
 int clusterAsmDone(const char *task_id, sds *err) {
     serverAssert(task_id);
 
-    asmTask *task = lookupAsmTaskById(task_id);
+    asmTask *task = asmLookupTaskById(task_id);
     if (!task) {
         *err = sdscatprintf(sdsempty(), "No ASM task found for id: %s", task_id);
         return C_ERR;
@@ -2465,9 +2473,9 @@ void asmActiveTrimStart(void) {
                           NULL);
 
     slotRangeArray *slots = listNodeValue(listFirst(asmManager->active_trim_tasks));
-    asmManager->active_trim_keys_trimmed = 0;
-    asmManager->active_trim_keys_scanned = 0;
+    asmManager->active_trim_keys_deleted = 0;
     asmManager->active_trim_keys_total = dbTotalServerKeyCount();
+    asmManager->active_trim_started++;
 
     sds str = slotRangeArrayToString(slots);
     serverLog(LL_NOTICE, "Active trim initiated for slots: %s", str);
@@ -2484,7 +2492,7 @@ void asmActiveTrimSchedule(slotRangeArray *slots) {
     asmActiveTrimStart();
 }
 
-void asmActiveTrimEnd(void) {
+void asmActiveTrimEnd(int start_next_task) {
     /* Unblock master if blocked */
 
     if (server.master && server.master->flags & CLIENT_BLOCKED) {
@@ -2504,11 +2512,13 @@ void asmActiveTrimEnd(void) {
 
     sds str = slotRangeArrayToString(slots);
     serverLog(LL_NOTICE, "Active trim completed for slots: %s, %llu keys trimmed.",
-              str,asmManager->active_trim_keys_trimmed);
+              str,asmManager->active_trim_keys_deleted);
     sdsfree(str);
 
     listDelNode(asmManager->active_trim_tasks, listFirst(asmManager->active_trim_tasks));
-    asmActiveTrimStart();
+
+    if (start_next_task)
+        asmActiveTrimStart();
 }
 
 int asmActiveTrimIsInProgress(void) {
@@ -2544,7 +2554,7 @@ void asmActiveTrimDeleteKey(redisDb *db, robj *keyobj) {
 
     dbDelete(db, keyobj);
     notifyKeyspaceEvent(NOTIFY_TRIMMED, "trimmed",keyobj,db->id);
-    asmManager->active_trim_keys_trimmed++;
+    asmManager->active_trim_keys_deleted++;
 
     if (static_key) decrRefCount(keyobj);
 }
@@ -2562,11 +2572,16 @@ void asmActiveTrimScanCallback(void *privdata, const dictEntry *de, dictEntry **
     exitExecutionUnit();
     /* Propagate the DEL command (to AOF only) */
     postExecutionUnitOperations();
-    asmManager->active_trim_keys_scanned++;
 }
 
 void asmActiveTrimCycle(int type) {
-    if (asmActiveTrimIsInProgress() == 0) return;
+    if (asmManager->debug_trim_delay < 0 ||
+        asmActiveTrimIsInProgress() == 0 ||
+        isPausedActions(PAUSE_ACTIONS_CLIENT_WRITE_SET) ||
+        isPausedActions(PAUSE_ACTION_CLIENT_WRITE))
+    {
+        return;
+    }
 
     /* This works in a similar way to activeExpireCycle, in the sense that
      * we do incremental work across calls.  However, in this case we must
@@ -2577,8 +2592,7 @@ void asmActiveTrimCycle(int type) {
     static long long last_fast_cycle = 0; /* When last fast cycle ran. */
     long long start = ustime(), timelimit;
     unsigned int iterations = 0;
-    unsigned long long prev_trimmed = asmManager->active_trim_keys_trimmed;
-    unsigned long long prev_scanned = asmManager->active_trim_keys_scanned;
+    unsigned long long prev_trimmed = asmManager->active_trim_keys_deleted;
 
     /* See activeExpireCycle for how timelimit is handled. */
     timelimit = 1000000*server.active_trim_slow_cycle_time_perc/server.hz/100;
@@ -2598,7 +2612,7 @@ void asmActiveTrimCycle(int type) {
             if (slot >= CLUSTER_SLOTS) {
                 cursor = 0;
                 slot = -1;
-                asmActiveTrimEnd();
+                asmActiveTrimEnd(1);
 
 #if defined(USE_JEMALLOC)
                 jemalloc_purge();
@@ -2617,19 +2631,16 @@ void asmActiveTrimCycle(int type) {
                                  asmActiveTrimScanCallback, NULL, &server.db[0]);
             server.current_key_slot = -1;
 
-            /* Once in 16 scan iterations, 32 deletions. or 64 keys
+            /* Once in 16 scan iterations, 32 deletions
              * (if we have a lot of keys in one hash bucket or rehasing),
              * check if we reached the time limit. */
-            if (cursor && (++iterations > 16 ||
-                           asmManager->active_trim_keys_trimmed - prev_trimmed > 32 ||
-                           asmManager->active_trim_keys_scanned - prev_scanned > 64)) {
+            if (cursor && (++iterations > 16 || asmManager->active_trim_keys_deleted - prev_trimmed > 32)) {
                 if ((ustime() - start) > timelimit) {
                     quit = 1;
                     break;
                 }
                 iterations = 0;
-                prev_trimmed = asmManager->active_trim_keys_trimmed;
-                prev_scanned = asmManager->active_trim_keys_scanned;
+                prev_trimmed = asmManager->active_trim_keys_deleted;
             }
         } while(cursor);
         if (quit)
@@ -2669,6 +2680,16 @@ int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv, long long *key_m
         *key_mem_freed -= (long long) zmalloc_used_memory() - freeMemoryGetNotCountedMemory();
 
     return 1;
+}
+
+void asmActiveTrimCancelAll(void) {
+    if (listLength(asmManager->active_trim_tasks) == 0)
+        return;
+
+    serverLog(LL_NOTICE, "Cancelling all active trim tasks");
+    asmManager->active_trim_cancelled += listLength(asmManager->active_trim_tasks);
+    asmActiveTrimEnd(0);
+    listEmpty(asmManager->active_trim_tasks);
 }
 
 void trimslotsCommand(client *c) {
