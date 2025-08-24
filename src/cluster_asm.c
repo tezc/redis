@@ -1967,8 +1967,8 @@ static int asmSyncBufferStreamShouldContinue(void *ctx) {
     asmTask *task = context->privdata;
     if (task->state == ASM_FAILED || task->state == ASM_CANCELED) return 0;
 
-    /* Only check the client close flag if task is not failed or canceled,
-     * otherwise, it may be freed already. */
+    /* Check the client-close flag only if the task has not failed or been canceled,
+     * otherwise the client may have already been freed. */
     if (context->client->flags & CLIENT_CLOSE_ASAP) return 0;
 
     return 1;
