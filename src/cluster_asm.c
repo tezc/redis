@@ -17,6 +17,8 @@
 
 #define ASM_MAX_DONE_TASKS 32 /* Maximum number of completed tasks to keep in memory. */
 #define ASM_PAUSE_WRITE_MAX_GAP_BYTES (1 * 1024 * 1024) /* 1MB, TODO: a new config */
+#define ASM_PAUSE_WRITE_MAX_TIME_MS (10 * 1000) /* 10 seconds, TODO: a new config */
+#define ASM_SLOT_CONFIG_UPDATE_MAX_MS (5 * 1000) /* 5 seconds */
 
 #define ASM_DEBUG_TRIM_DEFAULT 0
 #define ASM_DEBUG_TRIM_NONE 1
@@ -43,6 +45,7 @@ typedef struct asmTask {
     mstime_t start_time;                /* Task start time */
     mstime_t done_time;                 /* Task completion time */
     mstime_t paused_time;               /* The time when the slot writes were paused */
+    mstime_t stream_done_time;          /* The time when the stream is done */
     sds error;                          /* Error message for this task */
 } asmTask;
 
@@ -83,6 +86,7 @@ enum asmState {
     ASM_WAIT_RDBCHANNEL,
     ASM_WAIT_BGSAVE_START,
     ASM_SEND_BULK_AND_STREAM,
+    ASM_SEND_STREAM,
     ASM_HANDOFF_PREP,
     ASM_HANDOFF,
     ASM_STREAM_DONE,
@@ -151,6 +155,7 @@ char *asmTaskStateToString(int state) {
         case ASM_WAIT_RDBCHANNEL: return "wait-rdbchannel";
         case ASM_WAIT_BGSAVE_START: return "wait-bgsave-start";
         case ASM_SEND_BULK_AND_STREAM: return "send-bulk-and-stream";
+        case ASM_SEND_STREAM: return "send-stream";
         case ASM_HANDOFF_PREP: return "handoff-prep";
         case ASM_HANDOFF: return "handoff";
         case ASM_STREAM_DONE: return "stream-done";
@@ -194,6 +199,7 @@ int asmDebugSetFailPoint(char * channel, char *state) {
     else if (!strcasecmp(state, "wait-rdbchannel")) asmManager->debug_failed_state = ASM_WAIT_RDBCHANNEL;
     else if (!strcasecmp(state, "wait-bgsave-start")) asmManager->debug_failed_state = ASM_WAIT_BGSAVE_START;
     else if (!strcasecmp(state, "send-bulk-and-stream")) asmManager->debug_failed_state = ASM_SEND_BULK_AND_STREAM;
+    else if (!strcasecmp(state, "send-stream")) asmManager->debug_failed_state = ASM_SEND_STREAM;
     else if (!strcasecmp(state, "handoff")) asmManager->debug_failed_state = ASM_HANDOFF;
     else if (!strcasecmp(state, "rdbchannel-reply")) asmManager->debug_failed_state = ASM_RDBCHANNEL_REPLY;
     else if (!strcasecmp(state, "rdbchannel-transfer")) asmManager->debug_failed_state = ASM_RDBCHANNEL_TRANSFER;
@@ -285,6 +291,8 @@ void asmTaskReset(asmTask *task) {
     task->error = sdsempty();
     task->main_channel_client = NULL;
     task->rdb_channel_client = NULL;
+    task->paused_time = 0;
+    task->stream_done_time = 0;
 }
 
 asmTask *asmTaskCreate(const char *task_id) {
@@ -344,7 +352,7 @@ static inline int asmIsSlotImporting(void) {
 /* Returns 1 if the key belongs to the current node, 0 otherwise.
  * Check if there is a s lot import task in progress, and if so,
  * check if the key belongs to the current node, to avoid the
- * overhead of calculating the key’s hash slot. */
+ * overhead of calculating the key's hash slot. */
 int asmKeyBelongsToCurrentNode(kvobj *kv) {
     if (asmIsSlotImporting()) {
         sds key = kvobjGetKey(kv);
@@ -553,6 +561,7 @@ int asmImportInProgress(void) {
 int asmCanFeedMigrationClient(asmTask *task) {
     return task->operation == ASM_MIGRATE &&
              (task->state == ASM_SEND_BULK_AND_STREAM ||
+              task->state == ASM_SEND_STREAM ||
               task->state == ASM_HANDOFF_PREP);
 }
 
@@ -856,13 +865,15 @@ void asmMigrateSetFailed(asmTask *task) {
 
     /* Close the RDB and main channel clients*/
     if (task->rdb_channel_client) {
-        freeClientAsync(task->rdb_channel_client);
+        task->rdb_channel_client->flags &= ~CLIENT_ASM_MIGRATING;
         task->rdb_channel_client->task = NULL;
+        freeClientAsync(task->rdb_channel_client);
         task->rdb_channel_client = NULL;
     }
     if (task->main_channel_client) {
-        freeClientAsync(task->main_channel_client);
+        task->main_channel_client->flags &= ~CLIENT_ASM_MIGRATING;
         task->main_channel_client->task = NULL;
+        freeClientAsync(task->main_channel_client);
         task->main_channel_client = NULL;
     }
 
@@ -979,7 +990,7 @@ void asmCallbackOnFreeClient(client *c) {
          * update the state properly. */
         task->rdb_channel_state = ASM_DONE;
         /* We may not have detected whether the child process has exited yet,
-         * so we can’t determine whether the client has completed the slots
+         * so we can't determine whether the client has completed the slots
          * snapshot transfer. If the RDB channel is interrupted unexpectedly,
          * the destination side will also close the main channel.
          * So here we just reset the RDB channel client of task. */
@@ -1329,8 +1340,10 @@ void asmImportSendACK(asmTask *task) {
     }
 }
 
-void asmStartSendBulkAndStream(struct asmTask *task) {
-    serverAssert(task->state == ASM_WAIT_BGSAVE_START);
+/* Called when the RDB channel begins sending the snapshot.
+ * From this point on, the main channel also starts sending incremental streams. */
+void asmSlotSnapshotAndStreamStart(struct asmTask *task) {
+    if (task == NULL || task->state != ASM_WAIT_BGSAVE_START) return;
 
     if (unlikely(asmDebugIsFailPointActive(ASM_MIGRATE_RDB_CHANNEL, task->state))) {
         connShutdown(task->rdb_channel_client->conn);
@@ -1340,6 +1353,26 @@ void asmStartSendBulkAndStream(struct asmTask *task) {
 
     task->state = ASM_SEND_BULK_AND_STREAM;
     task->rdb_channel_state = ASM_RDBCHANNEL_TRANSFER;
+}
+
+/* Called when the RDB channel has succeeded in sending the snapshot. */
+void asmSlotSnapshotSucceed(struct asmTask *task) {
+    if (task == NULL || task->state != ASM_SEND_BULK_AND_STREAM) return;
+
+    /* The destination starts sending ACKs to keep the main channel alive after
+     * receiving the snapshot, so here we need to update the last interaction
+     * time to avoid false timeout. */
+    task->main_channel_client->lastinteraction = server.unixtime;
+
+    task->state = ASM_SEND_STREAM;
+    task->rdb_channel_state = ASM_DONE;
+}
+
+/* Called when the RDB channel fails to send the snapshot. */
+void asmSlotSnapshotFailed(struct asmTask *task) {
+    if (task == NULL || task->state != ASM_SEND_BULK_AND_STREAM) return;
+
+    asmTaskSetFailed(task, "RDB channel - Failed to send slots snapshot");
 }
 
 /* CLUSTER SYNCSLOTS SNAPSHOT-EOF
@@ -1674,21 +1707,7 @@ void clusterSyncSlotsCommand(client *c) {
         if ((getLongLongFromObject(c->argv[3], &offset) != C_OK))
             return;
 
-        if (c->task && c->task->operation == ASM_IMPORT) {
-            /* This is a main channel connection, and we are streaming buffer. */
-            asmTask *task = c->task;
-            if (task->state == ASM_STREAMING_BUF) {
-                /* Update the source offset*/
-                if (task->source_offset > (unsigned long long) offset) {
-                    serverLog(LL_WARNING, "CLUSTER SYNCSLOTS ACK received, but offset %lld is less than the current source offset %lld",
-                              offset, task->source_offset);
-                    return;
-                }
-                task->source_offset = offset;
-                serverLog(LL_DEBUG, "CLUSTER SYNCSLOTS ACK received, updated source offset to %lld, destination offset: %lld",
-                                     task->source_offset, task->dest_offset);
-            }
-        } else if (c->task && c->task->operation == ASM_MIGRATE) {
+        if (c->task && c->task->operation == ASM_MIGRATE) {
             /* Update the ACKed offset from destination. */
             asmTask *task = c->task;
             if (task->dest_offset > (unsigned long long) offset) {
@@ -1701,7 +1720,7 @@ void clusterSyncSlotsCommand(client *c) {
                                  task->dest_offset, task->source_offset);
 
             /* Pause write if needed */
-            if (task->state == ASM_SEND_BULK_AND_STREAM) {
+            if (task->state == ASM_SEND_BULK_AND_STREAM || task->state == ASM_SEND_STREAM) {
                 /* Pause writes on the main channel connection if the gap is
                  * less than the desired threshold. */
                 if (task->dest_offset + ASM_PAUSE_WRITE_MAX_GAP_BYTES >= task->source_offset) {
@@ -2057,9 +2076,19 @@ void asmBeforeSleep(void) {
 
     if (task->operation == ASM_MIGRATE) {
         if (task->state == ASM_HANDOFF) {
+            int discard_incremental_writes = 0;
+            /* To avoid long pause, we fail the task if the pause takes too long,
+             * or discard the incremental writes to make slot migration succeed.
+             *
+             * TODO: slot-migration-discard-writes no/yes ?*/
+            if (server.mstime - task->paused_time >= ASM_PAUSE_WRITE_MAX_TIME_MS) {
+                asmTaskSetFailed(task, "Server paused for too long");
+                return;
+            }
+
             client *c = task->main_channel_client;
             /* The command streams for slot ranges have been drained. */
-            if (!clientHasPendingReplies(c)) {
+            if (!clientHasPendingReplies(c) || discard_incremental_writes) {
                 serverLog(LL_NOTICE, "Slot migration command stream drained, sending STREAM-EOF to the destination");
 
                 if (unlikely(asmDebugIsFailPointActive(ASM_MIGRATE_MAIN_CHANNEL, task->state)))
@@ -2080,8 +2109,28 @@ void asmBeforeSleep(void) {
                 * references */
                 task->main_channel_client->task = NULL;
                 task->main_channel_client = NULL;
-
+                
+                task->stream_done_time = server.mstime;
                 task->state = ASM_STREAM_DONE;
+            }
+        } else if (task->state == ASM_STREAM_DONE) {
+            /* In state ASM_STREAM_DONE, we are waiting for the destination node to
+             * broadcast the slot ownership change. But maybe the destination node
+             * is failed or network is not available, the source node may be
+             * blocked forever. So we fail the task if it takes too long.
+             *
+             * NOTE: There is a tricky case where the destination node may advertise
+             * ownership of the slot, causing a temporary configuration conflict.
+             * However, the configuration will eventually converge. In most cases,
+             * the destination node becomes the winner, since it bumps its config
+             * epoch before taking over slot ownership.
+             *
+             * TODO: max pause time, new config, or default value?
+             * Also consider the time of streaming pending buffer in destination. */
+            if (server.mstime - task->stream_done_time >= ASM_PAUSE_WRITE_MAX_TIME_MS &&
+                server.mstime - task->stream_done_time >= ASM_SLOT_CONFIG_UPDATE_MAX_MS)
+            {
+                asmTaskSetFailed(task, "Slot configuration update timeout");
             }
         }
     }
@@ -2104,7 +2153,30 @@ void asmCron(void) {
                 asmStartImportTask(task);
             }
         } else if (task->state == ASM_WAIT_STREAM_EOF) {
-            asmImportSendACK(task);
+            /* Send ACK every 1 second to source node */
+            if (asm_cron_runs % 10 == 0) asmImportSendACK(task);
+            /* Check if the main channel is timed out */
+            client *c = connGetPrivateData(task->main_channel_conn);
+            serverAssert(c->task == task);
+            if (server.unixtime - c->lastinteraction > server.repl_timeout)
+                asmTaskSetFailed(task, "Main channel - Connection timeout");
+        } else if (task->state == ASM_ACCUMULATE_BUF &&
+                   task->rdb_channel_state == ASM_RDBCHANNEL_TRANSFER)
+        {
+            /* Check if the RDB channel is timed out */
+            client *c = connGetPrivateData(task->rdb_channel_conn);
+            serverAssert(c->task == task);
+            if (server.unixtime - c->lastinteraction > server.repl_timeout)
+                asmTaskSetFailed(task, "RDB channel - Connection timeout");
+        }
+    } else if (task->operation == ASM_MIGRATE) {
+        /* Currently, we only need to check the main channel timeout when sending streams.
+         * For RDB channel connections, the timeout is handled by the socket itself
+         * during writes in slotRangesSnapshotSaveRio. */
+        if (task->state == ASM_SEND_STREAM &&
+            server.unixtime - task->main_channel_client->lastinteraction > server.repl_timeout)
+        {
+            asmTaskSetFailed(task, "Main channel - Connection timeout");
         }
     }
 
