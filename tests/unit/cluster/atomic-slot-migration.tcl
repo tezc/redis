@@ -997,7 +997,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             [S 1 lazyfreed_objects] > 0 &&
             [S 4 lazyfreed_objects] > 0
         } else {
-            fail "Background trim did not happen R 1: [R 1 dbsize] [S 1 lazyfreed_objects] R 4: [R 4 dbsize] [S 4 lazyfreed_objects]"
+            fail "Background trim did not happen"
         }
 
         # Cleanup
