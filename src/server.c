@@ -4588,7 +4588,7 @@ int prepareForShutdown(int flags) {
         redisCommunicateSystemd("STOPPING=1\n");
 
     /* Cancel all ASM tasks before shutting down. */
-    clusterAsmCancel(NULL, "server shutdown");
+    asmCancelAllTasksBeforeWritePause("server shutdown");
 
     /* If we have any replicas, let them catch up the replication offset before
      * we shut down, to avoid data loss. */
