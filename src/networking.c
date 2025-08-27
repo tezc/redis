@@ -4478,7 +4478,7 @@ static void pauseClientsByClient(mstime_t endTime, int isPauseClientAll) {
     }
 
     /* Cancel all ASM tasks when starting client pause */
-    clusterAsmCancel(NULL, "client pause requested");
+    asmCancelAllTasksBeforeWritePause("client pause requested");
 
     pauseActions(PAUSE_BY_CLIENT_COMMAND, endTime, actions);
 }
