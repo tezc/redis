@@ -36,13 +36,13 @@ int clusterAsmCancel(const char *task_id, const char *reason);
 int clusterAsmCancelBySlot(int slot, const char *reason);
 int clusterAsmCancelBySlotRangeArray(struct slotRangeArray *slot_ranges, const char *reason);
 int clusterAsmCancelByNode(void *node, const char *reason);
-void asmCancelAllTasksBeforeWritePause(const char *reason);
 int isSlotInAsmTask(int slot);
 sds asmCatInfoString(sds info);
 void clusterMigrationCommand(client *c);
 void clusterSyncSlotsCommand(client *c);
 struct asmTask *asmLookupTaskBySlotRangeArray(struct slotRangeArray *sra);
 void asmTrimSlotsIfNotOwned(void);
+void clusterAsmOnWriteUnpause(void);
 
 #endif
 
