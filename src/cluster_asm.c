@@ -1326,7 +1326,7 @@ write_error: /* Handle sendCommand() errors. */
     goto error;
 }
 
-void asmImportSendACK(asmTask *task) {
+int asmImportSendACK(asmTask *task) {
     serverAssert(task->operation == ASM_IMPORT && task->state == ASM_WAIT_STREAM_EOF);
     serverLog(LL_DEBUG, "Destination node applied offset is %lld", task->dest_offset);
 
@@ -1337,7 +1337,9 @@ void asmImportSendACK(asmTask *task) {
     if (err) {
         asmTaskSetFailed(task, "Main channel - Failed to send ACK: %s", err);
         sdsfree(err);
+        return C_ERR;
     }
+    return C_OK;
 }
 
 /* Called when the RDB channel begins sending the snapshot.
@@ -2153,7 +2155,8 @@ void asmCron(void) {
                 asmStartImportTask(task);
             }
         } else if (task->state == ASM_WAIT_STREAM_EOF) {
-            asmImportSendACK(task);
+            if (asmImportSendACK(task) == C_ERR) return;
+
             /* Check if the main channel is timed out */
             client *c = connGetPrivateData(task->main_channel_conn);
             serverAssert(c->task == task);
