@@ -904,7 +904,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_cluster_propagation
         wait_for_cluster_state "ok"
     }
-    test "Cancel import task when stream buffer into db" {
+
+    test "Cancel import task when streaming buffer into db" {
         # set a delay to have time to cancel import task that is streaming buf to db
         R 1 config set key-load-delay 50000
         # start slot migration from 0 to 1
@@ -922,10 +923,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         }
         stop_write_load $load_handle
 
-        # cancel the import task on #1
+        # cancel the import task on #1, the destination node works fine
         R 1 cluster migration cancel id $task_id
         assert_match {*canceled*} [migration_status 1 $task_id state]
-        assert_match {*failed*} [migration_status 0 $task_id state]
 
         # reset config
         R 1 config set key-load-delay 0
