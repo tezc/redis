@@ -50,7 +50,6 @@ typedef struct asmTask {
 struct asmManager {
     list *tasks;                  /* List of asmTask to be processed */
     list *done_tasks;             /* List of completed asmTask */
-    list *pending_trim_jobs;      /* List of pending trim jobs (due to write pause) */
     size_t sync_buffer_peak;      /* Peak size of sync buffer */
     long long total_done_tasks;   /* Total number of completed tasks */
 
@@ -58,7 +57,7 @@ struct asmManager {
     int debug_failed_channel;     /* Channel where the task failed */
     int debug_failed_state;       /* State where the task failed */
     int debug_trim_method;        /* Method to trim the buffer */
-    int postpone_trim;            /* Postpone trim due to write pause */
+    int trim_needed_on_write_unpause; /* Need to trim the buffer when write is resumed */
 };
 
 enum asmState {
@@ -120,19 +119,17 @@ static void asmSyncBufferReadFromConn(connection *conn);
 static void asmTaskCancel(asmTask *task, const char *reason);
 static void propagateTrimSlots(slotRangeArray *slots);
 void asmTrimJobSchedule(slotRangeArray *slots);
-void asmTrimJobProcessPending(void);
-int asmTrimJobIsPending(void);
 
 void clusterAsmInit(void) {
     asmManager = zcalloc(sizeof(*asmManager));
     asmManager->tasks = listCreate();
     asmManager->done_tasks = listCreate();
-    asmManager->pending_trim_jobs = listCreate();
     asmManager->sync_buffer_peak = 0;
     asmManager->total_done_tasks = 0;
     asmManager->debug_failed_channel = 0;
     asmManager->debug_failed_state = 0;
     asmManager->debug_trim_method = ASM_DEBUG_TRIM_DEFAULT;
+    asmManager->trim_needed_on_write_unpause = 0;
 }
 
 char *asmTaskStateToString(int state) {
@@ -1472,7 +1469,7 @@ void asmStartImportTask(asmTask *task) {
      * break the promise that no writes are performed during the pause. */
     if (isPausedActions(PAUSE_ACTION_CLIENT_ALL) ||
         isPausedActions(PAUSE_ACTION_CLIENT_WRITE) ||
-        asmTrimJobIsPending())
+        asmManager->trim_needed_on_write_unpause)
     {
         static time_t last_log = 0;
         if (server.unixtime - last_log >= 5) { /* Log every 5 seconds to avoid spam */
@@ -1577,13 +1574,6 @@ void clusterSyncSlotsCommand(client *c) {
         clusterNode *source = validateImportSlotRanges(slot_ranges, &err, NULL);
         if (!source) {
             addReplyErrorSds(c, err);
-            zfree(slot_ranges);
-            return;
-        }
-
-        /* Ensure no pending trim job. It only happens when write action is paused.*/
-        if (asmTrimJobIsPending() > 0) {
-            addReplyError(c, "Write action is paused, there is a pending trim job, can not start migration task");
             zfree(slot_ranges);
             return;
         }
@@ -2106,8 +2096,6 @@ void asmImportIncrAppliedBytes(struct asmTask *task, size_t bytes) {
 }
 
 void asmBeforeSleep(void) {
-    asmTrimJobProcessPending();
-
     if (listLength(asmManager->tasks) == 0) return;
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
 
@@ -2183,8 +2171,6 @@ void asmCron(void) {
     static long long asm_cron_runs = 0;
     asm_cron_runs++;
 
-    asmTrimJobProcessPending();
-
     if (listLength(asmManager->tasks) == 0) return;
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
 
@@ -2250,16 +2236,6 @@ void asmCron(void) {
         asmTaskFree(oldest);
         listDelNode(asmManager->done_tasks, listLast(asmManager->done_tasks));
     }
-}
-
-/* Cancel all tasks before write pause with delayed trim. */
-void asmCancelAllTasksBeforeWritePause(const char *reason) {
-    if (asmManager == NULL) return;
-    /* Postpone trim until the write pause is cleared, so that we can trim the
-     * keys and propagate trimslots command. */
-    asmManager->postpone_trim = 1;
-    clusterAsmCancel(NULL, reason);
-    asmManager->postpone_trim = 0;
 }
 
 /* Cancel a specific task if ID is provided, otherwise cancel all tasks. */
@@ -2393,13 +2369,14 @@ int asmNotifyConfigUpdated(asmTask *task, sds *err) {
         return C_ERR;
     }
 
+    task->state = ASM_DONE;
+    clusterAsmOnEvent(task->id, event, NULL);
+    asmTaskComplete(task);
+
     /* Trim the slots after the migrate task is done. */
     if (event == ASM_EVENT_MIGRATE_COMPLETED)
         asmTrimJobSchedule(task->slot_ranges);
 
-    task->state = ASM_DONE;
-    clusterAsmOnEvent(task->id, event, NULL);
-    asmTaskComplete(task);
     return C_OK;
 }
 
@@ -2454,8 +2431,7 @@ int clusterAsmProcess(const char *task_id, int event, void *arg, char **err) {
 
 /* Check if we can propagate TRIMSLOTS command to AOF and replicas. */
 static int canPropagateTrimSlots(void) {
-    return asmManager->postpone_trim == 0 &&
-           !isPausedActions(PAUSE_ACTION_CLIENT_WRITE) &&
+    return !isPausedActions(PAUSE_ACTION_CLIENT_WRITE) &&
            !isPausedActions(PAUSE_ACTION_CLIENT_ALL) &&
            !isPausedActions(PAUSE_ACTION_REPLICA);
 }
@@ -2528,38 +2504,17 @@ void asmTrimSlots(slotRangeArray *slots) {
     asmTrimInBackground(slots);
 }
 
-int asmTrimJobIsPending(void) {
-    return listLength(asmManager->pending_trim_jobs);
-}
-
 /* Schedule a trim job for the given slot ranges. If write action is paused,
  * the trim job will be scheduled and executed when write action is resumed. */
 void asmTrimJobSchedule(slotRangeArray *slots) {
     if (!canPropagateTrimSlots()) {
-        listAddNodeTail(asmManager->pending_trim_jobs, slotRangeArrayDup(slots));
+        asmManager->trim_needed_on_write_unpause = 1;
+        serverLog(LL_NOTICE, "Write action is paused, trim will be performed when write is resumed.");
         return;
     }
     /* Execute trim immediately */
     asmTrimSlots(slots);
     propagateTrimSlots(slots);
-}
-
-/* Process any pending trim jobs. */
-void asmTrimJobProcessPending(void) {
-    /* Check if there is any pending trim job and we can propagate it. */
-    if (!asmTrimJobIsPending() || !canPropagateTrimSlots())
-        return;
-
-    listIter li;
-    listNode *ln;
-    listRewind(asmManager->pending_trim_jobs, &li);
-    while ((ln = listNext(&li)) != NULL) {
-        slotRangeArray *sra = listNodeValue(ln);
-        asmTrimSlots(sra);
-        propagateTrimSlots(sra);
-        listDelNode(asmManager->pending_trim_jobs, ln);
-        slotRangeArrayFree(sra);
-    }
 }
 
 /* Trim keys in slots not owned by this node (if any). */
@@ -2627,4 +2582,11 @@ void trimslotsCommand(client *c) {
 
     slotRangeArrayFree(slots);
     addReply(c, shared.ok);
+}
+
+void clusterAsmOnWriteUnpause(void) {
+    if (asmManager->trim_needed_on_write_unpause && canPropagateTrimSlots()) {
+        asmManager->trim_needed_on_write_unpause = 0;
+        asmTrimSlotsIfNotOwned();
+    }
 }

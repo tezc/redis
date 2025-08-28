@@ -3287,7 +3287,7 @@ int clusterProcessPacket(clusterLink *link) {
          * is one of my slaves. */
         if (!sender || sender->slaveof != myself) return 1;
         /* Cancel all ASM tasks when starting manual failover */
-        asmCancelAllTasksBeforeWritePause("manual failover");
+        clusterAsmCancel(NULL, "manual failover");
         /* Manual failover requested from slaves. Initialize the state
          * accordingly. */
         resetManualFailover();
