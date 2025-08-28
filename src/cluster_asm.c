@@ -2153,8 +2153,7 @@ void asmCron(void) {
                 asmStartImportTask(task);
             }
         } else if (task->state == ASM_WAIT_STREAM_EOF) {
-            /* Send ACK every 1 second to source node */
-            if (asm_cron_runs % 10 == 0) asmImportSendACK(task);
+            asmImportSendACK(task);
             /* Check if the main channel is timed out */
             client *c = connGetPrivateData(task->main_channel_conn);
             serverAssert(c->task == task);
