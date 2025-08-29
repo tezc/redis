@@ -4478,12 +4478,7 @@ static void pauseClientsByClient(mstime_t endTime, int isPauseClientAll) {
     }
 
     /* Cancel all ASM tasks when starting client pause */
-    if (clusterAsmCancel(NULL, "client pause requested") != 0) {
-        /* If at least one task is cancelled, it means the TRIMSLOTS command has
-         * been propagated and is now part of a transaction. Set the flag to
-         * prevent an assertion failure in propagateNow(). */
-        server.client_pause_in_transaction = 1;
-    }
+    clusterAsmCancel(NULL, "client pause requested");
 
     pauseActions(PAUSE_BY_CLIENT_COMMAND, endTime, actions);
 }

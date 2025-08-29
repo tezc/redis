@@ -13,6 +13,7 @@ set ::slot_prefixes [dict create \
     6002 "{0bx}" \
     6003 "{AJ}" \
     6004 "{of}" \
+    16383 "{6ZJ}" \
 ]
 
 # Helper functions
@@ -1283,7 +1284,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # Trigger a failover with force to simulate unreachable master and
         # verify unowned keys are trimmed once replica becomes master.
-        R 4 cluster failover force
+        R 4 cluster failover
         wait_for_log_messages -4 {"*Detected keys in slots that does not belong*Scheduling trim for slot*"} $loglines 1000 10
         wait_for_condition 1000 10 {
             [R 1 dbsize] == 0 &&
@@ -1293,9 +1294,47 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         }
 
         # cleanup
+        wait_for_cluster_propagation
+        R 1 cluster failover
+        wait_for_condition 1000 10 {
+            [getInfoProperty [R 1 info] role] eq {master}
+        } else {
+            fail "Instance #0 is not a master after some time"
+        }
         R 0 config set rdb-key-save-delay 0
         R 1 debug asm-trim-method default
         R 4 debug asm-trim-method default
         wait_for_asm_done
+    }
+
+    test "CLUSTER SETSLOT is not allowed if there is a pending trim job" {
+        R 0 debug asm-trim-method bg
+        R 3 debug asm-trim-method bg
+
+        # Fill slot 0 on node-0 and migrate it to node-1 (with some delay)
+        R 0 flushall
+        populate_slot 10000 -idx 0 -slot 0
+        R 0 config set rdb-key-save-delay 1000
+        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
+
+        # Wait for the migration to start
+        wait_for_condition 2000 10 {
+            [string match {*send-bulk-and-stream*} [migration_status 0 $task_id state]]
+        } else {
+            fail "ASM task did not start"
+        }
+        after 1000
+
+        # Pause will cancel the task and there will be a pending trim job
+        # until writes are allowed again.
+        R 1 client pause 100000 write ;# pause 100s
+        wait_for_asm_done
+
+        # CLUSTER SETSLOT is not allowed if there is a pending trim job.
+        assert_error {*There is a pending trim job for slot 0*} {R 1 CLUSTER SETSLOT 0 STABLE}
+
+        # Unpause the server, trim will be triggered and SETSLOT will be allowed
+        R 1 client unpause
+        R 1 CLUSTER SETSLOT 0 STABLE
     }
 }
