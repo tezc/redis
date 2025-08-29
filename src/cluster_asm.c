@@ -2076,11 +2076,7 @@ void asmBeforeSleep(void) {
 
     if (task->operation == ASM_MIGRATE) {
         if (task->state == ASM_HANDOFF) {
-            int discard_incremental_writes = 0;
-            /* To avoid long pause, we fail the task if the pause takes too long,
-             * or discard the incremental writes to make slot migration succeed.
-             *
-             * TODO: slot-migration-discard-writes no/yes ?*/
+            /* To avoid long pause, we fail the task if the pause takes too long. */
             if (server.mstime - task->paused_time >= ASM_PAUSE_WRITE_MAX_TIME_MS) {
                 asmTaskSetFailed(task, "Server paused for too long");
                 return;
@@ -2088,7 +2084,7 @@ void asmBeforeSleep(void) {
 
             client *c = task->main_channel_client;
             /* The command streams for slot ranges have been drained. */
-            if (!clientHasPendingReplies(c) || discard_incremental_writes) {
+            if (!clientHasPendingReplies(c)) {
                 serverLog(LL_NOTICE, "Slot migration command stream drained, sending STREAM-EOF to the destination");
 
                 if (unlikely(asmDebugIsFailPointActive(ASM_MIGRATE_MAIN_CHANNEL, task->state)))
