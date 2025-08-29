@@ -6109,6 +6109,14 @@ int clusterCommandSpecial(client *c) {
             return 1;
         }
 
+        if (isSLotInTrimJob(slot)) {
+            addReplyErrorFormat(c, "There is a pending trim job for slot %d. "
+                "Most probably, this is due to a failed atomic slot migration. "
+                "CLUSTER SETSLOT cannot be used at this time. "
+                "Please retry later once the trim job is done. ", slot);
+            return 1;
+        }
+
         if (!strcasecmp(c->argv[3]->ptr,"migrating") && c->argc == 5) {
             if (server.cluster->slots[slot] != myself) {
                 addReplyErrorFormat(c,"I'm not the owner of hash slot %u",slot);

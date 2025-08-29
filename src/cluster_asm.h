@@ -37,6 +37,7 @@ int clusterAsmCancelBySlot(int slot, const char *reason);
 int clusterAsmCancelBySlotRangeArray(struct slotRangeArray *slot_ranges, const char *reason);
 int clusterAsmCancelByNode(void *node, const char *reason);
 int isSlotInAsmTask(int slot);
+int isSLotInTrimJob(int slot);
 sds asmCatInfoString(sds info);
 void clusterMigrationCommand(client *c);
 void clusterSyncSlotsCommand(client *c);
