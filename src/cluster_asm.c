@@ -865,13 +865,11 @@ void asmMigrateSetFailed(asmTask *task) {
 
     /* Close the RDB and main channel clients*/
     if (task->rdb_channel_client) {
-        task->rdb_channel_client->flags &= ~CLIENT_ASM_MIGRATING;
         task->rdb_channel_client->task = NULL;
         freeClientAsync(task->rdb_channel_client);
         task->rdb_channel_client = NULL;
     }
     if (task->main_channel_client) {
-        task->main_channel_client->flags &= ~CLIENT_ASM_MIGRATING;
         task->main_channel_client->task = NULL;
         freeClientAsync(task->main_channel_client);
         task->main_channel_client = NULL;
@@ -2111,7 +2109,16 @@ void asmBeforeSleep(void) {
                 * references */
                 task->main_channel_client->task = NULL;
                 task->main_channel_client = NULL;
-                
+
+                /* There may be a delay to handle the disconnection of RDB channel,
+                 * so we clear the task and client references here. */
+                if (task->rdb_channel_client != NULL) {
+                    task->rdb_channel_state = ASM_DONE;
+                    task->rdb_channel_client->task = NULL;
+                    freeClientAsync(task->rdb_channel_client);
+                    task->rdb_channel_client = NULL;
+                }
+
                 task->stream_done_time = server.mstime;
                 task->state = ASM_STREAM_DONE;
             }
