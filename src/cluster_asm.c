@@ -2060,8 +2060,8 @@ void asmSyncBufferStreamToDb(asmTask *task) {
 }
 
 void asmImportIncrAppliedBytes(struct asmTask *task, size_t bytes) {
-    if (!task || task->state != ASM_WAIT_STREAM_EOF) return;
     serverAssert(task->operation == ASM_IMPORT);
+    if (!task || task->state != ASM_WAIT_STREAM_EOF) return;
     task->dest_offset += bytes;
 }
 
