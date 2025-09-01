@@ -2066,6 +2066,8 @@ void replicationAttachToNewMaster(void) {
 
     disconnectSlaves(); /* Force our replicas to resync with us as well. */
     freeReplicationBacklog(); /* Don't allow our chained replicas to PSYNC. */
+
+    asmActiveTrimCancelAll();
 }
 
 /* Asynchronously read the SYNC payload we receive from a master */

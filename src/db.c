@@ -853,6 +853,9 @@ long long emptyData(int dbnum, int flags, void(callback)(dict*)) {
         return -1;
     }
 
+    if (dbnum == -1 || dbnum == 0)
+        asmActiveTrimCancelAll();
+
     /* Fire the flushdb modules event. */
     moduleFireServerEvent(REDISMODULE_EVENT_FLUSHDB,
                           REDISMODULE_SUBEVENT_FLUSHDB_START,
@@ -2530,6 +2533,9 @@ int keyIsExpired(redisDb *db, sds key, kvobj *kv) {
  */
 keyStatus expireIfNeeded(redisDb *db, robj *key, kvobj *kv, int flags) {
     serverAssert(key != NULL);
+
+    if (asmActiveTrimDelIfNeeded(db, key, kv, NULL)) return KEY_DELETED;
+
     sds keyname = key->ptr;
     if ((server.allow_access_expired) ||
         (flags & EXPIRE_ALLOW_ACCESS_EXPIRED) ||

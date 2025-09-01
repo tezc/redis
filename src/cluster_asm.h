@@ -23,7 +23,7 @@ int asmMigrateInProgress(void);
 int asmImportInProgress(void);
 void asmFeedMigrationClient(robj **argv, int argc);
 int asmDebugSetFailPoint(char * channel, char *state);
-int asmDebugSetTrimMethod(const char *method);
+int asmDebugSetTrimMethod(const char *method, int active_trim_delay);
 
 void asmImportIncrAppliedBytes(struct asmTask *task, size_t bytes);
 struct slotRangeArray *asmTaskGetSlotRanges(const char *task_id);
@@ -43,7 +43,14 @@ void clusterMigrationCommand(client *c);
 void clusterSyncSlotsCommand(client *c);
 struct asmTask *asmLookupTaskBySlotRangeArray(struct slotRangeArray *sra);
 void asmTrimSlotsIfNotOwned(void);
-void clusterAsmOnWriteUnpause(void);
+int asmIsTrimPending(void);
+int asmIsTrimPendingFor(int slot);
+
+void asmActiveTrimCycle(int type);
+int asmActiveTrimIsInProgress(void);
+int asmActiveTrimIsInProgressFor(int slot);
+int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv, long long *key_mem_freed);
+void asmActiveTrimCancelAll(void);
 
 #endif
 

@@ -1209,6 +1209,10 @@ void databasesCron(void) {
     /* Defrag keys gradually. */
     activeDefragCycle();
 
+    /* Handle active-trim */
+    if (server.cluster_enabled)
+        asmActiveTrimCycle(ACTIVE_EXPIRE_CYCLE_SLOW);
+
     /* Perform hash tables rehashing if needed, but only if there are no
      * other processes saving the DB on disk. Otherwise rehashing is bad
      * as will cause a lot of copy-on-write of memory pages. */
@@ -1820,6 +1824,9 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * ASAP if a fast cycle is not needed). */
     if (server.active_expire_enabled && iAmMaster())
         activeExpireCycle(ACTIVE_EXPIRE_CYCLE_FAST);
+
+    if (server.cluster_enabled)
+        asmActiveTrimCycle(ACTIVE_EXPIRE_CYCLE_FAST);
 
     if (moduleCount()) {
         moduleFireServerEvent(REDISMODULE_EVENT_EVENTLOOP,
@@ -4324,6 +4331,16 @@ int processCommand(client *c) {
     {
         rejectCommand(c, shared.roslaveerr);
         return C_OK;
+    }
+
+    if ((c->flags & CLIENT_MASTER) && asmIsTrimPending()) {
+        c->slot = getSlotFromCommand(c->cmd, c->argv, c->argc);
+        if (isSLotInTrimJob(c->slot)) {
+            serverLog(LL_WARNING, "Blocking master client for as there is active trim in progress for slot %d", c->slot);
+            /* Block master client */
+            blockPostponeClient(c);
+            return C_OK;
+        }
     }
 
     /* Only allow a subset of commands in the context of Pub/Sub if the

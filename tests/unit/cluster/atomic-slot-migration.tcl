@@ -101,12 +101,23 @@ proc wait_for_asm_done {} {
 
     for {set i 0} {$i < $total_instances} {incr i} {
         wait_for_condition 1000 10 {
-            [CI $i cluster_slot_migration_task_count] == 0
+            [CI $i cluster_slot_migration_task_count] == 0 &&
+            [CI $i cluster_slot_migration_active_trim_tasks] == 0
         } else {
             set migration_count [CI $i cluster_slot_migration_task_count]
-            fail "ASM tasks did not complete on instance $i: migration_tasks=$migration_count"
+            set trim_count [CI $i cluster_slot_migration_active_trim_tasks]
+            fail "ASM tasks did not complete on instance $i: migration_tasks=$migration_count, trim_tasks=$trim_count"
         }
     }
+}
+
+proc wait_for_failover {node_id} {
+    wait_for_condition 1000 50 {
+        [string match "*master*" [R $node_id role]]
+    } else {
+        fail "Failover did not complete"
+    }
+    wait_for_cluster_propagation
 }
 
 proc migration_status {node_id task_id field} {
@@ -156,6 +167,217 @@ proc setup_slot_migration_with_delay {src_node dst_node start_slot end_slot} {
     }
 
     return $task_id
+}
+
+start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000 cluster-allow-replica-migration no save ""}} {
+    test "Save during trimming" {
+        R 0 debug asm-trim-method active 1000
+        R 0 config set repl-diskless-sync-delay 0
+        R 0 flushall
+        populate_slot 5000 -idx 0 -slot 0
+        populate_slot 5000 -idx 0 -slot 1
+        populate_slot 5000 -idx 0 -slot 2
+
+        R 1 CLUSTER MIGRATION IMPORT 0 1
+        wait_for_condition 1000 10 {
+            [CI 0 cluster_slot_migration_task_count] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_tasks] == 1
+        } else {
+            puts "[CI 0 cluster_slot_migration_task_count]"
+            puts "[CI 0 cluster_slot_migration_active_trim_tasks]"
+            fail "trim failed"
+        }
+
+        wait_for_condition 50 100 {
+            [S 0 rdb_bgsave_in_progress] == 0
+        } else {
+            fail "bgsave is in progress"
+        }
+
+        R 0 save
+        # wait for larger than zero "keys skipped message"
+        wait_for_log_messages 0 {"*BGSAVE done, 5000 keys saved, [1-9]* keys skipped*"} 0 1000 10
+
+        restart_server 0 yes no yes nosave
+        assert_equal 5000 [R 0 dbsize]
+        assert_equal 0 [R 0 cluster countkeysinslot 0]
+        assert_equal 0 [R 0 cluster countkeysinslot 1]
+        assert_equal 5000 [R 0 cluster countkeysinslot 2]
+    }
+}
+
+start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000 cluster-allow-replica-migration no}} {
+
+    test "Pause actions will stop trimming" {
+        R 0 debug asm-trim-method active 1000
+        R 0 config set repl-diskless-sync-delay 0
+        R 0 flushall
+        populate_slot 10000 -idx 0 -slot 0
+
+        R 1 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_condition 1000 10 {
+            [CI 0 cluster_slot_migration_task_count] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_tasks] == 1
+        } else {
+            puts "[CI 0 cluster_slot_migration_task_count]"
+            puts "[CI 0 cluster_slot_migration_active_trim_tasks]"
+            fail "trim failed"
+        }
+
+        after 100
+        R 0 client pause 100000 write ;# pause 100s
+        after 100
+        set prev [CI 0 cluster_slot_migration_active_trim_keys_deleted]
+        after 1000
+        set curr [CI 0 cluster_slot_migration_active_trim_keys_deleted]
+        assert_equal $prev $curr
+
+
+        R 0 client unpause
+        R 0 debug asm-trim-method default
+        wait_for_asm_done
+        assert_equal 0 [R 0 dbsize]
+
+        # revert
+        R 0 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_asm_done
+        assert_equal 10000 [R 0 dbsize]
+    }
+
+    test "Test fullsync cancels active trim" {
+        R 3 debug asm-trim-method active 1000
+        R 0 flushall
+        R 0 config set repl-diskless-sync-delay 0
+        populate_slot 10000 -idx 0 -slot 0
+
+        R 1 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_condition 1000 10 {
+            [CI 0 cluster_slot_migration_task_count] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_tasks] == 0 &&
+            [CI 3 cluster_slot_migration_active_trim_tasks] == 1
+        } else {
+            puts "[CI 0 cluster_slot_migration_task_count]"
+            puts "[CI 0 cluster_slot_migration_active_trim_tasks]"
+            puts "[CI 3 cluster_slot_migration_active_trim_tasks]"
+            fail "trim failed"
+        }
+
+        R 0 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_condition 1000 10 {
+            [CI 0 cluster_slot_migration_task_count] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_tasks] == 0 &&
+            [CI 3 cluster_slot_migration_active_trim_tasks] == 1
+        } else {
+            fail "trim failed12"
+        }
+
+        R 0 config set client-output-buffer-limit "replica 1024 0 0"
+        populate_slot 1 -idx 0 -size 2000000 -slot 2
+
+        wait_for_condition 1000 10 {
+            [CI 3 cluster_slot_migration_active_trim_tasks] == 0 &&
+            [CI 3 cluster_slot_migration_active_trim_cancelled] == 1
+        } else {
+            puts "[CI 3 cluster_slot_migration_active_trim_tasks]"
+            puts "[CI 3 cluster_slot_migration_active_trim_cancelled]"
+            fail "trim failed33"
+        }
+
+        R 3 debug asm-trim-method active 0
+        wait_for_asm_done
+        wait_for_ofs_sync [Rn 0] [Rn 3]
+        assert_equal 10001 [R 0 dbsize]
+        assert_equal 10001 [R 3 dbsize]
+        assert_equal 0 [R 1 dbsize]
+        assert_equal 0 [R 4 dbsize]
+    }
+}
+
+start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000 cluster-allow-replica-migration no}} {
+    test "Test active-trim inprogress on replica during import" {
+        R 3 debug asm-trim-method active 1000000
+        R 0 flushall
+        populate_slot 100 -slot 0
+
+        R 1 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_condition 1000 10 {
+            [CI 0 cluster_slot_migration_task_count] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_tasks] == 0 &&
+            [CI 3 cluster_slot_migration_active_trim_tasks] == 1
+        } else {
+            puts "[CI 0 cluster_slot_migration_task_count]"
+            puts "[CI 0 cluster_slot_migration_active_trim_tasks]"
+            puts "[CI 3 cluster_slot_migration_active_trim_tasks]"
+            fail "trim failed"
+        }
+
+        R 0 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_condition 1000 20 {
+            [CI 0 cluster_slot_migration_task_count] == 1 &&
+            [CI 0 cluster_slot_migration_active_trim_tasks] == 0 &&
+            [CI 3 cluster_slot_migration_active_trim_tasks] == 1
+        } else {
+            fail "trim failed12"
+        }
+
+        wait_for_log_messages -3 {"*Blocking master client for as there is active trim in progress for slot*"} 0 1000 10
+        R 3 debug asm-trim-method active 0
+        wait_for_log_messages -3 {"*Unblocking master client after active trim*"} 0 1000 10
+
+        wait_for_asm_done
+        wait_for_ofs_sync [Rn 0] [Rn 3]
+        assert_equal 100 [R 0 dbsize]
+        assert_equal 100 [R 3 dbsize]
+        assert_equal 0 [R 1 dbsize]
+        assert_equal 0 [R 4 dbsize]
+    }
+
+     test "Test active-trim clears partially imported keys on cancel" {
+         # Rdb delivery will take a long time
+         R 0 debug asm-trim-method active 10000000
+         R 0 config set rdb-key-save-delay 1000000
+         populate_slot 250 -slot 0
+         populate_slot 250 -slot 1
+         populate_slot 250 -slot 3
+         populate_slot 250 -slot 4
+
+         R 1 CLUSTER MIGRATION IMPORT 0 100
+         R 1 CLUSTER MIGRATION CANCEL ALL
+         wait_for_asm_done
+
+         assert_equal 1000 [R 0 dbsize]
+         assert_equal 1000 [R 3 dbsize]
+         assert_equal 0 [R 1 dbsize]
+         assert_equal 0 [R 4 dbsize]
+         R 0 debug asm-trim-method default
+         R 0 config set rdb-key-save-delay 0
+     }
+
+     test "Test active-trim clears partially imported keys on failover" {
+         # Rdb delivery will take a long time
+         R 0 debug asm-trim-method active 1000000
+         R 0 config set rdb-key-save-delay 1000000
+         populate_slot 250 -slot 0
+         populate_slot 250 -slot 1
+         populate_slot 250 -slot 3
+         populate_slot 250 -slot 4
+
+         R 1 CLUSTER MIGRATION IMPORT 0 100
+         R 4 CLUSTER FAILOVER
+         wait_for_failover 4
+         wait_for_asm_done
+
+         assert_equal 1000 [R 0 dbsize]
+         assert_equal 1000 [R 3 dbsize]
+         assert_equal 0 [R 1 dbsize]
+         assert_equal 0 [R 4 dbsize]
+
+         # Cleanup
+         R 1 CLUSTER FAILOVER
+         wait_for_failover 1
+         R 0 debug asm-trim-method default
+         R 0 config set rdb-key-save-delay 0
+     }
 }
 
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {
