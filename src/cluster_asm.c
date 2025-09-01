@@ -18,7 +18,7 @@
 #define ASM_MAX_DONE_TASKS 32 /* Maximum number of completed tasks to keep in memory. */
 #define ASM_PAUSE_WRITE_MAX_GAP_BYTES (1 * 1024 * 1024) /* 1MB, TODO: a new config */
 #define ASM_PAUSE_WRITE_MAX_TIME_MS (10 * 1000) /* 10 seconds, TODO: a new config */
-#define ASM_SYNC_GAP_CONVERGE_MAX_TIME (10 * 60) /* 10 minutes, TODO: a new config */
+#define ASM_SYNC_GAP_CONVERGE_TIMEOUT (60 * 1000) /* 60 seconds, TODO: a new hidden config? */
 
 #define ASM_DEBUG_TRIM_DEFAULT 0
 #define ASM_DEBUG_TRIM_NONE 1
@@ -46,6 +46,7 @@ typedef struct asmTask {
     mstime_t start_time;                /* Task start time */
     mstime_t done_time;                 /* Task completion time */
     mstime_t paused_time;               /* The time when the slot writes were paused */
+    mstime_t dest_slots_snapshot_time;  /* The time when the destination starts applying the slot snapshot */
     mstime_t dest_accum_applied_time;   /* The time when the destination finishes applying the accumulated buffer */
     sds error;                          /* Error message for this task */
 } asmTask;
@@ -294,6 +295,7 @@ void asmTaskReset(asmTask *task) {
     task->main_channel_client = NULL;
     task->rdb_channel_client = NULL;
     task->paused_time = 0;
+    task->dest_slots_snapshot_time = 0;
     task->dest_accum_applied_time = 0;
 }
 
@@ -1360,6 +1362,7 @@ void asmSlotSnapshotAndStreamStart(struct asmTask *task) {
     /* From the source node's perspective, the destination node begins to accumulate
      * the buffer while the RDB channel starts applying the slot snapshot data. */
     task->dest_state = ASM_ACCUMULATE_BUF;
+    task->dest_slots_snapshot_time = server.mstime;
 }
 
 /* Called when the RDB channel has succeeded in sending the snapshot. */
@@ -1755,7 +1758,7 @@ void clusterSyncSlotsCommand(client *c) {
 
             /* Record the time when the destination finishes applying the accumulated buffer */
             if (task->dest_state == ASM_WAIT_STREAM_EOF && task->dest_accum_applied_time == 0)
-                task->dest_accum_applied_time = server.unixtime;
+                task->dest_accum_applied_time = server.mstime;
         }
     } else if (!strcasecmp(c->argv[2]->ptr, "fail") && c->argc == 4) {
         /* CLUSTER SYNCSLOTS FAIL <err> */
@@ -2206,10 +2209,19 @@ void asmCron(void) {
              * sending commands for migrating slots. The destination keeps applying them,
              * but the gap remains above the acceptable limit, which may cause endless
              * synchronization. A timeout check is required to handle this case.
+             *
+             * The timeout is calculated as the maximum of two values:
+             * - A fixed timeout (ASM_SYNC_GAP_CONVERGE_TIMEOUT) to avoid false positives.
+             * - A dynamic timeout based on the time it took to apply the slot snapshot and
+             *    the accumulated buffer.
              * TODO: need tests */
             if (task->dest_state == ASM_WAIT_STREAM_EOF && task->dest_accum_applied_time &&
-                server.unixtime - task->dest_accum_applied_time > ASM_SYNC_GAP_CONVERGE_MAX_TIME)
+                server.mstime - task->dest_accum_applied_time >
+                    max(ASM_SYNC_GAP_CONVERGE_TIMEOUT,
+                        (task->dest_accum_applied_time - task->dest_slots_snapshot_time) * 2))
+            {
                 asmTaskSetFailed(task, "synchronization gap converge timeout");
+            }
         }
     }
 
