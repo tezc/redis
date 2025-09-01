@@ -136,15 +136,12 @@ proc migration_status {node_id task_id field} {
 
 # Setup slot migration test with keys and delay, then start migration
 # Returns the task_id for the migration
-proc setup_slot_migration_with_delay {src_node dst_node start_slot end_slot {delay 1000000}} {
+proc setup_slot_migration_with_delay {src_node dst_node start_slot end_slot {keys 2} {delay 1000000}} {
     # Two keys on the start slot
-    set key1 [slot_key $start_slot key1]
-    set key2 [slot_key $start_slot key2]
-    R $src_node set $key1 "a"
-    R $src_node set $key2 "b"
+    populate_slot $keys -idx $src_node -slot $start_slot
 
     # we set a delay to ensure migration takes time for testing,
-    # two keys cost 2s to save by default.
+    # with default parameters, two keys cost 2s to save
     R $src_node config set rdb-key-save-delay $delay
 
     # migrate slot range from src_node to dst_node
@@ -1119,17 +1116,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # Fill slot 0 on node-0 and migrate it to node-1 (with some delay)
         R 0 flushall
-        populate_slot 10000 -idx 0 -slot 0
-        R 0 config set rdb-key-save-delay 1000
-        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
-
-        # Wait for the migration to start
-        wait_for_condition 2000 10 {
-            [string match {*send-bulk-and-stream*} [migration_status 0 $task_id state]]
-        } else {
-            fail "ASM task did not start"
-        }
-        after 1000
+        set task_id [setup_slot_migration_with_delay 0 1 0 100 10000 1000]
+        after 1000 ;# wait some time so that some keys are moved
 
         # Fail the migration
         R 1 CLUSTER MIGRATION CANCEL ID $task_id
@@ -1270,17 +1258,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # Fill slot 0 on node-0 and migrate it to node-1 (with some delay)
         R 0 flushall
-        populate_slot 10000 -idx 0 -slot 0
-        R 0 config set rdb-key-save-delay 1000
-        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
-
-        # Wait for the migration to start
-        wait_for_condition 2000 10 {
-            [string match {*send-bulk-and-stream*} [migration_status 0 $task_id state]]
-        } else {
-            fail "ASM task did not start"
-        }
-        after 1000
+        set task_id [setup_slot_migration_with_delay 0 1 0 100 10000 1000]
+        after 1000 ;# wait some time so that some keys are moved
 
         # Trigger a failover with force to simulate unreachable master and
         # verify unowned keys are trimmed once replica becomes master.
@@ -1313,17 +1292,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # Fill slot 0 on node-0 and migrate it to node-1 (with some delay)
         R 0 flushall
-        populate_slot 10000 -idx 0 -slot 0
-        R 0 config set rdb-key-save-delay 1000
-        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
-
-        # Wait for the migration to start
-        wait_for_condition 2000 10 {
-            [string match {*send-bulk-and-stream*} [migration_status 0 $task_id state]]
-        } else {
-            fail "ASM task did not start"
-        }
-        after 1000
+        set task_id [setup_slot_migration_with_delay 0 1 0 100 10000 1000]
 
         # Pause will cancel the task and there will be a pending trim job
         # until writes are allowed again.

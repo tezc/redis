@@ -1087,6 +1087,7 @@ void clusterReset(int hard) {
 
     /* Cancel all ASM tasks */
     clusterAsmCancel(NULL, "CLUSTER RESET");
+    asmCancelTrimJobs();
 
     /* Unassign all the slots. */
     for (j = 0; j < CLUSTER_SLOTS; j++) clusterDelSlot(j);

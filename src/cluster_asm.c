@@ -2577,6 +2577,19 @@ void asmTrimSlotsIfNotOwned(void) {
     slotRangeArrayFree(sra);
 }
 
+/* Cancel all pending trim jobs. */
+void asmCancelTrimJobs(void) {
+    if (!asmManager) return;
+    listIter li;
+    listNode *ln;
+    listRewind(asmManager->pending_trim_jobs, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        slotRangeArray *sra = listNodeValue(ln);
+        listDelNode(asmManager->pending_trim_jobs, ln);
+        slotRangeArrayFree(sra);
+    }
+}
+
 /* It's used to trim slots after the migration is done or import is failed.
  * TRIMSLOTS RANGES <numranges> <start-slot> <end-slot> ... */
 void trimslotsCommand(client *c) {

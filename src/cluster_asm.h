@@ -45,7 +45,6 @@ void clusterMigrationCommand(client *c);
 void clusterSyncSlotsCommand(client *c);
 struct asmTask *asmLookupTaskBySlotRangeArray(struct slotRangeArray *sra);
 void asmTrimSlotsIfNotOwned(void);
-void clusterAsmOnWriteUnpause(void);
-
+void asmCancelTrimJobs(void);
 #endif
 
