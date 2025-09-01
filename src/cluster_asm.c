@@ -18,7 +18,7 @@
 #define ASM_MAX_DONE_TASKS 32 /* Maximum number of completed tasks to keep in memory. */
 #define ASM_PAUSE_WRITE_MAX_GAP_BYTES (1 * 1024 * 1024) /* 1MB, TODO: a new config */
 #define ASM_PAUSE_WRITE_MAX_TIME_MS (10 * 1000) /* 10 seconds, TODO: a new config */
-#define ASM_SLOT_CONFIG_UPDATE_MAX_MS (5 * 1000) /* 5 seconds */
+#define ASM_SYNC_GAP_CONVERGE_MAX_TIME (10 * 60) /* 10 minutes, TODO: a new config */
 
 #define ASM_DEBUG_TRIM_DEFAULT 0
 #define ASM_DEBUG_TRIM_NONE 1
@@ -28,6 +28,7 @@ typedef struct asmTask {
     int operation;                      /* Either ASM_IMPORT or ASM_MIGRATE */
     slotRangeArray *slot_ranges;        /* List of slot ranges for this migration task */
     int state;                          /* Current state of the task */
+    int dest_state;                     /* Destination node's main state (approximate) */
     char source[CLUSTER_NAMELEN];       /* Source node name */
     char dest[CLUSTER_NAMELEN];         /* Destination node name */
     clusterNode *source_node;           /* Source node */
@@ -45,7 +46,7 @@ typedef struct asmTask {
     mstime_t start_time;                /* Task start time */
     mstime_t done_time;                 /* Task completion time */
     mstime_t paused_time;               /* The time when the slot writes were paused */
-    mstime_t stream_done_time;          /* The time when the stream is done */
+    mstime_t dest_accum_applied_time;   /* The time when the destination finishes applying the accumulated buffer */
     sds error;                          /* Error message for this task */
 } asmTask;
 
@@ -280,6 +281,7 @@ sds asmCatInfoString(sds info) {
 
 void asmTaskReset(asmTask *task) {
     task->state = ASM_NONE;
+    task->dest_state = ASM_NONE;
     task->rdb_channel_state = ASM_NONE;
     task->main_channel_conn = NULL;
     task->rdb_channel_conn = NULL;
@@ -292,7 +294,7 @@ void asmTaskReset(asmTask *task) {
     task->main_channel_client = NULL;
     task->rdb_channel_client = NULL;
     task->paused_time = 0;
-    task->stream_done_time = 0;
+    task->dest_accum_applied_time = 0;
 }
 
 asmTask *asmTaskCreate(const char *task_id) {
@@ -1331,7 +1333,8 @@ int asmImportSendACK(asmTask *task) {
     char offset[64];
     ull2string(offset, sizeof(offset), task->dest_offset);
 
-    char *err = sendCommand(task->main_channel_conn, "CLUSTER", "SYNCSLOTS", "ACK", offset, NULL);
+    char *err = sendCommand(task->main_channel_conn, "CLUSTER", "SYNCSLOTS", "ACK",
+                    asmTaskStateToString(task->state), offset, NULL);
     if (err) {
         asmTaskSetFailed(task, "Main channel - Failed to send ACK: %s", err);
         sdsfree(err);
@@ -1353,6 +1356,10 @@ void asmSlotSnapshotAndStreamStart(struct asmTask *task) {
 
     task->state = ASM_SEND_BULK_AND_STREAM;
     task->rdb_channel_state = ASM_RDBCHANNEL_TRANSFER;
+
+    /* From the source node's perspective, the destination node begins to accumulate
+     * the buffer while the RDB channel starts applying the slot snapshot data. */
+    task->dest_state = ASM_ACCUMULATE_BUF;
 }
 
 /* Called when the RDB channel has succeeded in sending the snapshot. */
@@ -1701,23 +1708,36 @@ void clusterSyncSlotsCommand(client *c) {
     } else if (!strcasecmp(c->argv[2]->ptr, "stream-eof") && c->argc == 3) {
         /* CLUSTER SYNCSLOTS STREAM-EOF */
         clusterSyncSlotsStreamEOF(c);
-    } else if (!strcasecmp(c->argv[2]->ptr, "ack") && c->argc == 4) {
-        /* CLUSTER SYNCSLOTS ACK <offset> */
+    } else if (!strcasecmp(c->argv[2]->ptr, "ack") && c->argc == 5) {
+        /* CLUSTER SYNCSLOTS ACK <state> <offset> */
         long long offset;
-        if ((getLongLongFromObject(c->argv[3], &offset) != C_OK))
+        int dest_state;
+
+        if (!strcasecmp(c->argv[3]->ptr, asmTaskStateToString(ASM_STREAMING_BUF))) {
+            dest_state = ASM_STREAMING_BUF;
+        } else if (!strcasecmp(c->argv[3]->ptr, asmTaskStateToString(ASM_WAIT_STREAM_EOF))) {
+            dest_state = ASM_WAIT_STREAM_EOF;
+        } else {
+            return; /* Not support now. */
+        }
+
+        if ((getLongLongFromObject(c->argv[4], &offset) != C_OK))
             return;
 
         if (c->task && c->task->operation == ASM_MIGRATE) {
-            /* Update the ACKed offset from destination. */
+            /* Update the state and ACKed offset from destination. */
             asmTask *task = c->task;
+            task->dest_state = dest_state;
             if (task->dest_offset > (unsigned long long) offset) {
-                serverLog(LL_WARNING, "CLUSTER SYNCSLOTS ACK received, but offset %lld is less than the current destination offset %lld",
-                        offset, task->dest_offset);
+                serverLog(LL_WARNING, "CLUSTER SYNCSLOTS ACK received, dest state: %s, "
+                                      "but offset %lld is less than the current dest offset %lld",
+                        asmTaskStateToString(dest_state), offset, task->dest_offset);
                 return;
             }
             task->dest_offset = offset;
-            serverLog(LL_DEBUG, "CLUSTER SYNCSLOTS ACK received, updated destination offset to %lld, source offset: %lld",
-                                 task->dest_offset, task->source_offset);
+            serverLog(LL_DEBUG, "CLUSTER SYNCSLOTS ACK received, dest state: %s, "
+                                "updated dest offset to %lld, source offset: %lld",
+                asmTaskStateToString(dest_state), task->dest_offset, task->source_offset);
 
             /* Pause write if needed */
             if (task->state == ASM_SEND_BULK_AND_STREAM || task->state == ASM_SEND_STREAM) {
@@ -1732,6 +1752,10 @@ void clusterSyncSlotsCommand(client *c) {
                     clusterAsmOnEvent(task->id, ASM_EVENT_HANDOFF_PREP, task->slot_ranges);
                 }
             }
+
+            /* Record the time when the destination finishes applying the accumulated buffer */
+            if (task->dest_state == ASM_WAIT_STREAM_EOF && task->dest_accum_applied_time == 0)
+                task->dest_accum_applied_time = server.unixtime;
         }
     } else if (!strcasecmp(c->argv[2]->ptr, "fail") && c->argc == 4) {
         /* CLUSTER SYNCSLOTS FAIL <err> */
@@ -1964,12 +1988,14 @@ static void asmSyncBufferReadFromConn(connection *conn) {
 
 static void asmSyncBufferStreamYieldCallback(void *ctx) {
     replDataBufToDbCtx *context = ctx;
+    asmTask *task = context->privdata;
     client *c = context->client;
 
     char offset[64];
     ull2string(offset, sizeof(offset), context->applied_offset);
 
-    char *err = sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "ACK", offset, NULL);
+    char *err = sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "ACK",
+                    asmTaskStateToString(task->state), offset, NULL);
     if (err) {
         serverLog(LL_WARNING, "Error sending CLUSTER SYNCSLOTS ACK: %s", err);
         sdsfree(err);
@@ -2115,28 +2141,22 @@ void asmBeforeSleep(void) {
                     task->rdb_channel_client = NULL;
                 }
 
-                task->stream_done_time = server.mstime;
                 task->state = ASM_STREAM_DONE;
             }
         } else if (task->state == ASM_STREAM_DONE) {
-            /* In state ASM_STREAM_DONE, we are waiting for the destination node to
-             * broadcast the slot ownership change. But maybe the destination node
-             * is failed or network is not available, the source node may be
-             * blocked forever. So we fail the task if it takes too long.
+            /* In state ASM_STREAM_DONE (server is still paused), we are waiting
+             * for the destination node to broadcast the slot ownership change.
+             * But maybe the destination node is failed or network is not available,
+             * the source node may be paused forever. So we fail the task if it
+             * takes too long.
              *
              * NOTE: There is a tricky case where the destination node may advertise
              * ownership of the slot, causing a temporary configuration conflict.
              * However, the configuration will eventually converge. In most cases,
              * the destination node becomes the winner, since it bumps its config
-             * epoch before taking over slot ownership.
-             *
-             * TODO: max pause time, new config, or default value?
-             * Also consider the time of streaming pending buffer in destination. */
-            if (server.mstime - task->stream_done_time >= ASM_PAUSE_WRITE_MAX_TIME_MS &&
-                server.mstime - task->stream_done_time >= ASM_SLOT_CONFIG_UPDATE_MAX_MS)
-            {
-                asmTaskSetFailed(task, "Slot configuration update timeout");
-            }
+             * epoch before taking over slot ownership. */
+            if (server.mstime - task->paused_time >= ASM_PAUSE_WRITE_MAX_TIME_MS)
+                asmTaskSetFailed(task, "Server paused for too long");
         }
     }
 }
@@ -2175,13 +2195,21 @@ void asmCron(void) {
                 asmTaskSetFailed(task, "RDB channel - Connection timeout");
         }
     } else if (task->operation == ASM_MIGRATE) {
-        /* Currently, we only need to check the main channel timeout when sending streams.
-         * For RDB channel connections, the timeout is handled by the socket itself
-         * during writes in slotRangesSnapshotSaveRio. */
-        if (task->state == ASM_SEND_STREAM &&
-            server.unixtime - task->main_channel_client->lastinteraction > server.repl_timeout)
-        {
-            asmTaskSetFailed(task, "Main channel - Connection timeout");
+        if (task->state == ASM_SEND_STREAM) {
+            /* Currently, we only need to check the main channel timeout when sending streams.
+             * For RDB channel connections, the timeout is handled by the socket itself
+             * during writes in slotRangesSnapshotSaveRio. */
+            if (server.unixtime - task->main_channel_client->lastinteraction > server.repl_timeout)
+                asmTaskSetFailed(task, "Main channel - Connection timeout");
+
+            /* After the destination applies the accumulated buffer, the source continues
+             * sending commands for migrating slots. The destination keeps applying them,
+             * but the gap remains above the acceptable limit, which may cause endless
+             * synchronization. A timeout check is required to handle this case.
+             * TODO: need tests */
+            if (task->dest_state == ASM_WAIT_STREAM_EOF && task->dest_accum_applied_time &&
+                server.unixtime - task->dest_accum_applied_time > ASM_SYNC_GAP_CONVERGE_MAX_TIME)
+                asmTaskSetFailed(task, "synchronization gap converge timeout");
         }
     }
 

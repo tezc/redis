@@ -958,7 +958,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         if {[string match {*stream-done*} [migration_status 0 $task_id state]]} {
             wait_for_condition 1000 20 {
                 [string match {*failed*} [migration_status 0 $task_id state]] &&
-                [string match {*Slot configuration update timeout*} [migration_status 0 $task_id last_error]]
+                [string match {*Server paused for too long*} [migration_status 0 $task_id last_error]]
             } else {
                 fail "ASM task did not fail"
             }
