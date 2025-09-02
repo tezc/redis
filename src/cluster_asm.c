@@ -2212,6 +2212,7 @@ void asmCron(void) {
              * - A configurable timeout (slot-migration-sync-buffer-drain-timeout) to avoid false positives.
              * - A dynamic timeout based on the time that the destination took to apply the
              *   slot snapshot and the accumulated buffer during slot snapshot delivery.
+             *   The destination should be able to drain the remaining sync buffer in less time than this.
              *   We multiply it by 2 to be more conservative.
              * TODO: need tests */
             if (task->dest_state == ASM_WAIT_STREAM_EOF && task->dest_accum_applied_time &&
