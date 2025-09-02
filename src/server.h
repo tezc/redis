@@ -1959,8 +1959,6 @@ struct redisServer {
     int tcpkeepalive;               /* Set SO_KEEPALIVE if non-zero. */
     int active_expire_enabled;      /* Can be disabled for testing purposes. */
     int active_expire_effort;       /* From 1 (default) to 10, active effort. */
-    int active_trim_slow_cycle_time_perc; /* % time to invest in server cron. */
-    int active_trim_fast_cycle_duration;  /* microseconds to invest in beforeSleep. */
     int allow_access_expired;       /* If > 0, allow access to logically expired keys */
     int allow_access_trimmed;       /* If > 0, allow access to logically trimmed keys */
     int active_defrag_enabled;
@@ -2258,6 +2256,8 @@ struct redisServer {
     unsigned long long cluster_link_msg_queue_limit_bytes;  /* Memory usage limit on individual link msg queue */
     int cluster_drop_packet_filter; /* Debug config that allows tactically
                                    * dropping packets of a specific type */
+    int cluster_active_trim_slow_cycle_time_perc; /* % time to invest in server cron. */
+    int cluster_active_trim_fast_cycle_duration;  /* microseconds to invest in beforeSleep. */
     /* Scripting */
     unsigned int lua_arena;         /* eval lua arena used in jemalloc. */
     mstime_t busy_reply_threshold;  /* Script / module timeout in milliseconds */

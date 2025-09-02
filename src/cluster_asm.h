@@ -49,7 +49,7 @@ int asmIsTrimPendingFor(int slot);
 void asmActiveTrimCycle(int type);
 int asmActiveTrimIsInProgress(void);
 int asmActiveTrimIsInProgressFor(int slot);
-int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv, long long *key_mem_freed);
+int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv);
 void asmActiveTrimCancelAll(void);
 
 #endif

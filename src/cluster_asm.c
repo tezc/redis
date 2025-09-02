@@ -2272,20 +2272,23 @@ int isSlotInAsmTask(int slot) {
 /* Check if the slot is in a pending trim job. It may happen if we can't trim
  * the slots immediately due to a write pause or when active trim is in progress. */
 int isSLotInTrimJob(int slot) {
-    if (!asmManager) return 0;
+    slotRange req = {slot, slot};
 
     listIter li;
     listNode *ln;
     listRewind(asmManager->pending_trim_jobs, &li);
     while ((ln = listNext(&li)) != NULL) {
-        slotRangeArray *sra = listNodeValue(ln);
-        if (slotRangeArrayContains(sra, slot))
+        slotRangeArray *slots = listNodeValue(ln);
+        if (slotRangeArrayOverlaps(slots, &req))
             return 1;
     }
 
-    if (asmActiveTrimIsInProgressFor(slot))
-        return 1;
-
+    listRewind(asmManager->active_trim_tasks, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        slotRangeArray *slots = listNodeValue(ln);
+        if (slotRangeArrayOverlaps(slots, &req))
+            return 1;
+    }
     return 0;
 }
 
@@ -2423,7 +2426,7 @@ void asmTrimInBackground(slotRangeArray *slots) {
     };
 
     moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER,
-                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_BG_TRIGGERED,
+                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_BACKGROUND,
                           &fsi);
 
     /* TODO: This is going to send invalidation message for all the keys for
@@ -2558,11 +2561,11 @@ void trimslotsCommand(client *c) {
     slotRangeArray *slots = parseSlotRangesOrReply(c, c->argc, 3);
     if (!slots) return;
 
-    if (c->flags & CLIENT_ID_AOF) {
+    if (c->flags & CLIENT_ID_AOF)
         clusterDelKeysInSlotRangeArray(slots, CLUSTER_DELKEYS_BY_COMMAND);
-    } else {
+    else
         asmTrimInBackground(slots);
-    }
+
     asmTrimSlots(slots);
 
     /* Command will not be propagated automatically since it does not modify
@@ -2645,31 +2648,6 @@ int asmIsTrimPending(void) {
             listLength(asmManager->pending_trim_jobs) != 0);
 }
 
-int asmIsTrimPendingFor(int slot) {
-    slotRange req = {slot, slot};
-
-    listIter li;
-    listNode *ln;
-    listRewind(asmManager->pending_trim_jobs, &li);
-    while ((ln = listNext(&li)) != NULL) {
-        slotRangeArray *slots = listNodeValue(ln);
-        if (slotRangeArrayOverlaps(slots, &req))
-            return 1;
-    }
-
-    listRewind(asmManager->active_trim_tasks, &li);
-    while ((ln = listNext(&li)) != NULL) {
-        slotRangeArray *slots = listNodeValue(ln);
-        if (slotRangeArrayOverlaps(slots, &req))
-            return 1;
-    }
-    return 0;
-}
-
-int asmActiveTrimIsInProgress(void) {
-    return listLength(asmManager->active_trim_tasks) != 0;
-}
-
 int asmActiveTrimIsInProgressFor(int slot) {
     slotRange req = {slot, slot};
     return asmActiveTrimOverlaps(&req);
@@ -2705,6 +2683,7 @@ void asmActiveTrimDeleteKey(redisDb *db, robj *keyobj) {
     if (static_key) decrRefCount(keyobj);
 }
 
+/* Scan callback for active trim. */
 void asmActiveTrimScanCallback(void *privdata, const dictEntry *de, dictEntry **plink) {
     UNUSED(plink);
     redisDb *db = privdata;
@@ -2716,7 +2695,6 @@ void asmActiveTrimScanCallback(void *privdata, const dictEntry *de, dictEntry **
     asmActiveTrimDeleteKey(db, keyobj);
     decrRefCount(keyobj);
     exitExecutionUnit();
-    /* Propagate the DEL command (to AOF only) */
     postExecutionUnitOperations();
 }
 
@@ -2746,14 +2724,14 @@ void asmActiveTrimCycle(int type) {
     unsigned long long prev_trimmed = asmManager->active_trim_keys_deleted;
 
     /* See activeExpireCycle for how timelimit is handled. */
-    timelimit = 1000000 * server.active_trim_slow_cycle_time_perc / server.hz / 100;
+    timelimit = 1000000 * server.cluster_active_trim_slow_cycle_time_perc / server.hz / 100;
     if (timelimit <= 0) timelimit = 1;
     if (type == ACTIVE_EXPIRE_CYCLE_FAST) {
-        if (start < last_fast_cycle + server.active_trim_fast_cycle_duration * 2 ||
-            !server.active_trim_fast_cycle_duration)
+        if (start < last_fast_cycle + server.cluster_active_trim_fast_cycle_duration * 2 ||
+            !server.cluster_active_trim_fast_cycle_duration)
             return;
         last_fast_cycle = start;
-        timelimit = server.active_trim_fast_cycle_duration; /* in microseconds. */
+        timelimit = server.cluster_active_trim_fast_cycle_duration; /* in microseconds. */
     }
 
     do {
@@ -2783,23 +2761,16 @@ void asmActiveTrimCycle(int type) {
     latencyAddSampleIfNeeded(type == ACTIVE_EXPIRE_CYCLE_FAST? "trim-cycle-fast": "trim-cycle-slow", elapsed / 1000);
 }
 
-/* Trim a specific (foreign) key if we are trimming is in progress
- *
- * key_mem_freed is an out parameter which contains the estimated
- * amount of memory freed due to the trimming (may be NULL)
- *
- * Return 1 if the key was trimmed (key is foreign and trimming is in progress) */
-int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv, long long *key_mem_freed) {
+/* Trim a specific key if trimming is in progress for its slot.
+ * Return 1 if the key was trimmed */
+int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv) {
     sds keyname = key ? key->ptr : kvobjGetKey(kv);
     if (server.allow_access_trimmed ||
         !asmIsTrimPending() ||
-        !asmIsTrimPendingFor(getKeySlot(keyname)))
+        !isSLotInTrimJob(getKeySlot(keyname)))
     {
         return 0;
     }
-
-    if (key_mem_freed)
-        *key_mem_freed = (long long) zmalloc_used_memory() - freeMemoryGetNotCountedMemory();
 
     if (key) {
         asmActiveTrimDeleteKey(db, key);
@@ -2808,9 +2779,6 @@ int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv, long long *key_m
         asmActiveTrimDeleteKey(db, tmpkey);
         decrRefCount(tmpkey);
     }
-
-    if (key_mem_freed)
-        *key_mem_freed -= (long long) zmalloc_used_memory() - freeMemoryGetNotCountedMemory();
 
     return 1;
 }

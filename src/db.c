@@ -2534,7 +2534,7 @@ int keyIsExpired(redisDb *db, sds key, kvobj *kv) {
 keyStatus expireIfNeeded(redisDb *db, robj *key, kvobj *kv, int flags) {
     serverAssert(key != NULL);
 
-    if (asmActiveTrimDelIfNeeded(db, key, kv, NULL)) return KEY_DELETED;
+    if (asmActiveTrimDelIfNeeded(db, key, kv)) return KEY_DELETED;
 
     sds keyname = key->ptr;
     if ((server.allow_access_expired) ||
