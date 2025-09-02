@@ -1950,8 +1950,9 @@ werr:
 
 /* Read error handler for sync buffer */
 static void asmReadSyncBufferErrorHandler(connection *conn) {
+    if (listLength(asmManager->tasks) == 0) return;
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
-    serverAssert(task->main_channel_conn == conn);
+    if (task->state != ASM_ACCUMULATE_BUF && task->state != ASM_STREAMING_BUF) return;
 
     if (task->state == ASM_STREAMING_BUF) {
         freeClient(connGetPrivateData(conn));
@@ -1962,8 +1963,10 @@ static void asmReadSyncBufferErrorHandler(connection *conn) {
 
 /* Read data from connection into sync buffer. */
 static void asmSyncBufferReadFromConn(connection *conn) {
+    /* The task may be canceled (move to done list) or failed during streaming buffer. */
+    if (listLength(asmManager->tasks) == 0) return;
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
-    serverAssert(task->main_channel_conn == conn);
+    if (task->state != ASM_ACCUMULATE_BUF && task->state != ASM_STREAMING_BUF) return;
 
     /* ASM_ACCUMULATE_BUF and ASM_STREAMING_BUF fail points are handled here */
     if (unlikely(asmDebugIsFailPointActive(ASM_IMPORT_MAIN_CHANNEL, task->state)))
