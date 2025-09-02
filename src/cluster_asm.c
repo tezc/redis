@@ -15,11 +15,6 @@
 #define ASM_IMPORT  (1 << 1)
 #define ASM_MIGRATE (1 << 2)
 
-#define ASM_MAX_DONE_TASKS 32 /* Maximum number of completed tasks to keep in memory. */
-#define ASM_PAUSE_WRITE_MAX_GAP_BYTES (1 * 1024 * 1024) /* 1MB, TODO: a new config */
-#define ASM_PAUSE_WRITE_MAX_TIME_MS (10 * 1000) /* 10 seconds, TODO: a new config */
-#define ASM_SYNC_GAP_CONVERGE_TIMEOUT (60 * 1000) /* 60 seconds, TODO: a new hidden config? */
-
 #define ASM_DEBUG_TRIM_DEFAULT 0
 #define ASM_DEBUG_TRIM_NONE 1
 
@@ -1746,11 +1741,11 @@ void clusterSyncSlotsCommand(client *c) {
             if (task->state == ASM_SEND_BULK_AND_STREAM || task->state == ASM_SEND_STREAM) {
                 /* Pause writes on the main channel connection if the gap is
                  * less than the desired threshold. */
-                if (task->dest_offset + ASM_PAUSE_WRITE_MAX_GAP_BYTES >= task->source_offset) {
-                    serverLog(LL_NOTICE, "The applied offset gap %lld is less than the threshold %d, "
+                if (task->dest_offset + server.asm_pause_write_max_gap_size >= task->source_offset) {
+                    serverLog(LL_NOTICE, "The applied offset gap %lld is less than the threshold %lld, "
                                          "pausing writes for slot handoff",
                                          task->source_offset - task->dest_offset,
-                                         (int)ASM_PAUSE_WRITE_MAX_GAP_BYTES);
+                                         server.asm_pause_write_max_gap_size);
                     task->state = ASM_HANDOFF_PREP;
                     clusterAsmOnEvent(task->id, ASM_EVENT_HANDOFF_PREP, task->slot_ranges);
                 }
@@ -2106,8 +2101,8 @@ void asmBeforeSleep(void) {
     if (task->operation == ASM_MIGRATE) {
         if (task->state == ASM_HANDOFF) {
             /* To avoid long pause, we fail the task if the pause takes too long. */
-            if (server.mstime - task->paused_time >= ASM_PAUSE_WRITE_MAX_TIME_MS) {
-                asmTaskSetFailed(task, "Server paused for too long");
+            if (server.mstime - task->paused_time >= server.asm_pause_write_timeout) {
+                asmTaskSetFailed(task, "Server paused timeout");
                 return;
             }
 
@@ -2158,8 +2153,8 @@ void asmBeforeSleep(void) {
              * However, the configuration will eventually converge. In most cases,
              * the destination node becomes the winner, since it bumps its config
              * epoch before taking over slot ownership. */
-            if (server.mstime - task->paused_time >= ASM_PAUSE_WRITE_MAX_TIME_MS)
-                asmTaskSetFailed(task, "Server paused for too long");
+            if (server.mstime - task->paused_time >= server.asm_pause_write_timeout)
+                asmTaskSetFailed(task, "Server paused timeout");
         }
     }
 }
@@ -2211,13 +2206,14 @@ void asmCron(void) {
              * synchronization. A timeout check is required to handle this case.
              *
              * The timeout is calculated as the maximum of two values:
-             * - A fixed timeout (ASM_SYNC_GAP_CONVERGE_TIMEOUT) to avoid false positives.
-             * - A dynamic timeout based on the time it took to apply the slot snapshot and
-             *    the accumulated buffer.
+             * - A configurable timeout (slot-migration-sync-buffer-drain-timeout) to avoid false positives.
+             * - A dynamic timeout based on the time that the destination took to apply the
+             *   slot snapshot and the accumulated buffer during slot snapshot delivery.
+             *   We multiply it by 2 to be more conservative.
              * TODO: need tests */
             if (task->dest_state == ASM_WAIT_STREAM_EOF && task->dest_accum_applied_time &&
                 server.mstime - task->dest_accum_applied_time >
-                    max(ASM_SYNC_GAP_CONVERGE_TIMEOUT,
+                    max(server.asm_sync_buffer_drain_timeout,
                         (task->dest_accum_applied_time - task->dest_slots_snapshot_time) * 2))
             {
                 asmTaskSetFailed(task, "synchronization gap converge timeout");
@@ -2226,7 +2222,7 @@ void asmCron(void) {
     }
 
     /* Trim the done tasks list if it grows too large */
-    while (listLength(asmManager->done_tasks) > ASM_MAX_DONE_TASKS) {
+    while (listLength(asmManager->done_tasks) > (unsigned long)server.asm_max_done_tasks) {
         asmTask *oldest = listNodeValue(listLast(asmManager->done_tasks));
         asmTaskFree(oldest);
         listDelNode(asmManager->done_tasks, listLast(asmManager->done_tasks));
