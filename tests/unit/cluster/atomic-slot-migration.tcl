@@ -971,7 +971,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
     test "Destination node rdb channel timeout when transferring slots snapshot" {
         # cost 10s to transfer each key
-        set task_id [setup_slot_migration_with_delay 0 1 0 100 10000000]
+        set task_id [setup_slot_migration_with_delay 0 1 0 100 2 10000000]
         R 1 config set repl-timeout 3
 
         # the destination node will fail after 3s
