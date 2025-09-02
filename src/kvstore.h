@@ -76,6 +76,7 @@ int kvstoreGetNextNonEmptyDictIndex(kvstore *kvs, int didx);
 int kvstoreNumNonEmptyDicts(kvstore *kvs);
 int kvstoreNumAllocatedDicts(kvstore *kvs);
 int kvstoreNumDicts(kvstore *kvs);
+void kvstoreMoveDict(kvstore *kvs, kvstore *dst, int didx);
 
 /* kvstore iterator specific functions */
 kvstoreIterator *kvstoreIteratorInit(kvstore *kvs);
