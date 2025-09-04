@@ -2805,7 +2805,7 @@ void asmActiveTrimEnd(int start_next_job) {
 
 /* Check if the slot range array overlaps with any trim job. */
 int asmIsAnyTrimJobOverlaps(slotRangeArray *slots) {
-    if (!server.cluster_enabled || !asmIsTrimInProgress()) return 0;
+    if (!asmIsTrimInProgress()) return 0;
     for (int i = 0; i < slots->num_ranges; i++) {
         for (int j = slots->ranges[i].start; j <= slots->ranges[i].end; j++) {
             if (isSlotInTrimJob(j)) return 1;
