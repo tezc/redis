@@ -1041,6 +1041,25 @@ void clusterCommand(client *c) {
             return;
         }
 
+        /* If the slot is being imported under old slot migration approach, we should
+         * allow to list keys from the slot as previously. If using atomic slot migration,
+         * check if the slot belongs to the current node, return empty array if not. */
+        if (getImportingSlotSource(slot) == NULL) {
+            clusterNode *myself = getMyClusterNode();
+            if (clusterNodeIsSlave(myself)) {
+                clusterNode *master = clusterNodeGetMaster(myself);
+                if (!master || !clusterNodeCoversSlot(master, slot)) {
+                    addReplyArrayLen(c, 0);
+                    return;
+                }
+            } else {
+                if (!clusterNodeCoversSlot(myself, slot)) {
+                    addReplyArrayLen(c, 0);
+                    return;
+                }
+            }
+        }
+
         unsigned int keys_in_slot = countKeysInSlot(slot);
         unsigned int numkeys = maxkeys > keys_in_slot ? keys_in_slot : maxkeys;
         addReplyArrayLen(c,numkeys);

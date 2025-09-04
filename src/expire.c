@@ -135,9 +135,14 @@ static inline int expirySamplingShouldSkipDict(dict *d, int didx) {
         return 1;
     }
 
-    /* In cluster mode, check if the slot belongs to the current node. */
-    if (server.cluster_enabled && !clusterNodeCoversSlot(getMyClusterNode(), didx))
+    /* We skip slot dicts that are not covered by the current node and are not being
+     * imported. Since previously we support active expire for slot dicts that are being
+     * imported under old migration approach. */
+    if (server.cluster_enabled && !clusterNodeCoversSlot(getMyClusterNode(), didx) &&
+        !getImportingSlotSource(didx))
+    {
         return 1;
+    }
 
     return 0;
 }

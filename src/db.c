@@ -646,8 +646,9 @@ void setKeyByLink(client *c, redisDb *db, robj *key, robj **valref, int flags, d
         signalModifiedKey(c,db,key);
 }
 
-/* In cluster mode, check whether the slot is served by the current node
- * or its master, and skip dicts that aren't.
+/* In cluster mode, check whether the slot is served by the current node or its
+ * master, and skip dicts that aren't. We don't skip slot dicts that are being
+ * imported under the old migration approach, to keep previous behavior.
  *
  * This function now is used by:
  * - dbRandomKey
@@ -659,7 +660,10 @@ static int accessKeysShouldSkipDictIndex(int didx) {
 
     clusterNode *myself = getMyClusterNode();
 
-    /* Check if this node or its master covers the slot */
+    /* If the slot is being imported under old migration approach, don't skip it */
+    if (getImportingSlotSource(didx) != NULL) return 0;
+
+    /* Check if this node or its master covers the slot, if not, skip it */
     if (clusterNodeCoversSlot(myself, didx)) return 0;
     if (clusterNodeIsSlave(myself)) {
         clusterNode *master = clusterNodeGetMaster(myself);

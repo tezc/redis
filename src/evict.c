@@ -81,10 +81,12 @@ unsigned long long estimateObjectIdleTime(robj *o) {
     }
 }
 
-/* In cluster mode, check if the slot belongs to the current node,
- * skipping dicts that don't belong to the current node. */
+/* We skip slot dicts that are not covered by the current node and are not being
+ * imported. Since previously we support eviction for slot dicts that are being
+ * imported under old migration approach. */
 static int randomEvictionShouldSkipDictIndex(int didx) {
-    return server.cluster_enabled && !clusterNodeCoversSlot(getMyClusterNode(), didx);
+    return server.cluster_enabled && !clusterNodeCoversSlot(getMyClusterNode(), didx) &&
+           !getImportingSlotSource(didx);
 }
 
 /* LRU approximation algorithm
