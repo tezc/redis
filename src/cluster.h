@@ -179,11 +179,8 @@ void slotRangeArrayFree(slotRangeArray *sra);
 int validateSlotRanges(slotRangeArray *sra, sds *err);
 slotRangeArray *parseSlotRangesOrReply(client *c, int argc, int pos);
 
-#define CLUSTER_DELKEYS_NONE        (0)
-#define CLUSTER_DELKEYS_ASYNC       (1 << 0)
-#define CLUSTER_DELKEYS_BY_COMMAND  (1 << 1)
-unsigned int clusterDelKeysInSlot(unsigned int hashslot, int flags);
-unsigned int clusterDelKeysInSlotRangeArray(slotRangeArray *sra, int flags);
+unsigned int clusterDelKeysInSlot(unsigned int hashslot, int by_command);
+unsigned int clusterDelKeysInSlotRangeArray(slotRangeArray *sra, int by_command);
 
 void clusterGenNodesSlotsInfo(int filter);
 void clusterFreeNodesSlotsInfo(clusterNode *n);

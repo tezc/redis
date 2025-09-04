@@ -18,6 +18,7 @@
 #define ASM_DEBUG_TRIM_DEFAULT 0
 #define ASM_DEBUG_TRIM_NONE 1
 #define ASM_DEBUG_TRIM_BG 2
+#define ASM_DEBUG_TRIM_ACTIVE 3
 
 typedef struct asmTask {
     sds id;                             /* Task ID */
@@ -51,6 +52,7 @@ struct asmManager {
     list *tasks;                  /* List of asmTask to be processed */
     list *done_tasks;             /* List of completed asmTask */
     list *pending_trim_jobs;      /* List of pending trim jobs (due to write pause) */
+    list *active_trim_jobs;       /* List of active trim jobs */
     size_t sync_buffer_peak;      /* Peak size of sync buffer */
     long long total_done_tasks;   /* Total number of completed tasks */
 
@@ -58,6 +60,13 @@ struct asmManager {
     int debug_failed_channel;     /* Channel where the task failed */
     int debug_failed_state;       /* State where the task failed */
     int debug_trim_method;        /* Method to trim the buffer */
+    int debug_active_trim_delay; /* Sleep before trimming each key */
+
+    /* Active trim stats */
+    unsigned long long active_trim_started;      /* Number of times active trim was started */
+    unsigned long long active_trim_cancelled;    /* Number of times active trim was cancelled */
+    unsigned long long active_trim_keys_total;   /* Total number of keys to trim in the current job */
+    unsigned long long active_trim_keys_deleted; /* Number of keys trimmed in the current job */
 };
 
 enum asmState {
@@ -121,6 +130,9 @@ static void propagateTrimSlots(slotRangeArray *slots);
 void asmTrimJobSchedule(slotRangeArray *slots);
 void asmTrimJobProcessPending(void);
 int asmTrimJobIsPending(void);
+void asmTriggerActiveTrim(slotRangeArray *slots);
+void asmActiveTrimEnd(int start_next_job);
+int asmIsAnyTrimJobOverlaps(slotRangeArray *slots);
 
 void clusterAsmInit(void) {
     asmManager = zcalloc(sizeof(*asmManager));
@@ -132,6 +144,11 @@ void clusterAsmInit(void) {
     asmManager->debug_failed_channel = 0;
     asmManager->debug_failed_state = 0;
     asmManager->debug_trim_method = ASM_DEBUG_TRIM_DEFAULT;
+    asmManager->debug_active_trim_delay = 0;
+    asmManager->active_trim_jobs = listCreate();
+    asmManager->active_trim_started = 0;
+    asmManager->active_trim_cancelled = 0;
+    listSetFreeMethod(asmManager->active_trim_jobs, (void (*)(void*))slotRangeArrayFree);
 }
 
 char *asmTaskStateToString(int state) {
@@ -223,16 +240,16 @@ const char *asmChannelToString(int channel) {
     }
 }
 
-int asmDebugSetTrimMethod(const char *method) {
+int asmDebugSetTrimMethod(const char *method, int active_trim_delay) {
     if (!asmManager) {
         serverLog(LL_WARNING, "ASM manager is not initialized");
         return C_ERR;
     }
-
     int prev = asmManager->debug_trim_method;
     if (!strcasecmp(method, "default")) asmManager->debug_trim_method = ASM_DEBUG_TRIM_DEFAULT;
     else if (!strcasecmp(method, "none")) asmManager->debug_trim_method = ASM_DEBUG_TRIM_NONE;
     else if (!strcasecmp(method, "bg")) asmManager->debug_trim_method = ASM_DEBUG_TRIM_BG;
+    else if (!strcasecmp(method, "active")) asmManager->debug_trim_method = ASM_DEBUG_TRIM_ACTIVE;
     else return C_ERR;
 
     /* If we are switching from none to default, delete all the keys in the
@@ -240,9 +257,10 @@ int asmDebugSetTrimMethod(const char *method) {
     if (prev == ASM_DEBUG_TRIM_NONE && asmManager->debug_trim_method != ASM_DEBUG_TRIM_NONE) {
         for (int i = 0; i < CLUSTER_SLOTS; i++)
             if (!clusterIsMySlot(i))
-                clusterDelKeysInSlot(i, CLUSTER_DELKEYS_ASYNC);
+                clusterDelKeysInSlot(i, 0);
     }
-    serverLog(LL_NOTICE, "ASM trim method was set: %s", method);
+    asmManager->debug_active_trim_delay = active_trim_delay;
+    serverLog(LL_NOTICE, "ASM trim method was set=%s, active_trim_delay=%d", method, active_trim_delay);
     return C_OK;
 }
 
@@ -274,10 +292,18 @@ sds asmCatInfoString(sds info) {
     return sdscatprintf(info ? info : sdsempty(),
                         "cluster_slot_migration_task_count:%d\r\n"
                         "cluster_slot_migration_total_done_tasks:%lld\r\n"
-                        "cluster_slot_migration_sync_buffer_peak:%zu\r\n",
+                        "cluster_slot_migration_sync_buffer_peak:%zu\r\n"
+                        "cluster_slot_migration_active_trim_jobs:%lu\r\n"
+                        "cluster_slot_migration_active_trim_started:%llu\r\n"
+                        "cluster_slot_migration_active_trim_cancelled:%llu\r\n"
+                        "cluster_slot_migration_active_trim_keys_deleted:%llu\r\n",
                         active_tasks,
                         asmManager->total_done_tasks,
-                        asmGetPeakSyncBufferSize());
+                        asmGetPeakSyncBufferSize(),
+                        listLength(asmManager->active_trim_jobs),
+                        asmManager->active_trim_started,
+                        asmManager->active_trim_cancelled,
+                        asmManager->active_trim_keys_deleted);
 }
 
 void asmTaskReset(asmTask *task) {
@@ -820,6 +846,23 @@ void clusterMigrationCommand(client *c) {
     }
 }
 
+/* Notify the state change to the module and the plugin. */
+void asmNotifyStateChange(asmTask *task, int state) {
+    RedisModuleSlotRangeArray *sra = (RedisModuleSlotRangeArray *) task->slot_ranges;
+
+    int module_event = -1;
+    if (state == ASM_EVENT_IMPORT_STARTED) module_event = REDISMODULE_SUBEVENT_CLUSTER_IMPORT_STARTED;
+    else if (state == ASM_EVENT_IMPORT_COMPLETED) module_event = REDISMODULE_SUBEVENT_CLUSTER_IMPORT_COMPLETED;
+    else if (state == ASM_EVENT_IMPORT_FAILED) module_event = REDISMODULE_SUBEVENT_CLUSTER_IMPORT_FAILED;
+    else if (state == ASM_EVENT_MIGRATE_STARTED) module_event = REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_STARTED;
+    else if (state == ASM_EVENT_MIGRATE_COMPLETED) module_event = REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_COMPLETED;
+    else if (state == ASM_EVENT_MIGRATE_FAILED) module_event = REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_FAILED;
+    serverAssert(module_event != -1);
+
+    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER, module_event, sra);
+    clusterAsmOnEvent(task->id, state, task->slot_ranges);
+}
+
 void asmImportSetFailed(asmTask *task) {
     serverAssert(task->operation == ASM_IMPORT);
     if (task->state == ASM_FAILED) return;
@@ -861,7 +904,7 @@ void asmImportSetFailed(asmTask *task) {
     /* Mark the task as failed and notify the cluster */
     task->state = ASM_FAILED;
     asmTrimJobSchedule(task->slot_ranges);
-    clusterAsmOnEvent(task->id, ASM_EVENT_IMPORT_FAILED, NULL);
+    asmNotifyStateChange(task, ASM_EVENT_IMPORT_FAILED);
 }
 
 void asmMigrateSetFailed(asmTask *task) {
@@ -886,7 +929,7 @@ void asmMigrateSetFailed(asmTask *task) {
 
     /* Mark the task as failed and notify the cluster */
     task->state = ASM_FAILED;
-    clusterAsmOnEvent(task->id, ASM_EVENT_MIGRATE_FAILED, NULL);
+    asmNotifyStateChange(task, ASM_EVENT_MIGRATE_FAILED);
 }
 
 void asmTaskSetFailed(asmTask *task, const char *fmt, ...) {
@@ -1467,16 +1510,22 @@ void asmStartImportTask(asmTask *task) {
     if (task->operation != ASM_IMPORT || task->state != ASM_NONE) return;
     sds slot_ranges_str = slotRangeArrayToString(task->slot_ranges);
 
+    /* Check if there is any trim job in progress for the slot ranges.
+     * We can't start the import task since the trim job will modify the data.*/
+    int trim_in_progress = asmIsAnyTrimJobOverlaps(task->slot_ranges);
+
     /* Cannot start import task since pause action is performed. Otherwise, we will
      * break the promise that no writes are performed during the pause. */
     if (isPausedActions(PAUSE_ACTION_CLIENT_ALL) ||
         isPausedActions(PAUSE_ACTION_CLIENT_WRITE) ||
-        asmTrimJobIsPending())
+        trim_in_progress)
     {
         static time_t last_log = 0;
+        const char *reason = trim_in_progress ? "trim in progress for some of the slots" :
+                                                "server paused";
         if (server.unixtime - last_log >= 5) { /* Log every 5 seconds to avoid spam */
-            serverLog(LL_NOTICE, "Can not start import task for slots: %s since server is paused",
-                                 slot_ranges_str);
+            serverLog(LL_NOTICE, "Can not start import task for slots: %s since %s",
+                                 slot_ranges_str, reason);
             last_log = server.unixtime;
         }
         sdsfree(slot_ranges_str);
@@ -1515,10 +1564,7 @@ void asmStartImportTask(asmTask *task) {
               task->source, task->dest, slot_ranges_str);
     sdsfree(slot_ranges_str);
 
-    clusterAsmOnEvent(task->id, ASM_EVENT_IMPORT_STARTED, task->slot_ranges);
-    /* TODO: async clean up slots data, and propagate to replica */
-    clusterDelKeysInSlotRangeArray(task->slot_ranges, CLUSTER_DELKEYS_ASYNC);
-
+    asmNotifyStateChange(task, ASM_EVENT_IMPORT_STARTED);
     task->start_time = server.mstime;
 
     /* TODO: tls support tests */
@@ -1647,7 +1693,7 @@ void clusterSyncSlotsCommand(client *c) {
                               task->source, task->dest, slot_ranges_str);
         sdsfree(slot_ranges_str);
 
-        clusterAsmOnEvent(task->id, ASM_EVENT_MIGRATE_STARTED, task->slot_ranges);
+        asmNotifyStateChange(task, ASM_EVENT_MIGRATE_STARTED);
 
         /* addReply*() is not suitable for replica clients in this state. */
         if (connWrite(c->conn, "+RDBCHANNELSYNCSLOTS\r\n", 22) != 22)
@@ -2342,16 +2388,27 @@ int isSlotInAsmTask(int slot) {
 }
 
 /* Check if the slot is in a pending trim job. It may happen if we can't trim
- * the slots immediately due to a write pause. */
-int isSLotInTrimJob(int slot) {
-    if (!asmManager) return 0;
+ * the slots immediately due to a write pause or when active trim is in progress. */
+int isSlotInTrimJob(int slot) {
+    slotRange req = {slot, slot};
 
+    if (!asmManager || !asmIsTrimInProgress()) return 0;
+
+    /* Check if the slot is in any pending trim job. */
     listIter li;
     listNode *ln;
     listRewind(asmManager->pending_trim_jobs, &li);
     while ((ln = listNext(&li)) != NULL) {
-        slotRangeArray *sra = listNodeValue(ln);
-        if (slotRangeArrayContains(sra, slot))
+        slotRangeArray *slots = listNodeValue(ln);
+        if (slotRangeArrayOverlaps(slots, &req))
+            return 1;
+    }
+
+    /* Check if the slot is in any active trim job. */
+    listRewind(asmManager->active_trim_jobs, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        slotRangeArray *slots = listNodeValue(ln);
+        if (slotRangeArrayOverlaps(slots, &req))
             return 1;
     }
     return 0;
@@ -2390,7 +2447,7 @@ int asmNotifyConfigUpdated(asmTask *task, sds *err) {
     }
 
     task->state = ASM_DONE;
-    clusterAsmOnEvent(task->id, event, NULL);
+    asmNotifyStateChange(task, event);
     asmTaskComplete(task);
 
     /* Trim the slots after the migrate task is done. */
@@ -2484,9 +2541,16 @@ static void propagateTrimSlots(slotRangeArray *slots) {
 }
 
 /* Trim the slots asynchronously in the BIO thread. */
-void asmTrimInBackground(slotRangeArray *slots) {
-    /* TODO: Fire module event
-     * TODO: This is going to send invalidation message for all the keys for
+void asmTriggerBackgroundTrim(slotRangeArray *slots) {
+    RedisModuleClusterTrimInfoV1 fsi = {
+            REDISMODULE_CLUSTER_TRIMINFO_VERSION, 0,
+            (RedisModuleSlotRangeArray *) slots
+    };
+
+    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_TRIM,
+                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_BACKGROUND,
+                          &fsi);
+    /* TODO: This is going to send invalidation message for all the keys for
      * the tracking clients. We need to consider how we can do that for only
      * the keys in the slots we are trimming. */
     signalFlushedDb(0, 1, slots);
@@ -2517,11 +2581,19 @@ void asmTrimInBackground(slotRangeArray *slots) {
     sdsfree(str);
 }
 
+/* Trim the slots. */
 void asmTrimSlots(slotRangeArray *slots) {
     if (asmManager->debug_trim_method == ASM_DEBUG_TRIM_NONE)
         return;
-    /* TODO: Insert logic to select trim method */
-    asmTrimInBackground(slots);
+
+    /* TODO: Is that two event enough or shall we check for zero subscribers? */
+    int activetrim = (asmManager->debug_trim_method == ASM_DEBUG_TRIM_ACTIVE) ||
+                     (asmManager->debug_trim_method == ASM_DEBUG_TRIM_DEFAULT &&
+                      moduleHasSubscribersForKeyspaceEvent(NOTIFY_GENERIC | NOTIFY_TRIMMED));
+    if (activetrim)
+        asmTriggerActiveTrim(slots);
+    else
+        asmTriggerBackgroundTrim(slots);
 }
 
 int asmTrimJobIsPending(void) {
@@ -2577,9 +2649,20 @@ void asmTrimSlotsIfNotOwned(void) {
     slotRangeArrayFree(sra);
 }
 
-/* Cancel all pending trim jobs. */
+/* Cancel all pending and active trim jobs. */
 void asmCancelTrimJobs(void) {
     if (!asmManager) return;
+
+    /* Unblock master if blocked */
+    if (server.master &&
+        server.master->flags & CLIENT_BLOCKED &&
+        server.master->flags & CLIENT_BLOCKED_DUE_TO_TRIM)
+    {
+        serverLog(LL_NOTICE, "Unblocking master client after cancelling trim jobs");
+        unblockClient(server.master, 1);
+    }
+
+    /* Cancel pending trim jobs */
     listIter li;
     listNode *ln;
     listRewind(asmManager->pending_trim_jobs, &li);
@@ -2588,17 +2671,26 @@ void asmCancelTrimJobs(void) {
         listDelNode(asmManager->pending_trim_jobs, ln);
         slotRangeArrayFree(sra);
     }
+
+    /* Cancel active trim jobs */
+    if (listLength(asmManager->active_trim_jobs) == 0)
+        return;
+
+    serverLog(LL_NOTICE, "Cancelling all active trim jobs");
+    asmManager->active_trim_cancelled += listLength(asmManager->active_trim_jobs);
+    asmActiveTrimEnd(0);
+    listEmpty(asmManager->active_trim_jobs);
 }
 
 /* It's used to trim slots after the migration is done or import is failed.
  * TRIMSLOTS RANGES <numranges> <start-slot> <end-slot> ... */
 void trimslotsCommand(client *c) {
+    long numranges = 0;
+
     if (server.cluster_enabled == 0) {
         addReplyError(c,"This instance has cluster support disabled");
         return;
     }
-
-    long numranges = 0;
 
     if (c->argc < 5) {
         addReplyErrorArity(c);
@@ -2625,7 +2717,15 @@ void trimslotsCommand(client *c) {
     slotRangeArray *slots = parseSlotRangesOrReply(c, c->argc, 3);
     if (!slots) return;
 
-    asmTrimSlots(slots);
+    if (c->id == CLIENT_ID_AOF) {
+        serverAssert(server.loading);
+        /* If we are loading the AOF or RDB, we can't trigger active trim
+         * because next command may have an update for the same key that is
+         * supposed to be trimmed. We have to trim the keys synchronously. */
+        clusterDelKeysInSlotRangeArray(slots, 1);
+    } else {
+        asmTrimSlots(slots);
+    }
 
     /* Command will not be propagated automatically since it does not modify
      * the dataset. */
@@ -2633,4 +2733,206 @@ void trimslotsCommand(client *c) {
 
     slotRangeArrayFree(slots);
     addReply(c, shared.ok);
+}
+
+/* Start the active trim job. */
+void asmActiveTrimStart(void) {
+    if (listLength(asmManager->active_trim_jobs) != 1) return;
+
+    slotRangeArray *slots = listNodeValue(listFirst(asmManager->active_trim_jobs));
+
+    asmManager->active_trim_started++;
+    asmManager->active_trim_keys_deleted = 0;
+
+    /* Count the number of keys to trim */
+    for (int i = 0; i < slots->num_ranges; i++)
+        for (int slot = slots->ranges[i].start; slot <= slots->ranges[i].end; slot++)
+            asmManager->active_trim_keys_total += kvstoreDictSize(server.db[0].keys, slot);
+
+    RedisModuleClusterTrimInfoV1 fsi = {
+            REDISMODULE_CLUSTER_TRIMINFO_VERSION, 0,
+            (RedisModuleSlotRangeArray *) slots
+    };
+
+    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_TRIM,
+                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_ACTIVE_STARTED,
+                          &fsi);
+
+    sds str = slotRangeArrayToString(slots);
+    serverLog(LL_NOTICE, "Active trim initiated for slots: %s", str);
+    sdsfree(str);
+}
+
+/* Schedule an active trim job. */
+void asmTriggerActiveTrim(slotRangeArray *slots) {
+    listAddNodeTail(asmManager->active_trim_jobs, slotRangeArrayDup(slots));
+    sds str = slotRangeArrayToString(slots);
+    serverLog(LL_NOTICE, "Active trim scheduled for slots: %s", str);
+    sdsfree(str);
+    asmActiveTrimStart();
+}
+
+/* End the active trim job. */
+void asmActiveTrimEnd(int start_next_job) {
+    slotRangeArray *slots = listNodeValue(listFirst(asmManager->active_trim_jobs));
+    sds str = slotRangeArrayToString(slots);
+
+    /* Unblock master if blocked */
+    if (server.master &&
+        server.master->flags & CLIENT_BLOCKED &&
+        server.master->flags & CLIENT_BLOCKED_DUE_TO_TRIM)
+    {
+        serverLog(LL_NOTICE, "Unblocking master client after active trim is done for slots: %s", str);
+        unblockClient(server.master, 1);
+    }
+
+    RedisModuleClusterTrimInfoV1 fsi = {
+            REDISMODULE_CLUSTER_TRIMINFO_VERSION, 0,
+            (RedisModuleSlotRangeArray *) slots
+    };
+
+    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_TRIM,
+                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_ACTIVE_ENDED,
+                          &fsi);
+
+    serverLog(LL_NOTICE, "Active trim completed for slots: %s, %llu keys trimmed.",
+              str, asmManager->active_trim_keys_deleted);
+    sdsfree(str);
+    listDelNode(asmManager->active_trim_jobs, listFirst(asmManager->active_trim_jobs));
+
+    if (start_next_job) asmActiveTrimStart();
+}
+
+/* Check if the slot range array overlaps with any trim job. */
+int asmIsAnyTrimJobOverlaps(slotRangeArray *slots) {
+    if (!server.cluster_enabled || !asmIsTrimInProgress()) return 0;
+    for (int i = 0; i < slots->num_ranges; i++) {
+        for (int j = slots->ranges[i].start; j <= slots->ranges[i].end; j++) {
+            if (isSlotInTrimJob(j)) return 1;
+        }
+    }
+    return 0;
+}
+
+/* Check if there is any trim job in progress. */
+int asmIsTrimInProgress(void) {
+    if (!server.cluster_enabled) return 0;
+    return (listLength(asmManager->active_trim_jobs) != 0 ||
+            listLength(asmManager->pending_trim_jobs) != 0);
+}
+
+/* Delete the key and notify the modules. */
+void asmActiveTrimDeleteKey(redisDb *db, robj *keyobj) {
+    if (asmManager->debug_active_trim_delay > 0)
+        debugDelay(asmManager->debug_active_trim_delay);
+
+    /* The key needs to be converted from static to heap before deleted */
+    int static_key = keyobj->refcount == OBJ_STATIC_REFCOUNT;
+    if (static_key) keyobj = createStringObject(keyobj->ptr, sdslen(keyobj->ptr));
+
+    dbDelete(db, keyobj);
+    notifyKeyspaceEvent(NOTIFY_TRIMMED, "trimmed",keyobj,db->id);
+    asmManager->active_trim_keys_deleted++;
+
+    if (static_key) decrRefCount(keyobj);
+}
+
+/* Scan callback for active trim. */
+void asmActiveTrimScanCallback(void *privdata, const dictEntry *de, dictEntry **plink) {
+    UNUSED(plink);
+    redisDb *db = privdata;
+    kvobj *kv = dictGetKV(de);
+    sds sdskey = kvobjGetKey(kv);
+    /* Delete key */
+    enterExecutionUnit(1, 0);
+    robj *keyobj = createStringObject(sdskey, sdslen(sdskey));
+    asmActiveTrimDeleteKey(db, keyobj);
+    decrRefCount(keyobj);
+    exitExecutionUnit();
+    postExecutionUnitOperations();
+}
+
+/* Skip dicts that don't belong to the current trim task. */
+int asmActiveTrimShouldSkipDict(dict *d, int didx) {
+    UNUSED(d);
+    slotRangeArray *slots = listNodeValue(listFirst(asmManager->active_trim_jobs));
+    return !slotRangeArrayContains(slots, didx);
+}
+
+/* Trim keys in the active trim job. */
+void asmActiveTrimCycle(int type) {
+    if (asmManager->debug_active_trim_delay < 0 ||
+        listLength(asmManager->active_trim_jobs) == 0 ||
+        isPausedActions(PAUSE_ACTIONS_CLIENT_WRITE_SET) ||
+        isPausedActions(PAUSE_ACTION_CLIENT_WRITE))
+    {
+        return;
+    }
+
+    /* This works in a similar way to activeExpireCycle, in the sense that
+     * we do incremental work across calls. */
+    static unsigned long cursor = 0;
+    static long long last_fast_cycle = 0; /* When last fast cycle ran. */
+    long long start = ustime(), timelimit;
+    unsigned int iterations = 0;
+    unsigned long long prev_trimmed = asmManager->active_trim_keys_deleted;
+
+    /* See activeExpireCycle for how timelimit is handled. */
+    timelimit = 1000000 * server.asm_trim_slow_cycle_time_perc / server.hz / 100;
+    if (timelimit <= 0) timelimit = 1;
+    if (type == ACTIVE_EXPIRE_CYCLE_FAST) {
+        if (start < last_fast_cycle + server.asm_trim_fast_cycle_duration * 2 ||
+            !server.asm_trim_fast_cycle_duration)
+            return;
+        last_fast_cycle = start;
+        timelimit = server.asm_trim_fast_cycle_duration; /* in microseconds. */
+    }
+
+    do {
+        cursor = kvstoreScan(server.db[0].keys, cursor, -1,
+                             asmActiveTrimScanCallback,
+                             asmActiveTrimShouldSkipDict,
+                             &server.db[0]);
+        /* Once in 16 scan iterations, 32 deletions
+         * (if we have a lot of keys in one hash bucket or rehashing),
+         * check if we reached the time limit. */
+        if (cursor && (++iterations > 16 || asmManager->active_trim_keys_deleted - prev_trimmed > 32)) {
+            if ((ustime() - start) > timelimit)
+                break;
+            iterations = 0;
+            prev_trimmed = asmManager->active_trim_keys_deleted;
+        }
+    } while (cursor);
+
+    if (cursor == 0) {
+#if defined(USE_JEMALLOC)
+        jemalloc_purge();
+#endif
+        asmActiveTrimEnd(1);
+    }
+
+    long long elapsed = ustime()-start;
+    latencyAddSampleIfNeeded(type == ACTIVE_EXPIRE_CYCLE_FAST ?
+                            "trim-cycle-fast": "trim-cycle-slow", elapsed / 1000);
+}
+
+/* Trim a specific key if trimming is pending or in progress for its slot.
+ * Return 1 if the key was trimmed */
+int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv) {
+    sds keyname = key ? key->ptr : kvobjGetKey(kv);
+    if (server.allow_access_trimmed ||
+        !asmIsTrimInProgress() ||
+        !isSlotInTrimJob(getKeySlot(keyname)))
+    {
+        return 0;
+    }
+
+    if (key) {
+        asmActiveTrimDeleteKey(db, key);
+    } else {
+        robj *tmpkey = createStringObject(keyname, sdslen(keyname));
+        asmActiveTrimDeleteKey(db, tmpkey);
+        decrRefCount(tmpkey);
+    }
+    return 1;
 }

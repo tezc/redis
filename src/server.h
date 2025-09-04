@@ -432,6 +432,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_INTERNAL (1ULL<<52) /* Internal client connection */
 #define CLIENT_ASM_MIGRATING (1ULL<<53) /* Client is migrating RDB/stream data during atomic slot migration. */
 #define CLIENT_ASM_IMPORTING (1ULL<<54) /* Client is importing RDB/stream data during atomic slot migration. */
+#define CLIENT_BLOCKED_DUE_TO_TRIM (1ULL<<55) /* Master client is blocked due to an active trim job. */
 
 /* Any flag that does not let optimize FLUSH SYNC to run it in bg as blocking client ASYNC */
 #define CLIENT_AVOID_BLOCKING_ASYNC_FLUSH (CLIENT_DENY_BLOCKING|CLIENT_MULTI|CLIENT_LUA_DEBUG|CLIENT_LUA_DEBUG_SYNC|CLIENT_MODULE)
@@ -761,6 +762,7 @@ typedef enum {
 #define NOTIFY_NEW (1<<14)        /* n, new key notification (Note: excluded from NOTIFY_ALL) */
 #define NOTIFY_OVERWRITTEN (1<<15)   /* o, key overwrite notification (Note: excluded from NOTIFY_ALL) */
 #define NOTIFY_TYPE_CHANGED (1<<16) /* c, key type changed notification (Note: excluded from NOTIFY_ALL) */
+#define NOTIFY_TRIMMED (1<<17)     /* trimmed by reshard trimming TODO: assign letter*/
 #define NOTIFY_ALL (NOTIFY_GENERIC | NOTIFY_STRING | NOTIFY_LIST | NOTIFY_SET | NOTIFY_HASH | NOTIFY_ZSET | NOTIFY_EXPIRED | NOTIFY_EVICTED | NOTIFY_STREAM | NOTIFY_MODULE) /* A flag */
 
 /* Using the following macro you can run code inside serverCron() with the
@@ -1974,6 +1976,7 @@ struct redisServer {
     int active_expire_enabled;      /* Can be disabled for testing purposes. */
     int active_expire_effort;       /* From 1 (default) to 10, active effort. */
     int allow_access_expired;       /* If > 0, allow access to logically expired keys */
+    int allow_access_trimmed;       /* If > 0, allow access to logically trimmed keys */
     int active_defrag_enabled;
     int sanitize_dump_payload;      /* Enables deep sanitization for ziplist and listpack in RDB and RESTORE. */
     int skip_checksum_validation;   /* Disable checksum validation for RDB and RESTORE payload. */
@@ -2281,6 +2284,8 @@ struct redisServer {
     unsigned long long cluster_link_msg_queue_limit_bytes;  /* Memory usage limit on individual link msg queue */
     int cluster_drop_packet_filter; /* Debug config that allows tactically
                                    * dropping packets of a specific type */
+    int asm_trim_slow_cycle_time_perc; /* % time to invest in server cron. */
+    int asm_trim_fast_cycle_duration;  /* microseconds to invest in beforeSleep. */
     int cluster_slot_stats_enabled; /* Cluster slot usage statistics tracking enabled. */
     /* Scripting */
     unsigned int lua_arena;         /* eval lua arena used in jemalloc. */
@@ -2817,6 +2822,7 @@ void moduleDefragStart(void);
 void moduleDefragEnd(void);
 void *moduleGetHandleByName(char *modulename);
 int moduleIsModuleCommand(void *module_handle, struct redisCommand *cmd);
+int moduleHasSubscribersForKeyspaceEvent(int type);
 
 /* Utils */
 long long ustime(void);
