@@ -2719,9 +2719,9 @@ void trimslotsCommand(client *c) {
 
     if (c->id == CLIENT_ID_AOF) {
         serverAssert(server.loading);
-        /* If we are loading the AOF or RDB, we can't trigger active trim
-         * because next command may have an update for the same key that is
-         * supposed to be trimmed. We have to trim the keys synchronously. */
+        /* If we are loading the AOF, we can't trigger active trim because next
+         * command may have an update for the same key that is supposed to be
+         * trimmed. We have to trim the keys synchronously. */
         clusterDelKeysInSlotRangeArray(slots, 1);
     } else {
         asmTrimSlots(slots);
