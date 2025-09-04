@@ -592,7 +592,7 @@ void asmFeedMigrationClient(robj **argv, int argc) {
         if (!sdsEncodedObject(argv[i])) {
             serverAssert(argv[i]->encoding == OBJ_ENCODING_INT);
             robj *old = argv[i];
-            argv[i] = createStringObjectFromLongLongWithSds((long long)old->ptr);
+            argv[i] = createStringObjectFromLongLongWithSds((long)old->ptr);
             decrRefCount(old);
         }
     }
