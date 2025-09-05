@@ -2831,7 +2831,7 @@ void asmActiveTrimDeleteKey(redisDb *db, robj *keyobj) {
     if (static_key) keyobj = createStringObject(keyobj->ptr, sdslen(keyobj->ptr));
 
     dbDelete(db, keyobj);
-    notifyKeyspaceEvent(NOTIFY_TRIMMED, "trimmed",keyobj,db->id);
+    notifyKeyspaceEvent(NOTIFY_TRIMMED, "trimmed", keyobj, db->id);
     asmManager->active_trim_keys_deleted++;
 
     if (static_key) decrRefCount(keyobj);
