@@ -4340,9 +4340,10 @@ int processCommand(client *c) {
         return C_OK;
     }
 
-    /* If we are a replica and there is an active trim job, we cannot process
-     * commands for the slot that is being trimmed. Otherwise, trim cycle may
-     * delete new keys by mistake. */
+    /* If this node is a replica and there is an active trim job, we cannot
+     * process commands from the master for the slot being trimmed. Otherwise,
+     * the trim cycle could mistakenly delete newly added keys. In this case,
+     * the master will be blocked until the trim job finishes. */
     if ((c->flags & CLIENT_MASTER) && is_write_command && asmIsTrimInProgress()) {
         int slot = getSlotFromCommand(c->cmd, c->argv, c->argc);
         if (isSlotInTrimJob(slot)) {
@@ -4351,8 +4352,7 @@ int processCommand(client *c) {
                                   "This replica cannot process this command right now. "
                                   "Blocking master client until trim job is done. ", slot);
             /* Block master client */
-            blockPostponeClient(c);
-            c->flags |= CLIENT_BLOCKED_DUE_TO_TRIM;
+            blockPostponeClientWithType(c, BLOCKED_POSTPONE_TRIM);
             return C_OK;
         }
     }

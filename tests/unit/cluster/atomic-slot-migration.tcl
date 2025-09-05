@@ -1342,6 +1342,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             fail "trim failed"
         }
 
+        assert_equal 1500 [CI 0 cluster_slot_migration_active_trim_keys_total]
+        assert_equal 1500 [CI 3 cluster_slot_migration_active_trim_keys_total]
+
         assert_equal 500 [R 0 dbsize]
         assert_equal 500 [R 3 dbsize]
         assert_equal 1500 [R 1 dbsize]

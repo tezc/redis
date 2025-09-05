@@ -296,6 +296,7 @@ sds asmCatInfoString(sds info) {
                         "cluster_slot_migration_active_trim_jobs:%lu\r\n"
                         "cluster_slot_migration_active_trim_started:%llu\r\n"
                         "cluster_slot_migration_active_trim_cancelled:%llu\r\n"
+                        "cluster_slot_migration_active_trim_keys_total:%llu\r\n"
                         "cluster_slot_migration_active_trim_keys_deleted:%llu\r\n",
                         active_tasks,
                         asmManager->total_done_tasks,
@@ -303,6 +304,7 @@ sds asmCatInfoString(sds info) {
                         listLength(asmManager->active_trim_jobs),
                         asmManager->active_trim_started,
                         asmManager->active_trim_cancelled,
+                        asmManager->active_trim_keys_total,
                         asmManager->active_trim_keys_deleted);
 }
 
@@ -2649,14 +2651,30 @@ void asmTrimSlotsIfNotOwned(void) {
     slotRangeArrayFree(sra);
 }
 
+/* If this node is a replica and there is an active trim job, we cannot
+ * process commands from the master for the slot being trimmed. Otherwise,
+ * the trim cycle could mistakenly delete newly added keys. In this case,
+ * the master will be blocked until the trim job finishes. */
+void asmUnblockMasterAfterTrim(void) {
+    if (server.master &&
+        server.master->flags & CLIENT_BLOCKED &&
+        server.master->bstate.btype == BLOCKED_POSTPONE_TRIM)
+    {
+        unblockClient(server.master, 1);
+        serverLog(LL_NOTICE, "Unblocking master client after active trim is done");
+    }
+}
+
 /* Cancel all pending and active trim jobs. */
 void asmCancelTrimJobs(void) {
     if (!asmManager) return;
 
     /* Unblock master if blocked */
+    asmUnblockMasterAfterTrim();
+
     if (server.master &&
         server.master->flags & CLIENT_BLOCKED &&
-        server.master->flags & CLIENT_BLOCKED_DUE_TO_TRIM)
+        server.master->bstate.btype == BLOCKED_POSTPONE_TRIM)
     {
         serverLog(LL_NOTICE, "Unblocking master client after cancelling trim jobs");
         unblockClient(server.master, 1);
@@ -2775,16 +2793,9 @@ void asmTriggerActiveTrim(slotRangeArray *slots) {
 /* End the active trim job. */
 void asmActiveTrimEnd(int start_next_job) {
     slotRangeArray *slots = listNodeValue(listFirst(asmManager->active_trim_jobs));
-    sds str = slotRangeArrayToString(slots);
 
-    /* Unblock master if blocked */
-    if (server.master &&
-        server.master->flags & CLIENT_BLOCKED &&
-        server.master->flags & CLIENT_BLOCKED_DUE_TO_TRIM)
-    {
-        serverLog(LL_NOTICE, "Unblocking master client after active trim is done for slots: %s", str);
-        unblockClient(server.master, 1);
-    }
+    /* Unblock the master if it is blocked */
+    asmUnblockMasterAfterTrim();
 
     RedisModuleClusterTrimInfoV1 fsi = {
             REDISMODULE_CLUSTER_TRIMINFO_VERSION, 0,
@@ -2795,6 +2806,7 @@ void asmActiveTrimEnd(int start_next_job) {
                           REDISMODULE_SUBEVENT_CLUSTER_TRIM_ACTIVE_ENDED,
                           &fsi);
 
+    sds str = slotRangeArrayToString(slots);
     serverLog(LL_NOTICE, "Active trim completed for slots: %s, %llu keys trimmed.",
               str, asmManager->active_trim_keys_deleted);
     sdsfree(str);
@@ -2855,6 +2867,7 @@ void asmActiveTrimScanCallback(void *privdata, const dictEntry *de, dictEntry **
 /* Skip dicts that don't belong to the current trim task. */
 int asmActiveTrimShouldSkipDict(dict *d, int didx) {
     UNUSED(d);
+    serverAssert(listLength(asmManager->active_trim_jobs) != 0);
     slotRangeArray *slots = listNodeValue(listFirst(asmManager->active_trim_jobs));
     return !slotRangeArrayContains(slots, didx);
 }
