@@ -1546,7 +1546,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # Trigger save during active trim
         R 0 save
-        # look for non-zero "keys skipped" log line
+        # Wait until the log contains a "keys skipped" message with a non-zero value
         wait_for_log_messages 0 {"*BGSAVE done, 5000 keys saved, [1-9]* keys skipped*"} 0 1000 10
 
         restart_server 0 yes no yes nosave
@@ -1593,7 +1593,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         }
 
         R 0 bgrewriteaof
-        # wait for larger than zero "keys skipped message"
+        # Wait until the log contains a "keys skipped" message with a non-zero value
         wait_for_log_messages 0 {"*aofrw done, [1-9]* keys skipped*"} 0 1000 10
 
         restart_server 0 yes no yes nosave
