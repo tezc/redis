@@ -1594,7 +1594,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         R 0 bgrewriteaof
         # Wait until the log contains a "keys skipped" message with a non-zero value
-        wait_for_log_messages 0 {"*aofrw done, [1-9]* keys skipped*"} 0 1000 10
+        wait_for_log_messages 0 {"*AOF rewrite done, [1-9]* keys saved, [1-9]* keys skipped*"} 0 1000 10
 
         restart_server 0 yes no yes nosave
         assert_equal 5000 [R 0 dbsize]

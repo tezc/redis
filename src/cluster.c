@@ -1613,7 +1613,7 @@ unsigned int clusterDelKeysInSlot(unsigned int hashslot, int by_command) {
         enterExecutionUnit(1, 0);
         sds sdskey = kvobjGetKey(dictGetKV(de));
         robj *key = createStringObject(sdskey, sdslen(sdskey));
-        dbSyncDelete(&server.db[0], key);
+        dbDelete(&server.db[0], key);
 
         signalModifiedKey(NULL, &server.db[0], key);
         if (by_command) {

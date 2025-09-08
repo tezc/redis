@@ -2672,14 +2672,6 @@ void asmCancelTrimJobs(void) {
     /* Unblock master if blocked */
     asmUnblockMasterAfterTrim();
 
-    if (server.master &&
-        server.master->flags & CLIENT_BLOCKED &&
-        server.master->bstate.btype == BLOCKED_POSTPONE_TRIM)
-    {
-        serverLog(LL_NOTICE, "Unblocking master client after cancelling trim jobs");
-        unblockClient(server.master, 1);
-    }
-
     /* Cancel pending trim jobs */
     listIter li;
     listNode *ln;
@@ -2850,29 +2842,6 @@ void asmActiveTrimDeleteKey(redisDb *db, robj *keyobj) {
     if (static_key) decrRefCount(keyobj);
 }
 
-/* Scan callback for active trim. */
-void asmActiveTrimScanCallback(void *privdata, const dictEntry *de, dictEntry **plink) {
-    UNUSED(plink);
-    redisDb *db = privdata;
-    kvobj *kv = dictGetKV(de);
-    sds sdskey = kvobjGetKey(kv);
-    /* Delete key */
-    enterExecutionUnit(1, 0);
-    robj *keyobj = createStringObject(sdskey, sdslen(sdskey));
-    asmActiveTrimDeleteKey(db, keyobj);
-    decrRefCount(keyobj);
-    exitExecutionUnit();
-    postExecutionUnitOperations();
-}
-
-/* Skip dicts that don't belong to the current trim task. */
-int asmActiveTrimShouldSkipDict(dict *d, int didx) {
-    UNUSED(d);
-    serverAssert(listLength(asmManager->active_trim_jobs) != 0);
-    slotRangeArray *slots = listNodeValue(listFirst(asmManager->active_trim_jobs));
-    return !slotRangeArrayContains(slots, didx);
-}
-
 /* Trim keys in the active trim job. */
 void asmActiveTrimCycle(int type) {
     if (asmManager->debug_active_trim_delay < 0 ||
@@ -2885,11 +2854,10 @@ void asmActiveTrimCycle(int type) {
 
     /* This works in a similar way to activeExpireCycle, in the sense that
      * we do incremental work across calls. */
-    static unsigned long cursor = 0;
+    static int current_slot = -1;
+    static char slots[CLUSTER_SLOTS] = {0};
     static long long last_fast_cycle = 0; /* When last fast cycle ran. */
     long long start = ustime(), timelimit;
-    unsigned int iterations = 0;
-    unsigned long long prev_trimmed = asmManager->active_trim_keys_deleted;
 
     /* See activeExpireCycle for how timelimit is handled. */
     timelimit = 1000000 * server.asm_trim_slow_cycle_time_perc / server.hz / 100;
@@ -2902,30 +2870,61 @@ void asmActiveTrimCycle(int type) {
         timelimit = server.asm_trim_fast_cycle_duration; /* in microseconds. */
     }
 
-    do {
-        cursor = kvstoreScan(server.db[0].keys, cursor, -1,
-                             asmActiveTrimScanCallback,
-                             asmActiveTrimShouldSkipDict,
-                             &server.db[0]);
-        /* Once in 16 scan iterations, 32 deletions
-         * (if we have a lot of keys in one hash bucket or rehashing),
-         * check if we reached the time limit. */
-        if (cursor && (++iterations > 16 || asmManager->active_trim_keys_deleted - prev_trimmed > 32)) {
-            if ((ustime() - start) > timelimit)
-                break;
-            iterations = 0;
-            prev_trimmed = asmManager->active_trim_keys_deleted;
-        }
-    } while (cursor);
+    /* Initialize the slots array if this is the first call. */
+    if (current_slot == -1) {
+        current_slot = 0;
+        memset(slots, 0, sizeof(slots));
 
-    if (cursor == 0) {
+        slotRangeArray *sra = listNodeValue(listFirst(asmManager->active_trim_jobs));
+        for (int i = 0; i < sra->num_ranges; i++) {
+            for (int j = sra->ranges[i].start; j <= sra->ranges[i].end; j++)
+                slots[j] = 1;
+        }
+    }
+
+    int time_exceeded = 0;
+    unsigned long long num_deleted = 0;
+
+    while (!time_exceeded && current_slot < CLUSTER_SLOTS) {
+        /* Skip slots that are not in the active trim job. */
+        if (!slots[current_slot]) {
+            current_slot++;
+            continue;
+        }
+
+        dictEntry *de;
+        kvstoreDictIterator *kvs_di = kvstoreGetDictSafeIterator(server.db[0].keys, current_slot);
+        while ((de = kvstoreDictIteratorNext(kvs_di)) != NULL) {
+            kvobj *kv = dictGetKV(de);
+            sds sdskey = kvobjGetKey(kv);
+
+            enterExecutionUnit(1, 0);
+            robj *keyobj = createStringObject(sdskey, sdslen(sdskey));
+            asmActiveTrimDeleteKey(&server.db[0], keyobj);
+            decrRefCount(keyobj);
+            exitExecutionUnit();
+            postExecutionUnitOperations();
+            num_deleted++;
+
+            /* Once in 32 deletions check if we reached the time limit. */
+            if (num_deleted % 32 == 0 && (ustime() - start) > timelimit) {
+                time_exceeded = 1;
+                break;
+            }
+        }
+        kvstoreReleaseDictIterator(kvs_di);
+        if (!time_exceeded) current_slot++;
+    }
+
+    if (current_slot >= CLUSTER_SLOTS) {
+        current_slot = -1;
 #if defined(USE_JEMALLOC)
         jemalloc_purge();
 #endif
         asmActiveTrimEnd(1);
     }
 
-    long long elapsed = ustime()-start;
+    long long elapsed = ustime() - start;
     latencyAddSampleIfNeeded(type == ACTIVE_EXPIRE_CYCLE_FAST ?
                             "trim-cycle-fast": "trim-cycle-slow", elapsed / 1000);
 }

@@ -2497,7 +2497,7 @@ int rewriteAppendOnlyFileRio(rio *aof) {
         }
         kvstoreIteratorRelease(kvs_it);
     }
-    serverLog(LL_NOTICE, "aofrw done, %llu keys skipped.", skipped);
+    serverLog(LL_NOTICE, "AOF rewrite done, %ld keys saved, %llu keys skipped.", key_count, skipped);
     return C_OK;
 
 werr:
