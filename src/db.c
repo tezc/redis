@@ -1139,7 +1139,7 @@ int flushCommandCommon(client *c, int type, int flags, slotRangeArray *sra) {
     if (type == FLUSH_TYPE_ALL)
         flushAllDataAndResetRDB(flags | EMPTYDB_NOFUNCTIONS);
     else
-        server.dirty += emptyData(c->db->id,flags | EMPTYDB_NOFUNCTIONS,NULL);
+        server.dirty += emptyData(c->db->id, flags | EMPTYDB_NOFUNCTIONS, NULL);
 
     /* Without the forceCommandPropagation, when DB(s) was already empty,
      * FLUSHALL\FLUSHDB will not be replicated nor put into the AOF. */
