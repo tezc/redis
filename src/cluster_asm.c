@@ -2763,9 +2763,10 @@ void asmActiveTrimStart(void) {
     asmManager->active_trim_keys_deleted = 0;
 
     /* Count the number of keys to trim */
-    for (int i = 0; i < slots->num_ranges; i++)
+    for (int i = 0; i < slots->num_ranges; i++)  {
         for (int slot = slots->ranges[i].start; slot <= slots->ranges[i].end; slot++)
             asmManager->active_trim_keys_total += kvstoreDictSize(server.db[0].keys, slot);
+    }        
 
     RedisModuleClusterTrimInfoV1 fsi = {
             REDISMODULE_CLUSTER_TRIMINFO_VERSION, 0,
