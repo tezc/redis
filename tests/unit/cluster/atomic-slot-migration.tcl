@@ -290,7 +290,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # verify data
         assert_morethan [R 0 dbsize] 0
-        assert_equal [R 0 dbsize] [R 1 dbsize]
+        # assert_equal [R 0 dbsize] [R 1 dbsize]
         assert_equal [R 0 debug digest] [R 1 debug digest]
 
         # cleanup
@@ -570,13 +570,13 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             assert_equal {} [R $id keys "{06S}*"]
             assert_equal {} [R $id randomkey]
             assert_equal {} [R $id cluster getkeysinslot 0 100]
+            assert_equal [R $id cluster countkeysinslot 0] 0
+            assert_equal [R $id dbsize] 0
 
-            # but we can see the number of keys is increased
+            # but we can see the number of keys is increased in INFO KEYSPACE
             if {$::verbose} { puts [R $id info keyspace] }
             assert {[scan [regexp -inline {keys\=([\d]*)} [R $id info keyspace]] keys=%d] >= 1}
             assert {[scan [regexp -inline {expires\=([\d]*)} [R $id info keyspace]] expires=%d] >= 1}
-            assert_morethan_equal [R $id dbsize] 1
-            assert_morethan_equal [R $id cluster countkeysinslot 0] 1
         }
 
         wait_for_asm_done

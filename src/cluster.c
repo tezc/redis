@@ -1026,6 +1026,11 @@ void clusterCommand(client *c) {
             addReplyError(c,"Invalid slot");
             return;
         }
+
+        if (!clusterCanAccessKeysInSlot(slot)) {
+            addReplyLongLong(c, 0);
+            return;
+        }
         addReplyLongLong(c,countKeysInSlot(slot));
     } else if (!strcasecmp(c->argv[1]->ptr,"getkeysinslot") && c->argc == 4) {
         /* CLUSTER GETKEYSINSLOT <slot> <count> */
@@ -1041,23 +1046,9 @@ void clusterCommand(client *c) {
             return;
         }
 
-        /* If the slot is being imported under old slot migration approach, we should
-         * allow to list keys from the slot as previously. If using atomic slot migration,
-         * check if the slot belongs to the current node, return empty array if not. */
-        if (getImportingSlotSource(slot) == NULL) {
-            clusterNode *myself = getMyClusterNode();
-            if (clusterNodeIsSlave(myself)) {
-                clusterNode *master = clusterNodeGetMaster(myself);
-                if (!master || !clusterNodeCoversSlot(master, slot)) {
-                    addReplyArrayLen(c, 0);
-                    return;
-                }
-            } else {
-                if (!clusterNodeCoversSlot(myself, slot)) {
-                    addReplyArrayLen(c, 0);
-                    return;
-                }
-            }
+        if (!clusterCanAccessKeysInSlot(slot)) {
+            addReplyArrayLen(c, 0);
+            return;
         }
 
         unsigned int keys_in_slot = countKeysInSlot(slot);
@@ -1867,6 +1858,29 @@ slotRangeArray *parseSlotRangesOrReply(client *c, int argc, int pos) {
         return NULL;
     }
     return sra;
+}
+
+/* Return 1 if the keys in the slot can be accessed, 0 otherwise. */
+int clusterCanAccessKeysInSlot(int slot) {
+    /* If not in cluster mode, all keys are accessible */
+    if (server.cluster_enabled == 0) return 1;
+
+    /* If the slot is being imported under old slot migration approach, we should
+     * allow to list keys from the slot as previously. */
+    if (getImportingSlotSource(slot)) return 1;
+
+    /* If using atomic slot migration, check if the slot belongs to the current
+     * node or its master, return 1 if so. */
+    clusterNode *myself = getMyClusterNode();
+    if (clusterNodeIsSlave(myself)) {
+        clusterNode *master = clusterNodeGetMaster(myself);
+        if (master && clusterNodeCoversSlot(master, slot))
+            return 1;
+    } else {
+        if (clusterNodeCoversSlot(myself, slot))
+            return 1;
+    }
+    return 0;
 }
 
 /* Partially flush destination DB in a cluster node, based on the slot range.

@@ -656,21 +656,7 @@ void setKeyByLink(client *c, redisDb *db, robj *key, robj **valref, int flags, d
  * - scanCommand
  */
 static int accessKeysShouldSkipDictIndex(int didx) {
-    if (!server.cluster_enabled) return 0;
-
-    clusterNode *myself = getMyClusterNode();
-
-    /* If the slot is being imported under old migration approach, don't skip it */
-    if (getImportingSlotSource(didx) != NULL) return 0;
-
-    /* Check if this node or its master covers the slot, if not, skip it */
-    if (clusterNodeCoversSlot(myself, didx)) return 0;
-    if (clusterNodeIsSlave(myself)) {
-        clusterNode *master = clusterNodeGetMaster(myself);
-        if (master && clusterNodeCoversSlot(master, didx)) return 0;
-    }
-
-    return 1;
+    return !clusterCanAccessKeysInSlot(didx);
 }
 
 /* Return a random key, in form of a Redis object.
@@ -1818,7 +1804,7 @@ void scanCommand(client *c) {
 }
 
 void dbsizeCommand(client *c) {
-    addReplyLongLong(c,kvstoreSize(c->db->keys));
+    addReplyLongLong(c,dbSize(c->db));
 }
 
 void lastsaveCommand(client *c) {
@@ -2732,7 +2718,20 @@ kvobj *dbFindExpires(redisDb *db, sds key) {
 }
 
 unsigned long long dbSize(redisDb *db) {
-    return kvstoreSize(db->keys);
+    unsigned long long total = kvstoreSize(db->keys);
+
+    /* In cluster mode, we need to subtract the number of keys in slots
+     * that are not accessible */
+    if (server.cluster_enabled) {
+        for (int i = 0; i < CLUSTER_SLOTS; i++) {
+            dict *d = kvstoreGetDict(db->keys, i);
+            if (d && !clusterCanAccessKeysInSlot(i)) {
+                total -= kvstoreDictSize(db->keys, i);
+            }
+        }
+    }
+
+    return total;
 }
 
 unsigned long long dbScan(redisDb *db, unsigned long long cursor, dictScanFunction *scan_cb, void *privdata) {
