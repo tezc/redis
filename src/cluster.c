@@ -1815,6 +1815,35 @@ int slotRangeArrayContains(slotRangeArray *sra, unsigned int slot) {
 void slotRangeArrayFree(slotRangeArray *sra) {
     zfree(sra);
 }
+/* Slot range array iterator */
+slotRangeArrayIter *slotRangeArrayGetIterator(slotRangeArray *sra) {
+    slotRangeArrayIter *it = zmalloc(sizeof(*it));
+    it->sra = sra;
+    it->range_index = 0;
+    it->cur_slot = sra->num_ranges > 0 ? sra->ranges[0].start : -1;
+    return it;
+}
+/* Returns the next slot in the array, or -1 if there are no more slots. */
+int slotRangeArrayNext(slotRangeArrayIter *it) {
+    if (it->range_index >= it->sra->num_ranges) return -1;
+
+    if (it->cur_slot < it->sra->ranges[it->range_index].end) {
+        it->cur_slot++;
+    } else {
+        it->range_index++;
+        if (it->range_index < it->sra->num_ranges)
+            it->cur_slot = it->sra->ranges[it->range_index].start;
+        else
+            it->cur_slot = -1; /* finished */
+    }
+    return it->cur_slot;
+}
+int slotRangeArrayGetCurrentSlot(slotRangeArrayIter *it) {
+    return it->cur_slot;
+}
+void slotRangeArrayIteratorFree(slotRangeArrayIter *it) {
+    zfree(it);
+}
 
 /* Parse slot ranges from the command arguments. Returns NULL on error. */
 slotRangeArray *parseSlotRangesOrReply(client *c, int argc, int pos) {

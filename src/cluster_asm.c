@@ -49,12 +49,13 @@ typedef struct asmTask {
 } asmTask;
 
 struct asmManager {
-    list *tasks;                  /* List of asmTask to be processed */
-    list *done_tasks;             /* List of completed asmTask */
-    list *pending_trim_jobs;      /* List of pending trim jobs (due to write pause) */
-    list *active_trim_jobs;       /* List of active trim jobs */
-    size_t sync_buffer_peak;      /* Peak size of sync buffer */
-    long long total_done_tasks;   /* Total number of completed tasks */
+    list *tasks;                        /* List of asmTask to be processed */
+    list *done_tasks;                   /* List of completed asmTask */
+    list *pending_trim_jobs;            /* List of pending trim jobs (due to write pause) */
+    list *active_trim_jobs;             /* List of active trim jobs */
+    slotRangeArrayIter *active_trim_it; /* Iterator of the current active trim job */
+    size_t sync_buffer_peak;            /* Peak size of sync buffer */
+    long long total_done_tasks;         /* Total number of completed tasks */
 
     /* Fail point injection for debugging */
     int debug_failed_channel;     /* Channel where the task failed */
@@ -2751,6 +2752,8 @@ void asmActiveTrimStart(void) {
 
     slotRangeArray *slots = listNodeValue(listFirst(asmManager->active_trim_jobs));
 
+    serverAssert(asmManager->active_trim_it == NULL);
+    asmManager->active_trim_it = slotRangeArrayGetIterator(slots);
     asmManager->active_trim_started++;
     asmManager->active_trim_keys_deleted = 0;
 
@@ -2786,6 +2789,11 @@ void asmTriggerActiveTrim(slotRangeArray *slots) {
 /* End the active trim job. */
 void asmActiveTrimEnd(int start_next_job) {
     slotRangeArray *slots = listNodeValue(listFirst(asmManager->active_trim_jobs));
+
+    if (asmManager->active_trim_it) {
+        slotRangeArrayIteratorFree(asmManager->active_trim_it);
+        asmManager->active_trim_it = NULL;
+    }
 
     /* Unblock the master if it is blocked */
     asmUnblockMasterAfterTrim();
@@ -2854,8 +2862,6 @@ void asmActiveTrimCycle(int type) {
 
     /* This works in a similar way to activeExpireCycle, in the sense that
      * we do incremental work across calls. */
-    static int current_slot = -1;
-    static char slots[CLUSTER_SLOTS] = {0};
     static long long last_fast_cycle = 0; /* When last fast cycle ran. */
     long long start = ustime(), timelimit;
 
@@ -2870,30 +2876,13 @@ void asmActiveTrimCycle(int type) {
         timelimit = server.asm_trim_fast_cycle_duration; /* in microseconds. */
     }
 
-    /* Initialize the slots array if this is the first call. */
-    if (current_slot == -1) {
-        current_slot = 0;
-        memset(slots, 0, sizeof(slots));
-
-        slotRangeArray *sra = listNodeValue(listFirst(asmManager->active_trim_jobs));
-        for (int i = 0; i < sra->num_ranges; i++) {
-            for (int j = sra->ranges[i].start; j <= sra->ranges[i].end; j++)
-                slots[j] = 1;
-        }
-    }
-
-    int time_exceeded = 0;
     unsigned long long num_deleted = 0;
+    int time_exceeded = 0;
+    int slot = slotRangeArrayGetCurrentSlot(asmManager->active_trim_it);
 
-    while (!time_exceeded && current_slot < CLUSTER_SLOTS) {
-        /* Skip slots that are not in the active trim job. */
-        if (!slots[current_slot]) {
-            current_slot++;
-            continue;
-        }
-
+    while (!time_exceeded && slot != -1) {
         dictEntry *de;
-        kvstoreDictIterator *kvs_di = kvstoreGetDictSafeIterator(server.db[0].keys, current_slot);
+        kvstoreDictIterator *kvs_di = kvstoreGetDictSafeIterator(server.db[0].keys, slot);
         while ((de = kvstoreDictIteratorNext(kvs_di)) != NULL) {
             kvobj *kv = dictGetKV(de);
             sds sdskey = kvobjGetKey(kv);
@@ -2913,11 +2902,10 @@ void asmActiveTrimCycle(int type) {
             }
         }
         kvstoreReleaseDictIterator(kvs_di);
-        if (!time_exceeded) current_slot++;
+        if (!time_exceeded) slot = slotRangeArrayNext(asmManager->active_trim_it);
     }
 
-    if (current_slot >= CLUSTER_SLOTS) {
-        current_slot = -1;
+    if (slot == -1) {
 #if defined(USE_JEMALLOC)
         jemalloc_purge();
 #endif

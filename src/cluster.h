@@ -168,6 +168,11 @@ typedef struct slotRangeArray {
     int num_ranges;
     slotRange ranges[];
 } slotRangeArray;
+typedef struct slotRangeArrayIter {
+    slotRangeArray *sra; /* the array we’re iterating */
+    int range_index;     /* current range index */
+    int cur_slot;        /* current slot within the range */
+} slotRangeArrayIter;
 slotRangeArray *slotRangeArrayCreate(int num_ranges);
 slotRangeArray *slotRangeArrayDup(slotRangeArray *sra);
 void slotRangeArraySet(slotRangeArray *sra, int idx, int start, int end);
@@ -176,6 +181,10 @@ int slotRangeArrayIsEqual(slotRangeArray *sra1, slotRangeArray *sra2);
 slotRangeArray *slotRangeArrayAppend(slotRangeArray *sra, int slot);
 int slotRangeArrayContains(slotRangeArray *sra, unsigned int slot);
 void slotRangeArrayFree(slotRangeArray *sra);
+slotRangeArrayIter *slotRangeArrayGetIterator(slotRangeArray *sra);
+int slotRangeArrayNext(slotRangeArrayIter *it);
+int slotRangeArrayGetCurrentSlot(slotRangeArrayIter *it);
+void slotRangeArrayIteratorFree(slotRangeArrayIter *it);
 int validateSlotRanges(slotRangeArray *sra, sds *err);
 slotRangeArray *parseSlotRangesOrReply(client *c, int argc, int pos);
 
