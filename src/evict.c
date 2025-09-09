@@ -81,12 +81,10 @@ unsigned long long estimateObjectIdleTime(robj *o) {
     }
 }
 
-/* We skip slot dicts that are not covered by the current node and are not being
- * imported. Since previously we support eviction for slot dicts that are being
- * imported under old migration approach. */
+/* During atomic slot migration, keys that are being imported are in an
+ * intermediate state. we cannot evict them and therefore skip them. */
 static int randomEvictionShouldSkipDictIndex(int didx) {
-    return server.cluster_enabled && !clusterNodeCoversSlot(getMyClusterNode(), didx) &&
-           !getImportingSlotSource(didx);
+    return !clusterCanAccessKeysInSlot(didx);
 }
 
 /* LRU approximation algorithm

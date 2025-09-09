@@ -135,6 +135,8 @@ static inline int expirySamplingShouldSkipDict(dict *d, int didx) {
         return 1;
     }
 
+    /* During atomic slot migration, keys that are being imported are in an
+     * intermediate state. we cannot expire them and therefore skip them. */
     if (!clusterCanAccessKeysInSlot(didx)) return 1;
 
     return 0;

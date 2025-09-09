@@ -646,11 +646,10 @@ void setKeyByLink(client *c, redisDb *db, robj *key, robj **valref, int flags, d
         signalModifiedKey(c,db,key);
 }
 
-/* In cluster mode, check whether the slot is served by the current node or its
- * master, and skip dicts that aren't. We don't skip slot dicts that are being
- * imported under the old migration approach, to keep previous behavior.
+/* During atomic slot migration, keys that are being imported are in an
+ * intermediate state. we cannot access them and therefore skip them.
  *
- * This function now is used by:
+ * This callback function now is used by:
  * - dbRandomKey
  * - keysCommand
  * - scanCommand
