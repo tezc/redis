@@ -2718,9 +2718,19 @@ kvobj *dbFindExpires(redisDb *db, sds key) {
 unsigned long long dbSize(redisDb *db) {
     unsigned long long total = kvstoreSize(db->keys);
 
-    /* In cluster mode, we need to subtract the number of keys in slots
-     * that are not accessible */
     if (server.cluster_enabled) {
+        /* If we are the master and there is no import or trim in progress,
+         * then we can return the total count. If not, we need to subtract
+         * the number of keys in slots that are not accessible, as below. */
+        if (clusterNodeIsMaster(getMyClusterNode()) &&
+            !asmImportInProgress() &&
+            !asmIsTrimInProgress())
+        {
+            return total;
+        }
+
+        /* Besides, we don't know the slot migration states on replicas, so we
+         * need to check each slot to see if it's accessible. */
         for (int i = 0; i < CLUSTER_SLOTS; i++) {
             dict *d = kvstoreGetDict(db->keys, i);
             if (d && !clusterCanAccessKeysInSlot(i)) {
