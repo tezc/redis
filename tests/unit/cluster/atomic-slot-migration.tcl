@@ -1112,7 +1112,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
     test "Sync buffer drain timeout" {
         # set a very small gap size, so the gap between source and destination will
-        # not be less than the threshold if we continue writing the souce.
+        # not be less than the threshold if we continue writing the source.
         R 0 config set slot-migration-pause-write-max-gap-size 0
         R 0 config set slot-migration-sync-buffer-drain-timeout 5000
 
