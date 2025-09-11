@@ -301,7 +301,6 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # verify data
         assert_morethan [R 0 dbsize] 0
-        # assert_equal [R 0 dbsize] [R 1 dbsize]
         assert_equal [R 0 debug digest] [R 1 debug digest]
 
         # cleanup
