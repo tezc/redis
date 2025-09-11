@@ -1083,7 +1083,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
     }
 
     test "Source server paused timeout" {
-        # set timeout to 0, so the task will fail immediately when checking
+        # set timeout to 0, so the task will fail immediately when checking timeout
         R 0 config set slot-migration-pause-write-timeout 0
 
         # start migration from node 0 to 1
@@ -1116,6 +1116,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 config set slot-migration-pause-write-max-gap-size 0
         R 0 config set slot-migration-sync-buffer-drain-timeout 5000
 
+        set r1_pid [S 1 process_id]
+
         # start migration from node 0 to 1
         set task_id [setup_slot_migration_with_delay 0 1 0 100]
 
@@ -1130,6 +1132,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             fail "ASM task did not enter wait-stream-eof state"
         }
 
+        pause_process $r1_pid ;# avoid the destination to apply commands
+
         # node 0 will fail since sync buffer drain timeout
         wait_for_condition 2000 10 {
             [string match {*failed*} [migration_status 0 $task_id state]] &&
@@ -1140,6 +1144,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         }
 
         stop_write_load $load_handle
+        resume_process $r1_pid
 
         # reset config
         R 0 config set slot-migration-pause-write-max-gap-size 1mb
