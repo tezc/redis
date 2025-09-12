@@ -250,7 +250,7 @@ static inline void activeSubexpiresCycle(int type) {
         currentSlot = estoreGetFirstNonEmptyBucket(db->subexpires);
 
     /* During atomic slot migration, keys that are being imported are in an
-     * intermediate state. we cannot expire them and therefore skip them. */
+     * intermediate state. We cannot expire them and therefore skip them. */
     if (!clusterCanAccessKeysInSlot(currentSlot)) {
         /* Move to next non-empty subexpires slot */
         currentSlot = estoreGetNextNonEmptyBucket(db->subexpires, currentSlot);
