@@ -9307,6 +9307,12 @@ const char *RM_ClusterCanonicalKeyNameInSlot(unsigned int slot) {
     return (slot < CLUSTER_SLOTS) ? crc16_slot_table[slot] : NULL;
 }
 
+/* Returns 1 if the slot is served by the current node, 0 otherwise. */
+int RM_ClusterIsMySlot(int slot) {
+    if (slot < 0 || slot >= CLUSTER_SLOTS) return 0;
+    return clusterCanAccessKeysInSlot(slot);
+}
+
 /* --------------------------------------------------------------------------
  * ## Modules Timers API
  *
@@ -12074,6 +12080,8 @@ void moduleFireServerEvent(uint64_t eid, int subid, void *data) {
                 selectDb(ctx.client, info->dbnum);
                 moduleInitKey(&key, &ctx, info->key, info->kv, info->mode);
                 moduledata = &ki;
+            } else if (eid == REDISMODULE_EVENT_CLUSTER) {
+                moduledata = data;
             }
 
             el->module->in_hook++;
@@ -14804,6 +14812,7 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(SetClusterFlags);
     REGISTER_API(ClusterKeySlot);
     REGISTER_API(ClusterCanonicalKeyNameInSlot);
+    REGISTER_API(ClusterIsMySlot);
     REGISTER_API(CreateDict);
     REGISTER_API(FreeDict);
     REGISTER_API(DictSize);

@@ -629,7 +629,7 @@ void asmFeedMigrationClient(robj **argv, int argc) {
     int slot = getSlotFromCommand(cmd, argv, argc);
     /* If the command does not have keys, or has crossslot keys, skip it.
      * TODO: revisit this to see if we are okay with this. */
-    if (slot == -1) return;
+    if (slot == GETSLOT_CROSSSLOT) return;
 
     /* Check if the slot belongs to the task's slot range. */
     slotRange sr = {slot, slot};
@@ -864,7 +864,12 @@ void clusterMigrationCommand(client *c) {
 
 /* Notify the state change to the module and the plugin. */
 void asmNotifyStateChange(asmTask *task, int state) {
-    RedisModuleSlotRangeArray *sra = (RedisModuleSlotRangeArray *) task->slot_ranges;
+    RedisModuleClusterMigrationInfo info = {
+            REDISMODULE_CLUSTER_MIGRATIONINFO_VERSION,
+            0,
+            task->id,
+            (RedisModuleSlotRangeArray *) task->slot_ranges
+    };
 
     int module_event = -1;
     if (state == ASM_EVENT_IMPORT_STARTED) module_event = REDISMODULE_SUBEVENT_CLUSTER_IMPORT_STARTED;
@@ -875,7 +880,7 @@ void asmNotifyStateChange(asmTask *task, int state) {
     else if (state == ASM_EVENT_MIGRATE_FAILED) module_event = REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_FAILED;
     serverAssert(module_event != -1);
 
-    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER, module_event, sra);
+    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER, module_event, &info);
     clusterAsmOnEvent(task->id, state, task->slot_ranges);
 }
 

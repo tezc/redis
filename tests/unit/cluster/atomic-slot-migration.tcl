@@ -166,6 +166,63 @@ proc setup_slot_migration_with_delay {src_node dst_node start_slot end_slot {key
     return $task_id
 }
 
+set testmodule [file normalize tests/modules/atomicslotmigration.so]
+
+start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list loadmodule $testmodule cluster-node-timeout 60000 cluster-allow-replica-migration no]] {
+    test "Test RM_ClusterIsMySlot" {
+        assert_equal 0 [R 0 asm.ismyslot -1]
+        assert_equal 0 [R 0 asm.ismyslot 20000]
+        assert_equal 1 [R 0 asm.ismyslot 0]
+        assert_equal 1 [R 0 asm.ismyslot 100]
+        assert_equal 1 [R 3 asm.ismyslot 0]
+        assert_equal 1 [R 3 asm.ismyslot 100]
+        assert_equal 1 [R 2 asm.ismyslot 16383]
+        assert_equal 0 [R 2 asm.ismyslot 16384]
+        assert_equal 1 [R 5 asm.ismyslot 16383]
+        assert_equal 0 [R 5 asm.ismyslot 16384]
+    }
+
+    test "Test RM_ClusterIsMySlot returns false for trimming slots" {
+        # Active trim will be scheduled but it won't run
+        R 0 debug asm-trim-method active -1
+        R 3 debug asm-trim-method active -1
+
+        populate_slot 500 -slot 0
+        populate_slot 500 -slot 1
+
+        # Migrate 1500 keys
+        R 1 CLUSTER MIGRATION IMPORT 0 1
+        wait_for_condition 1000 10 {
+            [CI 0 cluster_slot_migration_task_count] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_jobs] == 1 &&
+            [CI 3 cluster_slot_migration_active_trim_jobs] == 1
+        } else {
+            fail "migrate failed"
+        }
+
+        # Verify trimming keys are not served
+        assert_equal 0 [R 0 asm.ismyslot 0]
+        assert_equal 0 [R 0 asm.ismyslot 1]
+        assert_equal 0 [R 3 asm.ismyslot 0]
+        assert_equal 0 [R 3 asm.ismyslot 1]
+
+
+        # Enabled active trim and wait until it is completed.
+        R 0 debug asm-trim-method active 0
+        R 3 debug asm-trim-method active 0
+        wait_for_asm_done
+
+        # cleanup
+        R 0 debug asm-trim-method default
+        R 3 debug asm-trim-method default
+        R 0 CLUSTER MIGRATION IMPORT 0 1
+        wait_for_asm_done
+        R 0 flushall
+        R 1 flushall
+    }
+
+}
+
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {
     test "Test IMPORT input validation" {
         # Invalid slot range
