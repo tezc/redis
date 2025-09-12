@@ -274,7 +274,7 @@ void restoreCommand(client *c) {
     if (kv->type == OBJ_HASH) {
         uint64_t minExpiredField = hashTypeGetMinExpire(kv, 1);
         if (minExpiredField != EB_EXPIRE_TIME_INVALID)
-            hashTypeAddToExpires(c->db, kv, minExpiredField);
+            estoreAdd(c->db->subexpires, getKeySlot(key->ptr), kv, minExpiredField);
     }
 
     if (ttl) {
@@ -1026,6 +1026,11 @@ void clusterCommand(client *c) {
             addReplyError(c,"Invalid slot");
             return;
         }
+
+        if (!clusterCanAccessKeysInSlot(slot)) {
+            addReplyLongLong(c, 0);
+            return;
+        }
         addReplyLongLong(c,countKeysInSlot(slot));
     } else if (!strcasecmp(c->argv[1]->ptr,"getkeysinslot") && c->argc == 4) {
         /* CLUSTER GETKEYSINSLOT <slot> <count> */
@@ -1038,6 +1043,11 @@ void clusterCommand(client *c) {
             return;
         if (slot < 0 || slot >= CLUSTER_SLOTS || maxkeys < 0) {
             addReplyError(c,"Invalid slot or number of keys");
+            return;
+        }
+
+        if (!clusterCanAccessKeysInSlot(slot)) {
+            addReplyArrayLen(c, 0);
             return;
         }
 

@@ -61,7 +61,7 @@ struct asmManager {
     int debug_failed_channel;     /* Channel where the task failed */
     int debug_failed_state;       /* State where the task failed */
     int debug_trim_method;        /* Method to trim the buffer */
-    int debug_active_trim_delay; /* Sleep before trimming each key */
+    int debug_active_trim_delay;  /* Sleep before trimming each key */
 
     /* Active trim stats */
     unsigned long long active_trim_started;      /* Number of times active trim was started */
@@ -116,17 +116,19 @@ enum asmChannel {
 /* Global ASM manager */
 struct asmManager *asmManager = NULL;
 
-void asmStartImportTask(asmTask *task);
-
+/* replication.c */
 char *sendCommand(connection *conn, ...);
 char *sendCommandArgv(connection *conn, int argc, char **argv, size_t *argv_lens);
 char *receiveSynchronousResponse(connection *conn);
 ConnectionType *connTypeOfReplication(void);
-void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int skip_checksum);
 int startBgsaveForReplication(int mincapa, int req);
 void createReplicationBacklogIfNeeded(void);
-static void asmSyncBufferReadFromConn(connection *conn);
+/* cluster.c */
+void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int skip_checksum);
+/* cluster_asm.c */
+static void asmStartImportTask(asmTask *task);
 static void asmTaskCancel(asmTask *task, const char *reason);
+static void asmSyncBufferReadFromConn(connection *conn);
 static void propagateTrimSlots(slotRangeArray *slots);
 void asmTrimJobSchedule(slotRangeArray *slots);
 void asmTrimJobProcessPending(void);
@@ -368,34 +370,6 @@ size_t asmGetPeakSyncBufferSize(void) {
     return peak;
 }
 
-static inline int asmIsSlotImporting(void) {
-    if (!asmManager || listLength(asmManager->tasks) == 0) return 0;
-
-    /* Only support a single task at a time now, so only check the first task */
-    asmTask *task = listNodeValue(listFirst(asmManager->tasks));
-    /* We only check the destination side, the source side `pauseActions` will
-     * pause the write traffic (including expire/evict). */
-    if ((task->operation == ASM_IMPORT && task->state != ASM_NONE)) {
-        return 1;
-    }
-
-    return 0;
-}
-
-/* Returns 1 if the key belongs to the current node, 0 otherwise.
- * Check if there is a s lot import task in progress, and if so,
- * check if the key belongs to the current node, to avoid the
- * overhead of calculating the key's hash slot. */
-int asmKeyBelongsToCurrentNode(kvobj *kv) {
-    if (asmIsSlotImporting()) {
-        sds key = kvobjGetKey(kv);
-        int slot = keyHashSlot((char*)key, sdslen(key));
-        return clusterNodeCoversSlot(getMyClusterNode(), slot);
-    }
-    /* Not importing, all keys belong to the current node. TODO: make sure? */
-    return 1;
-}
-
 size_t asmGetImportingBufferSize(void) {
     if (!asmManager || listLength(asmManager->tasks) == 0) return 0;
 
@@ -557,36 +531,29 @@ out:
     return *err ? NULL : source;
 }
 
-/* Returns 1 if a migrate task is in progress, 0 otherwise. */
-int asmMigrateInProgress(void) {
+/* Returns 1 if a task with the specified operation is in progress, 0 otherwise. */
+static int asmTaskInProgress(int operation) {
     listIter li;
     listNode *ln;
 
-    if (!server.cluster_enabled || listLength(asmManager->tasks) == 0)
-        return 0;
+    if (!asmManager || listLength(asmManager->tasks) == 0) return 0;
 
     listRewind(asmManager->tasks, &li);
     while ((ln = listNext(&li)) != NULL) {
         asmTask *task = listNodeValue(ln);
-        if (task->operation == ASM_MIGRATE) return 1;
+        if (task->operation == operation) return 1;
     }
     return 0;
 }
 
+/* Returns 1 if a migrate task is in progress, 0 otherwise. */
+int asmMigrateInProgress(void) {
+    return asmTaskInProgress(ASM_MIGRATE);
+}
+
 /* Returns 1 if an import task is in progress, 0 otherwise. */
 int asmImportInProgress(void) {
-    listIter li;
-    listNode *ln;
-
-    if (!asmManager || listLength(asmManager->tasks) == 0)
-        return 0;
-
-    listRewind(asmManager->tasks, &li);
-    while ((ln = listNext(&li)) != NULL) {
-        asmTask *task = listNodeValue(ln);
-        if (task->operation == ASM_IMPORT) return 1;
-    }
-    return 0;
+    return asmTaskInProgress(ASM_IMPORT);
 }
 
 /* Returns 1 if the task is in a state where it can receive replication stream
@@ -1107,8 +1074,10 @@ void asmRdbChannelSyncWithSource(connection *conn) {
         /* Simulate a failure by shutting down the connection. On some operating
          * systems (e.g. Linux), the socket’s receive buffer is not flushed
          * immediately, so we issue a dummy read to drain any pending data and
-         * surface the error condition. */
-        connShutdown(conn);
+         * surface the error condition.
+         * using shutdown() instead of connShutdown() because connTLSShutdown()
+         * will free the connection directly, which is not what we want. */
+        shutdown(conn->fd, SHUT_RDWR);
         connRead(conn, buf, 1);
     }
 
@@ -1259,11 +1228,7 @@ void asmSyncWithSource(connection *conn) {
     /* Check if the fail point is active for this channel and state */
     if (unlikely(asmDebugIsFailPointActive(ASM_IMPORT_MAIN_CHANNEL, task->state))) {
         char buf[1];
-        /* Simulate a failure by shutting down the connection. On some operating
-         * systems (e.g. Linux), the socket’s receive buffer is not flushed
-         * immediately, so we issue a dummy read to drain any pending data and
-         * surface the error condition. */
-        connShutdown(conn);
+        shutdown(conn->fd, SHUT_RDWR);
         connRead(conn, buf, 1);
     }
 
@@ -1297,7 +1262,7 @@ void asmSyncWithSource(connection *conn) {
     }
 
     if (task->state == ASM_SEND_HANDSHAKE) {
-        sds node_id = sdsnewlen(getMyClusterNode()->name, CLUSTER_NAMELEN);
+        sds node_id = sdsnewlen(clusterNodeGetName(getMyClusterNode()), CLUSTER_NAMELEN);
         err = sendCommand(conn, "CLUSTER", "SYNCSLOTS", "CONF", "NODE-ID", node_id, NULL);
         sdsfree(node_id);
         if (err) goto write_error;
@@ -1416,7 +1381,7 @@ void asmSlotSnapshotAndStreamStart(struct asmTask *task) {
     if (task == NULL || task->state != ASM_WAIT_BGSAVE_START) return;
 
     if (unlikely(asmDebugIsFailPointActive(ASM_MIGRATE_RDB_CHANNEL, task->state))) {
-        connShutdown(task->rdb_channel_client->conn);
+        shutdown(task->rdb_channel_client->conn->fd, SHUT_RDWR);
         return;
     }
     task->main_channel_client->replstate = SLAVE_STATE_SEND_BULK_AND_STREAM;
@@ -1527,7 +1492,7 @@ void clusterSyncSlotsStreamEOF(client *c) {
 }
 
 /* Start the import task. */
-void asmStartImportTask(asmTask *task) {
+static void asmStartImportTask(asmTask *task) {
     if (task->operation != ASM_IMPORT || task->state != ASM_NONE) return;
     sds slot_ranges_str = slotRangeArrayToString(task->slot_ranges);
 
@@ -1588,7 +1553,6 @@ void asmStartImportTask(asmTask *task) {
     asmNotifyStateChange(task, ASM_EVENT_IMPORT_STARTED);
     task->start_time = server.mstime;
 
-    /* TODO: tls support tests */
     task->main_channel_conn = connCreate(server.el, connTypeOfReplication());
     char *ip = clusterNodeIp(task->source_node);
     int port = server.tls_replication ? clusterNodeTlsPort(task->source_node) :
@@ -1690,7 +1654,7 @@ void clusterSyncSlotsCommand(client *c) {
 
         task->slot_ranges = slot_ranges;
         task->operation = ASM_MIGRATE;
-        memcpy(task->source, getMyClusterNode()->name, CLUSTER_NAMELEN);
+        memcpy(task->source, clusterNodeGetName(getMyClusterNode()), CLUSTER_NAMELEN);
         if (c->node_id) memcpy(task->dest, c->node_id, CLUSTER_NAMELEN);
 
         task->main_channel_client = c;
@@ -1894,11 +1858,53 @@ void clusterSyncSlotsCommand(client *c) {
     }
 }
 
+/* Save a key-value pair to stream I/O using either RESTORE or AOF format. */
+static int slotSnapshotSaveKeyValuePair(rio *rdb, kvobj *o, int dbid) {
+    /* Get the expire time */
+    long long expiretime = kvobjGetExpire(o);
+
+    /* Set on stack string object for key */
+    robj key;
+    initStaticStringObject(key, kvobjGetKey(o));
+
+    /* If non-string/module object that is not too big, or module object
+     * that does not support aof_rewrite, use RESTORE to import data.
+     * Generally RDB binary format is more efficient, but it may cause
+     * block in the destination if the object is too large, so fall back
+     * to AOF format if necessary. */
+    if ((o->type != OBJ_STRING && o->type != OBJ_MODULE && getObjectLength(o) <= AOF_REWRITE_ITEMS_PER_CMD) ||
+        (o->type == OBJ_MODULE && ((moduleValue*)o->ptr)->type->aof_rewrite == NULL))
+    {
+        if (rioWriteBulkCount(rdb, '*', 5) == 0) return C_ERR;
+        if (rioWriteBulkString(rdb, "RESTORE", 7) == 0) return C_ERR;
+        if (rioWriteBulkObject(rdb, &key) == 0) return C_ERR;
+        if (rioWriteBulkLongLong(rdb, expiretime == -1 ? 0 : expiretime) == 0) return C_ERR;
+
+        /* Create the DUMP encoded representation. */
+        rio payload;
+        createDumpPayload(&payload, o, &key, dbid, 1);
+        sds buf = payload.io.buffer.ptr;
+        if (rioWriteBulkString(rdb, buf, sdslen(buf)) == 0) {
+            sdsfree(payload.io.buffer.ptr);
+            return C_ERR;
+        }
+        sdsfree(payload.io.buffer.ptr);
+
+        /* Write ABSTTL */
+        if (rioWriteBulkString(rdb, "ABSTTL", 6) == 0) return C_ERR;
+    } else {
+        /* Use AOF format to import data */
+        if (rewriteObject(rdb, &key, o, dbid, expiretime) == C_ERR) return C_ERR;
+    }
+
+    return C_OK;
+}
+
 /* Save the slot ranges snapshot to the file. It generates the DUMP encoded
  * representation of each key in the slot ranges and writes it to the file.
  *
  * Returns C_OK on success, or C_ERR on error. */
-int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
+int slotSnapshotSaveRio(int req, rio *rdb, int *error) {
     serverAssert(req & SLAVE_REQ_SLOTS_SNAPSHOT);
 
     dictEntry *de;
@@ -1954,45 +1960,9 @@ int slotRangesSnapshotSaveRio(int req, rio *rdb, int *error) {
                         send_slot_info = 1;
                     }
 
-                    /* Get the value object (of type kvobj) */
+                    /* Save a key-value pair */
                     kvobj *o = dictGetKV(de);
-
-                    /* Get the expire time */
-                    long long expiretime = kvobjGetExpire(o);
-
-                    /* Set on stack string object for key */
-                    robj key;
-                    initStaticStringObject(key, kvobjGetKey(o));
-
-                    /* If non-string/module object that is not too big, or module object
-                     * that does not support aof_rewrite, use RESTORE to import data.
-                     * Generally RDB binary format is more efficient, but it may cause
-                     * block in the destination if the object is too large, so fall back
-                     * to AOF format if necessary. */
-                    if ((o->type != OBJ_STRING && o->type != OBJ_MODULE && getObjectLength(o) <= AOF_REWRITE_ITEMS_PER_CMD) ||
-                        (o->type == OBJ_MODULE && ((moduleValue*)o->ptr)->type->aof_rewrite == NULL))
-                    {
-                        if (rioWriteBulkCount(rdb, '*', 5) == 0) goto werr;
-                        if (rioWriteBulkString(rdb, "RESTORE", 7) == 0) goto werr;
-                        if (rioWriteBulkObject(rdb, &key) == 0) goto werr;
-                        if (rioWriteBulkLongLong(rdb, expiretime == -1 ? 0 : expiretime) == 0) goto werr;
-
-                        /* Create the DUMP encoded representation. */
-                        rio payload;
-                        createDumpPayload(&payload, o, &key, i, 1);
-                        sds buf = payload.io.buffer.ptr;
-                        if (rioWriteBulkString(rdb, buf, sdslen(buf)) == 0) {
-                            sdsfree(payload.io.buffer.ptr);
-                            goto werr;
-                        }
-                        sdsfree(payload.io.buffer.ptr);
-
-                        /* Write ABSTTL */
-                        if (rioWriteBulkString(rdb, "ABSTTL", 6) == 0) goto werr;
-                    } else {
-                        /* Use AOF format to import data */
-                        if (rewriteObject(rdb, &key, o, i, expiretime) == C_ERR) goto werr;
-                    }
+                    if (slotSnapshotSaveKeyValuePair(rdb, o, db->id) == C_ERR) goto werr;
 
                     /* Delay return if required (for testing) */
                     if (unlikely(server.rdb_key_save_delay)) {
@@ -2020,8 +1990,6 @@ werr:
     return C_ERR;
 }
 
-/* ======================== ASM Sync Buffer Functions ======================== */
-
 /* Read error handler for sync buffer */
 static void asmReadSyncBufferErrorHandler(connection *conn) {
     if (listLength(asmManager->tasks) == 0) return;
@@ -2044,7 +2012,7 @@ static void asmSyncBufferReadFromConn(connection *conn) {
 
     /* ASM_ACCUMULATE_BUF and ASM_STREAMING_BUF fail points are handled here */
     if (unlikely(asmDebugIsFailPointActive(ASM_IMPORT_MAIN_CHANNEL, task->state)))
-        connShutdown(conn);
+        shutdown(conn->fd, SHUT_RDWR);
 
     replDataBuf *buf = &task->sync_buffer;
     if (task->state == ASM_STREAMING_BUF) {
@@ -2146,7 +2114,7 @@ void asmSyncBufferStreamToDb(asmTask *task) {
                              task->dest_offset);
 
         if (unlikely(asmDebugIsFailPointActive(ASM_IMPORT_MAIN_CHANNEL, task->state)))
-            connShutdown(task->main_channel_conn); /* Simulate a failure */
+            shutdown(task->main_channel_conn->fd, SHUT_RDWR); /* Simulate a failure */
 
         /* ACK offset after streaming buffer is done. */
         asmImportSendACK(task);
@@ -2162,6 +2130,46 @@ void asmImportIncrAppliedBytes(struct asmTask *task, size_t bytes) {
     serverAssert(task->operation == ASM_IMPORT);
     if (!task || task->state != ASM_WAIT_STREAM_EOF) return;
     task->dest_offset += bytes;
+}
+
+/* Send STREAM-EOF if the sync buffer stream is drained. */
+void asmSendStreamEofIfDrained(asmTask *task) {
+    client *c = task->main_channel_client;
+
+    /* The command streams for slot ranges have been drained. */
+    if (!clientHasPendingReplies(c)) {
+        serverLog(LL_NOTICE, "Slot migration command stream drained, sending STREAM-EOF to the destination");
+
+        if (unlikely(asmDebugIsFailPointActive(ASM_MIGRATE_MAIN_CHANNEL, task->state)))
+            shutdown(c->conn->fd, SHUT_RDWR);
+
+        /* Send STREAM-EOF to indicate the end of the stream. */
+        char *err = sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "STREAM-EOF", NULL);
+        if (err) {
+            asmTaskSetFailed(task, "Main channel - Failed to send STREAM-EOF: %s", err);
+            sdsfree(err);
+            return;
+        }
+
+        /* Even though the main channel client is no longer needed, we
+         * can't close it directly because the destination may still be
+         * sending ACKs over this connection. Instead, we leave it to the
+         * destination to close it. We just clear the task and client
+         * references */
+        task->main_channel_client->task = NULL;
+        task->main_channel_client = NULL;
+
+        /* There may be a delay to handle the disconnection of RDB channel,
+         * so we clear the task and client references here. */
+        if (task->rdb_channel_client != NULL) {
+            task->rdb_channel_state = ASM_DONE;
+            task->rdb_channel_client->task = NULL;
+            freeClientAsync(task->rdb_channel_client);
+            task->rdb_channel_client = NULL;
+        }
+
+        task->state = ASM_STREAM_DONE;
+    }
 }
 
 void asmBeforeSleep(void) {
@@ -2184,42 +2192,7 @@ void asmBeforeSleep(void) {
                 asmTaskSetFailed(task, "Server paused timeout");
                 return;
             }
-
-            client *c = task->main_channel_client;
-            /* The command streams for slot ranges have been drained. */
-            if (!clientHasPendingReplies(c)) {
-                serverLog(LL_NOTICE, "Slot migration command stream drained, sending STREAM-EOF to the destination");
-
-                if (unlikely(asmDebugIsFailPointActive(ASM_MIGRATE_MAIN_CHANNEL, task->state)))
-                    connShutdown(c->conn);
-
-                /* Send STREAM-EOF to indicate the end of the stream. */
-                char *err = sendCommand(c->conn, "CLUSTER", "SYNCSLOTS", "STREAM-EOF", NULL);
-                if (err) {
-                    asmTaskSetFailed(task, "Main channel - Failed to send STREAM-EOF: %s", err);
-                    sdsfree(err);
-                    return;
-                }
-
-               /* Even though the main channel client is no longer needed, we
-                * can't close it directly because the destination may still be
-                * sending ACKs over this connection. Instead, we leave it to the
-                * destination to close it. We just clear the task and client
-                * references */
-                task->main_channel_client->task = NULL;
-                task->main_channel_client = NULL;
-
-                /* There may be a delay to handle the disconnection of RDB channel,
-                 * so we clear the task and client references here. */
-                if (task->rdb_channel_client != NULL) {
-                    task->rdb_channel_state = ASM_DONE;
-                    task->rdb_channel_client->task = NULL;
-                    freeClientAsync(task->rdb_channel_client);
-                    task->rdb_channel_client = NULL;
-                }
-
-                task->state = ASM_STREAM_DONE;
-            }
+            asmSendStreamEofIfDrained(task);
         } else if (task->state == ASM_STREAM_DONE) {
             /* In state ASM_STREAM_DONE (server is still paused), we are waiting
              * for the destination node to broadcast the slot ownership change.
@@ -2275,7 +2248,7 @@ void asmCron(void) {
         if (task->state == ASM_SEND_STREAM) {
             /* Currently, we only need to check the main channel timeout when sending streams.
              * For RDB channel connections, the timeout is handled by the socket itself
-             * during writes in slotRangesSnapshotSaveRio. */
+             * during writes in slotSnapshotSaveRio. */
             if (server.unixtime - task->main_channel_client->lastinteraction > server.repl_timeout)
                 asmTaskSetFailed(task, "Main channel - Connection timeout");
 
@@ -2285,18 +2258,18 @@ void asmCron(void) {
              * synchronization. A timeout check is required to handle this case.
              *
              * The timeout is calculated as the maximum of two values:
-             * - A configurable timeout (slot-migration-sync-buffer-drain-timeout) to avoid false positives.
+             * - A configurable timeout (slot-migration-sync-buffer-drain-timeout) to
+             *   avoid false positives.
              * - A dynamic timeout based on the time that the destination took to apply the
              *   slot snapshot and the accumulated buffer during slot snapshot delivery.
-             *   The destination should be able to drain the remaining sync buffer in less time than this.
-             *   We multiply it by 2 to be more conservative.
-             * TODO: need tests */
+             *   The destination should be able to drain the remaining sync buffer in less
+             *   time than this. We multiply it by 2 to be more conservative. */
             if (task->dest_state == ASM_WAIT_STREAM_EOF && task->dest_accum_applied_time &&
                 server.mstime - task->dest_accum_applied_time >
                     max(server.asm_sync_buffer_drain_timeout,
                         (task->dest_accum_applied_time - task->dest_slots_snapshot_time) * 2))
             {
-                asmTaskSetFailed(task, "synchronization gap converge timeout");
+                asmTaskSetFailed(task, "Sync buffer drain timeout");
             }
         }
     }
@@ -2594,8 +2567,8 @@ void asmTriggerBackgroundTrim(slotRangeArray *slots) {
     }
 
     /* TODO: Do not delete all the hexpires */
-    emptyDbDataAsync(keys, expires, server.db[0].hexpires);
-    server.db[0].hexpires = ebCreate();
+    emptyDbDataAsync(keys, expires, server.db[0].subexpires);
+    server.db[0].subexpires = estoreCreate(&subexpiresBucketsType, CLUSTER_SLOT_MASK_BITS);
 
     sds str = slotRangeArrayToString(slots);
     serverLog(LL_NOTICE, "Background trim started for slots: %s", str);

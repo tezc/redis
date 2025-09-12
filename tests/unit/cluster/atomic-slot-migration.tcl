@@ -358,7 +358,6 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # verify data
         assert_morethan [R 0 dbsize] 0
-        assert_equal [R 0 dbsize] [R 1 dbsize]
         assert_equal [R 0 debug digest] [R 1 debug digest]
 
         # cleanup
@@ -596,7 +595,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 config set rdb-key-save-delay 0
     }
 
-    test "Expired key is not deleted and SCAN/KEYS/RANDOMKEY hide keys in importing slots" {
+    test "Expired key is not deleted and SCAN/KEYS/RANDOMKEY/CLUSTER GETKEYSINSLOT filter keys in importing slots" {
         set slot0_key "{06S}X"
         set slot1_key "Qi"
         set slot2_key "5L5"
@@ -630,13 +629,18 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # after 2s, at least a key should be transferred, and should not be deleted
         # due to expired, neither active nor lazy expiration (SCAN) takes effect,
-        # Besides SCAN/KEYS/RANDOMKEY command can not find them
+        # Besides SCAN/KEYS/RANDOMKEY/CLUSTER GETKEYSINSLOT command can not find them
         after 2000
         foreach id {0 3} { ;# 0 is the master, 3 is the replica
             assert_equal {0 {}} [R $id scan 0 count 10]
             assert_equal {} [R $id keys "*"]
             assert_equal {} [R $id keys "{06S}*"]
             assert_equal {} [R $id randomkey]
+            assert_equal {} [R $id cluster getkeysinslot 0 100]
+            assert_equal [R $id cluster countkeysinslot 0] 0
+            assert_equal [R $id dbsize] 0
+
+            # but we can see the number of keys is increased in INFO KEYSPACE
             if {$::verbose} { puts [R $id info keyspace] }
             assert {[scan [regexp -inline {keys\=([\d]*)} [R $id info keyspace]] keys=%d] >= 1}
             assert {[scan [regexp -inline {expires\=([\d]*)} [R $id info keyspace]] expires=%d] >= 1}
@@ -653,16 +657,19 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             assert_range [R $id ttl $slot2_key] 50 60
             assert_range [R $id httl $slot2_key FIELDS 1 "f1"] 50 60
 
-            # KEYS/SCAN/RANDOMKEY will find the keys after migration
+            # KEYS/SCAN/RANDOMKEY/CLUSTER GETKEYSINSLOT will find the keys after migration
             assert_equal [list 0 [list $slot0_key $slot1_key $slot2_key]] [R $id scan 0 count 10]
             assert_equal [list $slot0_key $slot1_key $slot2_key] [R $id keys "*"]
             assert_equal [list $slot0_key] [R $id keys "{06S}*"]
             assert_not_equal {} [R $id randomkey]
+            assert_equal [list $slot0_key] [R $id cluster getkeysinslot 0 100]
 
-            # INFO KEYSPACE will also reflect the keys
+            # INFO KEYSPACE/DBSIZE/CLUSTER COUNTKEYSINSLOT will also reflect the keys
             assert_equal 3 [scan [regexp -inline {keys\=([\d]*)} [R $id info keyspace]] keys=%d]
             assert_equal 3 [scan [regexp -inline {expires\=([\d]*)} [R $id info keyspace]] expires=%d]
             assert_equal 1 [scan [regexp -inline {subexpiry\=([\d]*)} [R $id info keyspace]] subexpiry=%d]
+            assert_equal 3 [R $id dbsize]
+            assert_equal 1 [R $id cluster countkeysinslot 0]
         }
 
         # update expire time to 10ms, after some time, the keys should be deleted due to
@@ -1138,6 +1145,77 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 cluster migration cancel id $task_id
         R 1 cluster migration cancel id $task_id
     }
+
+    test "Source server paused timeout" {
+        # set timeout to 0, so the task will fail immediately when checking timeout
+        R 0 config set slot-migration-pause-write-timeout 0
+
+        # start migration from node 0 to 1
+        set task_id [setup_slot_migration_with_delay 0 1 0 100]
+
+        # start the slot 0 write load on the node 0
+        set slot0_key [slot_key 0 mykey]
+        set load_handle [start_write_load "127.0.0.1" [get_port 0] 1000 $slot0_key]
+
+        # node 0 will fail since server paused timeout
+        wait_for_condition 2000 10 {
+            [string match {*failed*} [migration_status 0 $task_id state]] &&
+            [string match {*Server paused timeout*} \
+                [migration_status 0 $task_id last_error]]
+        } else {
+            fail "ASM task did not fail"
+        }
+
+        stop_write_load $load_handle
+
+        # reset config
+        R 0 config set slot-migration-pause-write-timeout 10000
+        R 0 cluster migration cancel id $task_id
+        R 1 cluster migration cancel id $task_id
+    }
+
+    test "Sync buffer drain timeout" {
+        # set a very small gap size, so the gap between source and destination will
+        # not be less than the threshold if we continue writing the source.
+        R 0 config set slot-migration-pause-write-max-gap-size 0
+        R 0 config set slot-migration-sync-buffer-drain-timeout 5000
+
+        set r1_pid [S 1 process_id]
+
+        # start migration from node 0 to 1
+        set task_id [setup_slot_migration_with_delay 0 1 0 100]
+
+        # start the slot 0 write load on the node 0
+        set slot0_key [slot_key 0 mykey]
+        set load_handle [start_write_load "127.0.0.1" [get_port 0] 1000 $slot0_key]
+
+        # wait for entering streaming buffer state
+        wait_for_condition 1000 10 {
+            [string match {*wait-stream-eof*} [migration_status 1 $task_id state]]
+        } else {
+            fail "ASM task did not enter wait-stream-eof state"
+        }
+
+        pause_process $r1_pid ;# avoid the destination to apply commands
+
+        # node 0 will fail since sync buffer drain timeout
+        wait_for_condition 2000 10 {
+            [string match {*failed*} [migration_status 0 $task_id state]] &&
+            [string match {*Sync buffer drain timeout*} \
+                [migration_status 0 $task_id last_error]]
+        } else {
+            fail "ASM task did not fail"
+        }
+
+        stop_write_load $load_handle
+        resume_process $r1_pid
+
+        # reset config
+        R 0 config set slot-migration-pause-write-max-gap-size 1mb
+        R 0 config set slot-migration-sync-buffer-drain-timeout 60000
+        R 0 cluster migration cancel id $task_id
+        R 1 cluster migration cancel id $task_id
+    }
 }
 
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000 cluster-allow-replica-migration no}} {
@@ -1260,27 +1338,27 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
     }
 
     test "Test bgtrim touches watched keys" {
-         R 0 debug asm-trim-method bg
+        R 0 debug asm-trim-method bg
 
-         # bgtrim should touch watched keys on migrated slots
-         set key0 [slot_key 0 key]
-         R 0 set $key0 30
-         R 0 watch $key0
-         R 1 CLUSTER MIGRATION IMPORT 0 0
-         wait_for_asm_done
-         R 0 multi
-         R 0 ping
-         assert_equal {} [R 0 exec]
+        # bgtrim should touch watched keys on migrated slots
+        set key0 [slot_key 0 key]
+        R 0 set $key0 30
+        R 0 watch $key0
+        R 1 CLUSTER MIGRATION IMPORT 0 0
+        wait_for_asm_done
+        R 0 multi
+        R 0 ping
+        assert_equal {} [R 0 exec]
 
-         # bgtrim should not touch watched keys on other slots
-         set key2 [slot_key 2 key]
-         R 0 set $key2 30
-         R 0 watch $key2
-         R 1 CLUSTER MIGRATION IMPORT 1 1
-         wait_for_asm_done
-         R 0 multi
-         R 0 ping
-         assert_equal PONG [R 0 exec]
+        # bgtrim should not touch watched keys on other slots
+        set key2 [slot_key 2 key]
+        R 0 set $key2 30
+        R 0 watch $key2
+        R 1 CLUSTER MIGRATION IMPORT 1 1
+        wait_for_asm_done
+        R 0 multi
+        R 0 ping
+        assert_equal PONG [R 0 exec]
 
         # cleanup
         wait_for_asm_done
