@@ -12082,6 +12082,8 @@ void moduleFireServerEvent(uint64_t eid, int subid, void *data) {
                 moduledata = &ki;
             } else if (eid == REDISMODULE_EVENT_CLUSTER) {
                 moduledata = data;
+            } else if (eid == REDISMODULE_EVENT_CLUSTER_TRIM) {
+                moduledata = data;
             }
 
             el->module->in_hook++;

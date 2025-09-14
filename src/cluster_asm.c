@@ -2795,7 +2795,7 @@ void asmActiveTrimEnd(int start_next_job) {
     };
 
     moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_TRIM,
-                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_ACTIVE_ENDED,
+                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_ACTIVE_COMPLETED,
                           &fsi);
 
     sds str = slotRangeArrayToString(slots);

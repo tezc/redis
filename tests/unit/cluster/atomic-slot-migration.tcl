@@ -169,17 +169,26 @@ proc setup_slot_migration_with_delay {src_node dst_node start_slot end_slot {key
 set testmodule [file normalize tests/modules/atomicslotmigration.so]
 
 start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list loadmodule $testmodule cluster-node-timeout 60000 cluster-allow-replica-migration no]] {
+    proc clear_event_log {} {
+        R 0 asm.clear_event_log
+        R 1 asm.clear_event_log
+        R 2 asm.clear_event_log
+        R 3 asm.clear_event_log
+        R 4 asm.clear_event_log
+        R 5 asm.clear_event_log
+    }
+
     test "Test RM_ClusterIsMySlot" {
-        assert_equal 0 [R 0 asm.ismyslot -1]
-        assert_equal 0 [R 0 asm.ismyslot 20000]
-        assert_equal 1 [R 0 asm.ismyslot 0]
-        assert_equal 1 [R 0 asm.ismyslot 100]
-        assert_equal 1 [R 3 asm.ismyslot 0]
-        assert_equal 1 [R 3 asm.ismyslot 100]
-        assert_equal 1 [R 2 asm.ismyslot 16383]
-        assert_equal 0 [R 2 asm.ismyslot 16384]
-        assert_equal 1 [R 5 asm.ismyslot 16383]
-        assert_equal 0 [R 5 asm.ismyslot 16384]
+        assert_equal 0 [R 0 asm.is_my_slot -1]
+        assert_equal 0 [R 0 asm.is_my_slot 20000]
+        assert_equal 1 [R 0 asm.is_my_slot 0]
+        assert_equal 1 [R 0 asm.is_my_slot 100]
+        assert_equal 1 [R 3 asm.is_my_slot 0]
+        assert_equal 1 [R 3 asm.is_my_slot 100]
+        assert_equal 1 [R 2 asm.is_my_slot 16383]
+        assert_equal 0 [R 2 asm.is_my_slot 16384]
+        assert_equal 1 [R 5 asm.is_my_slot 16383]
+        assert_equal 0 [R 5 asm.is_my_slot 16384]
     }
 
     test "Test RM_ClusterIsMySlot returns false for trimming slots" {
@@ -201,11 +210,10 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         }
 
         # Verify trimming keys are not served
-        assert_equal 0 [R 0 asm.ismyslot 0]
-        assert_equal 0 [R 0 asm.ismyslot 1]
-        assert_equal 0 [R 3 asm.ismyslot 0]
-        assert_equal 0 [R 3 asm.ismyslot 1]
-
+        assert_equal 0 [R 0 asm.is_my_slot 0]
+        assert_equal 0 [R 0 asm.is_my_slot 1]
+        assert_equal 0 [R 3 asm.is_my_slot 0]
+        assert_equal 0 [R 3 asm.is_my_slot 1]
 
         # Enabled active trim and wait until it is completed.
         R 0 debug asm-trim-method active 0
@@ -219,6 +227,97 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         wait_for_asm_done
         R 0 flushall
         R 1 flushall
+    }
+
+    foreach trim_method {"active" "bg"} {
+        test "Test cluster notifications on successful migration ($trim_method-trim)" {
+            clear_event_log
+            R 0 debug asm-trim-method $trim_method
+            R 3 debug asm-trim-method $trim_method
+
+            set key [slot_key 0 mykey]
+            R 0 set $key "value"
+            set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100 200 300]
+
+            wait_for_ofs_sync [Rn 0] [Rn 3]
+            wait_for_asm_done
+
+            assert_equal [list \
+                "sub: cluster-import-started, dbnum:0, task_id:$task_id, slots:0-100,200-300" \
+                "sub: cluster-import-completed, dbnum:0, task_id:$task_id, slots:0-100,200-300" \
+            ] [R 1 asm.get_cluster_event_log]
+
+            assert_equal [list \
+                "sub: cluster-migrate-started, dbnum:0, task_id:$task_id, slots:0-100,200-300" \
+                "sub: cluster-migrate-completed, dbnum:0, task_id:$task_id, slots:0-100,200-300" \
+            ] [R 0 asm.get_cluster_event_log]
+
+            if {$trim_method eq "active"} {
+                set trim_event_log [list \
+                    "sub: cluster-trim-active-started, dbnum:0, slots:0-100,200-300" \
+                    "keyspace: trimmed, key: $key" \
+                    "sub: cluster-trim-active-completed, dbnum:0, slots:0-100,200-300" \
+                ]
+            } else {
+                set trim_event_log [list \
+                    "sub: cluster-trim-background, dbnum:0, slots:0-100,200-300" \
+                ]
+            }
+            assert_equal $trim_event_log [R 0 asm.get_cluster_trim_event_log]
+            assert_equal $trim_event_log [R 3 asm.get_cluster_trim_event_log]
+
+            # cleanup
+            R 0 CLUSTER MIGRATION IMPORT 0 100 200 300
+            wait_for_asm_done
+            clear_event_log
+            R 0 debug asm-trim-method default
+            R 3 debug asm-trim-method default
+            R 0 flushall
+            R 1 flushall
+        }
+
+        test "Test cluster notifications on failed migration ($trim_method-trim)" {
+            clear_event_log
+            R 1 debug asm-trim-method $trim_method
+            R 4 debug asm-trim-method $trim_method
+
+            set key [slot_key 0 mykey]
+            R 0 set $key "value"
+            set task_id [setup_slot_migration_with_delay 0 1 0 100 0 2000000]
+            R 1 CLUSTER MIGRATION CANCEL ID $task_id
+
+            wait_for_asm_done
+            wait_for_ofs_sync [Rn 0] [Rn 3]
+
+            assert_equal [list \
+                "sub: cluster-import-started, dbnum:0, task_id:$task_id, slots:0-100" \
+                "sub: cluster-import-failed, dbnum:0, task_id:$task_id, slots:0-100" \
+            ] [R 1 asm.get_cluster_event_log]
+
+            assert_equal [list \
+                "sub: cluster-migrate-started, dbnum:0, task_id:$task_id, slots:0-100" \
+                "sub: cluster-migrate-failed, dbnum:0, task_id:$task_id, slots:0-100" \
+            ] [R 0 asm.get_cluster_event_log]
+
+            if {$trim_method eq "active"} {
+                set trim_event_log [list \
+                    "sub: cluster-trim-active-started, dbnum:0, slots:0-100" \
+                    "keyspace: trimmed, key: $key" \
+                    "sub: cluster-trim-active-completed, dbnum:0, slots:0-100" \
+                ]
+            } else {
+                set trim_event_log [list \
+                    "sub: cluster-trim-background, dbnum:0, slots:0-100" \
+                ]
+            }
+            assert_equal $trim_event_log [R 1 asm.get_cluster_trim_event_log]
+            assert_equal $trim_event_log [R 4 asm.get_cluster_trim_event_log]
+
+            # cleanup
+            clear_event_log
+            R 1 debug asm-trim-method default
+            R 4 debug asm-trim-method default
+        }
     }
 
 }
