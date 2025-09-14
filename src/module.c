@@ -38,6 +38,7 @@
 
 #include "server.h"
 #include "cluster.h"
+#include "cluster_asm.h"
 #include "slowlog.h"
 #include "rdb.h"
 #include "monotonic.h"
@@ -9313,6 +9314,31 @@ int RM_ClusterIsMySlot(int slot) {
     return clusterCanAccessKeysInSlot(slot);
 }
 
+int RM_ClusterReplicateOnSlotMigration(RedisModuleCtx *ctx, const char *cmdname, const char *fmt, ...) {
+    UNUSED(ctx);
+
+    struct redisCommand *cmd;
+    robj **argv = NULL;
+    int argc = 0, flags = 0, j;
+    va_list ap;
+
+    cmd = lookupCommandByCString((char*)cmdname);
+    if (!cmd) return REDISMODULE_ERR;
+
+    va_start(ap, fmt);
+    argv = moduleCreateArgvFromUserFormat(cmdname, fmt, &argc, &flags, ap);
+    va_end(ap);
+    if (argv == NULL) return REDISMODULE_ERR;
+
+    int ret = asmReplicateOnSlotMigration(argv, argc);
+
+    /* Release the argv. */
+    for (j = 0; j < argc; j++) decrRefCount(argv[j]);
+    zfree(argv);
+    server.dirty++;
+    return ret == C_OK ? REDISMODULE_OK : REDISMODULE_ERR;
+}
+
 /* --------------------------------------------------------------------------
  * ## Modules Timers API
  *
@@ -14815,6 +14841,7 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(ClusterKeySlot);
     REGISTER_API(ClusterCanonicalKeyNameInSlot);
     REGISTER_API(ClusterIsMySlot);
+    REGISTER_API(ClusterReplicateOnSlotMigration);
     REGISTER_API(CreateDict);
     REGISTER_API(FreeDict);
     REGISTER_API(DictSize);

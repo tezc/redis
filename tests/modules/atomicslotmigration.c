@@ -88,6 +88,16 @@ void clusterEventCallback(RedisModuleCtx *ctx, RedisModuleEvent e, uint64_t sub,
     REDISMODULE_NOT_USED(ctx);
 
     if (e.id == REDISMODULE_EVENT_CLUSTER) {
+        if (sub == REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_DATA) {
+            int ret;
+            ret = RedisModule_ClusterReplicateOnSlotMigration(ctx, "asm.cmd1", "");
+            RedisModule_Assert(ret == REDISMODULE_OK);
+            ret = RedisModule_ClusterReplicateOnSlotMigration(ctx, "asm.cmd2", "");
+            RedisModule_Assert(ret == REDISMODULE_OK);
+            return;
+        }
+
+
         if (numClusterEvents >= MAX_EVENTS) return;
         RedisModuleClusterMigrationInfo *info = data;
         clusterEventLog[numClusterEvents++] = RedisModuleClusterMigrationInfoToString(info, sub);
@@ -168,6 +178,45 @@ int getClusterTrimEventLog(RedisModuleCtx *ctx, RedisModuleString **argv, int ar
     return REDISMODULE_OK;
 }
 
+int val1;
+int val2;
+
+int cmd1(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(ctx);
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    val1++;
+    return REDISMODULE_OK;
+}
+
+int cmd2(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(ctx);
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    val2++;
+    return REDISMODULE_OK;
+}
+
+int read_cmd1(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(ctx);
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModule_ReplyWithLongLong(ctx, val1);
+    return REDISMODULE_OK;
+}
+
+int read_cmd2(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(ctx);
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModule_ReplyWithLongLong(ctx, val2);
+    return REDISMODULE_OK;
+}
+
 int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     REDISMODULE_NOT_USED(argv);
     REDISMODULE_NOT_USED(argc);
@@ -185,6 +234,21 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
         return REDISMODULE_ERR;
 
     if (RedisModule_CreateCommand(ctx, "asm.get_cluster_trim_event_log", getClusterTrimEventLog, "", 0, 0, 0) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx, "asm.cmd1", cmd1, "write", 0, 0, 0) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx, "asm.cmd2", cmd2, "write", 0, 0, 0) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx, "asm.read_cmd1", read_cmd1, "", 0, 0, 0) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx, "asm.read_cmd2", read_cmd2, "", 0, 0, 0) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx, "asm.keyless_write_cmd2", getClusterTrimEventLog, "write", 0, 0, 0) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
 
     if (RedisModule_SubscribeToServerEvent(ctx, RedisModuleEvent_Cluster, clusterEventCallback) == REDISMODULE_ERR)

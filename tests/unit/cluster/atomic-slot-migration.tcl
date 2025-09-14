@@ -209,6 +209,11 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
             fail "migrate failed"
         }
 
+        puts "ozan: [R 0 asm.read_cmd1]"
+        puts "ozan: [R 0 asm.read_cmd2]"
+        puts "ozan: [R 1 asm.read_cmd1]"
+        puts "ozan: [R 1 asm.read_cmd2]"
+
         # Verify trimming keys are not served
         assert_equal 0 [R 0 asm.is_my_slot 0]
         assert_equal 0 [R 0 asm.is_my_slot 1]
@@ -227,6 +232,8 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         wait_for_asm_done
         R 0 flushall
         R 1 flushall
+
+
     }
 
     foreach trim_method {"active" "bg"} {
