@@ -169,7 +169,8 @@ proc setup_slot_migration_with_delay {src_node dst_node start_slot end_slot {key
 set testmodule [file normalize tests/modules/atomicslotmigration.so]
 
 start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list loadmodule $testmodule cluster-node-timeout 60000 cluster-allow-replica-migration no]] {
-    proc clear_event_log {} {
+    # Helper function to clear module internal event logs
+    proc clear_module_event_log {} {
         R 0 asm.clear_event_log
         R 1 asm.clear_event_log
         R 2 asm.clear_event_log
@@ -178,29 +179,42 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         R 5 asm.clear_event_log
     }
 
-    test "Test RM_ClusterIsMySlot" {
-        assert_equal 0 [R 0 asm.is_my_slot -1]
-        assert_equal 0 [R 0 asm.is_my_slot 20000]
-        assert_equal 1 [R 0 asm.is_my_slot 0]
-        assert_equal 1 [R 0 asm.is_my_slot 100]
-        assert_equal 1 [R 3 asm.is_my_slot 0]
-        assert_equal 1 [R 3 asm.is_my_slot 100]
-        assert_equal 1 [R 2 asm.is_my_slot 16383]
-        assert_equal 0 [R 2 asm.is_my_slot 16384]
-        assert_equal 1 [R 5 asm.is_my_slot 16383]
-        assert_equal 0 [R 5 asm.is_my_slot 16384]
+    test "Test sanity" {
+        R 0 asm.sanity
+        R 3 asm.sanity
     }
 
-    test "Test RM_ClusterIsMySlot returns false for trimming slots" {
+    test "Test RM_ClusterSlotIsLocal" {
+        # Test invalid slots
+        assert_equal 0 [R 0 asm.cluster_is_slot_local -1]
+        assert_equal 0 [R 0 asm.cluster_is_slot_local 20000]
+        assert_equal 0 [R 2 asm.cluster_is_slot_local 16384]
+        assert_equal 0 [R 5 asm.cluster_is_slot_local 16384]
+
+        # Test on a master-replica pair
+        assert_equal 1 [R 0 asm.cluster_is_slot_local 0]
+        assert_equal 1 [R 0 asm.cluster_is_slot_local 100]
+        assert_equal 1 [R 3 asm.cluster_is_slot_local 0]
+        assert_equal 1 [R 3 asm.cluster_is_slot_local 100]
+
+        # Test on a master-replica pair
+        assert_equal 1 [R 2 asm.cluster_is_slot_local 16383]
+        assert_equal 1 [R 5 asm.cluster_is_slot_local 16383]
+    }
+
+    test "Test RM_ClusterSlotIsLocal returns false for unowned slots" {
         # Active trim will be scheduled but it won't run
         R 0 debug asm-trim-method active -1
         R 3 debug asm-trim-method active -1
 
-        populate_slot 500 -slot 0
-        populate_slot 500 -slot 1
+        setup_slot_migration_with_delay 0 1 0 100 3 1000000
 
-        # Migrate 1500 keys
-        R 1 CLUSTER MIGRATION IMPORT 0 1
+        # Verify importing slots are not local
+        assert_equal 0 [R 1 asm.cluster_is_slot_local 0]
+        assert_equal 0 [R 1 asm.cluster_is_slot_local 100]
+        assert_equal 0 [R 4 asm.cluster_is_slot_local 0]
+        assert_equal 0 [R 4 asm.cluster_is_slot_local 100]
+
         wait_for_condition 1000 10 {
             [CI 0 cluster_slot_migration_task_count] == 0 &&
             [CI 0 cluster_slot_migration_active_trim_jobs] == 1 &&
@@ -209,16 +223,11 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
             fail "migrate failed"
         }
 
-        puts "ozan: [R 0 asm.read_cmd1]"
-        puts "ozan: [R 0 asm.read_cmd2]"
-        puts "ozan: [R 1 asm.read_cmd1]"
-        puts "ozan: [R 1 asm.read_cmd2]"
-
-        # Verify trimming keys are not served
-        assert_equal 0 [R 0 asm.is_my_slot 0]
-        assert_equal 0 [R 0 asm.is_my_slot 1]
-        assert_equal 0 [R 3 asm.is_my_slot 0]
-        assert_equal 0 [R 3 asm.is_my_slot 1]
+        # Verify slots that are being trimmed are not local
+        assert_equal 0 [R 0 asm.cluster_is_slot_local 0]
+        assert_equal 0 [R 0 asm.cluster_is_slot_local 100]
+        assert_equal 0 [R 3 asm.cluster_is_slot_local 0]
+        assert_equal 0 [R 3 asm.cluster_is_slot_local 100]
 
         # Enabled active trim and wait until it is completed.
         R 0 debug asm-trim-method active 0
@@ -228,17 +237,15 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         # cleanup
         R 0 debug asm-trim-method default
         R 3 debug asm-trim-method default
-        R 0 CLUSTER MIGRATION IMPORT 0 1
+        R 0 CLUSTER MIGRATION IMPORT 0 100
         wait_for_asm_done
         R 0 flushall
         R 1 flushall
-
-
     }
 
     foreach trim_method {"active" "bg"} {
         test "Test cluster notifications on successful migration ($trim_method-trim)" {
-            clear_event_log
+            clear_module_event_log
             R 0 debug asm-trim-method $trim_method
             R 3 debug asm-trim-method $trim_method
 
@@ -261,9 +268,9 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
 
             if {$trim_method eq "active"} {
                 set trim_event_log [list \
-                    "sub: cluster-trim-active-started, dbnum:0, slots:0-100,200-300" \
+                    "sub: cluster-trim-started, dbnum:0, slots:0-100,200-300" \
                     "keyspace: trimmed, key: $key" \
-                    "sub: cluster-trim-active-completed, dbnum:0, slots:0-100,200-300" \
+                    "sub: cluster-trim-completed, dbnum:0, slots:0-100,200-300" \
                 ]
             } else {
                 set trim_event_log [list \
@@ -276,7 +283,7 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
             # cleanup
             R 0 CLUSTER MIGRATION IMPORT 0 100 200 300
             wait_for_asm_done
-            clear_event_log
+            clear_module_event_log
             R 0 debug asm-trim-method default
             R 3 debug asm-trim-method default
             R 0 flushall
@@ -284,7 +291,7 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         }
 
         test "Test cluster notifications on failed migration ($trim_method-trim)" {
-            clear_event_log
+            clear_module_event_log
             R 1 debug asm-trim-method $trim_method
             R 4 debug asm-trim-method $trim_method
 
@@ -308,9 +315,9 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
 
             if {$trim_method eq "active"} {
                 set trim_event_log [list \
-                    "sub: cluster-trim-active-started, dbnum:0, slots:0-100" \
+                    "sub: cluster-trim-started, dbnum:0, slots:0-100" \
                     "keyspace: trimmed, key: $key" \
-                    "sub: cluster-trim-active-completed, dbnum:0, slots:0-100" \
+                    "sub: cluster-trim-completed, dbnum:0, slots:0-100" \
                 ]
             } else {
                 set trim_event_log [list \
@@ -321,12 +328,41 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
             assert_equal $trim_event_log [R 4 asm.get_cluster_trim_event_log]
 
             # cleanup
-            clear_event_log
+            clear_module_event_log
             R 1 debug asm-trim-method default
             R 4 debug asm-trim-method default
+            wait_for_asm_done
         }
     }
 
+    test "Test module replicates commands on slot migrationxx" {
+        R 0 flushall
+        R 1 flushall
+
+        assert_equal 0 [R 1 asm.read_keyless_cmd1]
+        assert_equal 0 [R 4 asm.read_keyless_cmd1]
+
+        set keyname [slot_key 0 modulekey]
+        R 0 asm.replicate_module_command 1 $keyname "value"
+
+        setup_slot_migration_with_delay 0 1 0 100
+        wait_for_asm_done
+        wait_for_ofs_sync [Rn 1] [Rn 4]
+
+        assert_equal 1 [R 1 asm.read_keyless_cmd1]
+        assert_equal value [R 1 get $keyname]
+
+        R 4 readonly
+        assert_equal 1 [R 4 asm.read_keyless_cmd1]
+        assert_equal value [R 4 get $keyname]
+
+        # cleanup
+        R 0 asm.replicate_module_command 0 "" ""
+        R 0 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_asm_done
+        R 0 flushall
+        R 1 flushall
+    }
 }
 
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {

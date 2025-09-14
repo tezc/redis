@@ -596,7 +596,7 @@ void asmFeedMigrationClient(robj **argv, int argc) {
         }
     }
 
-    int slot = getSlotFromCommand(cmd, argv, argc);
+    int slot = getSlotFromCommand(cmd, argv, argc, 0);
     /* If the command does not have keys, or has crossslot keys, skip it.
      * TODO: revisit this to see if we are okay with this. */
     if (slot == GETSLOT_CROSSSLOT) return;
@@ -1913,16 +1913,15 @@ static int deliverModuleData(asmTask *task, rio *rdb) {
 
     asmManager->module_cms_to_replicate = zcalloc(sizeof(*asmManager->module_cms_to_replicate));
     moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER,
-                          REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_DATA,
+                          REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_REPLICATE,
                           &info
     );
 
     for (int i = 0; i < asmManager->module_cms_to_replicate->numops; i++) {
         redisOp *op = &asmManager->module_cms_to_replicate->ops[i];
         if (rioWriteBulkCount(rdb, '*', op->argc) == 0) return C_ERR;
-        for (int j = 0; j < op->argc; j++) {
+        for (int j = 0; j < op->argc; j++)
             if (rioWriteBulkObject(rdb, op->argv[j]) == 0) return C_ERR;
-        }
     }
     zfree(asmManager->module_cms_to_replicate);
     asmManager->module_cms_to_replicate = NULL;
@@ -2792,7 +2791,7 @@ void asmActiveTrimStart(void) {
     };
 
     moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_TRIM,
-                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_ACTIVE_STARTED,
+                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_STARTED,
                           &fsi);
 
     sds str = slotRangeArrayToString(slots);
@@ -2827,7 +2826,7 @@ void asmActiveTrimEnd(int start_next_job) {
     };
 
     moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_TRIM,
-                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_ACTIVE_COMPLETED,
+                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_COMPLETED,
                           &fsi);
 
     sds str = slotRangeArrayToString(slots);
@@ -2961,7 +2960,7 @@ int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv) {
     return 1;
 }
 
-int asmReplicateOnSlotMigration(robj **argv, int argc) {
+int asmReplicateForSlotMigration(robj **argv, int argc) {
     if (server.cluster_enabled == 0 ||
         server.in_fork_child != CHILD_TYPE_RDB ||
         asmManager->module_cms_to_replicate == NULL ||
@@ -2974,10 +2973,11 @@ int asmReplicateOnSlotMigration(robj **argv, int argc) {
     if (task->operation != ASM_MIGRATE || task->state != ASM_SEND_BULK_AND_STREAM)
         return C_ERR;
 
-    /* Check if the command belongs to the slot range. */
+    /* Check if the command belongs to the task's slot range. */
     struct redisCommand *cmd = lookupCommandBySds(argv[0]->ptr);
     if (!cmd) return C_ERR;
-    int slot = getSlotFromCommand(cmd, argv, argc);
+
+    int slot = getSlotFromCommand(cmd, argv, argc, 0);
     if (slot == GETSLOT_CROSSSLOT)
         return C_ERR;
 

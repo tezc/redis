@@ -713,11 +713,11 @@ static const RedisModuleEvent
 #define REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_STARTED 3
 #define REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_FAILED 4
 #define REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_COMPLETED 5
-#define REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_DATA 6
+#define REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_REPLICATE 6
 #define _REDISMODULE_SUBEVENT_CLUSTER_NEXT 7
 
-#define REDISMODULE_SUBEVENT_CLUSTER_TRIM_ACTIVE_STARTED 0
-#define REDISMODULE_SUBEVENT_CLUSTER_TRIM_ACTIVE_COMPLETED 1
+#define REDISMODULE_SUBEVENT_CLUSTER_TRIM_STARTED 0
+#define REDISMODULE_SUBEVENT_CLUSTER_TRIM_COMPLETED 1
 #define REDISMODULE_SUBEVENT_CLUSTER_TRIM_BACKGROUND 2
 #define _REDISMODULE_SUBEVENT_CLUSTER_TRIM_NEXT 3
 
@@ -1336,8 +1336,8 @@ REDISMODULE_API void (*RedisModule_SetDisconnectCallback)(RedisModuleBlockedClie
 REDISMODULE_API void (*RedisModule_SetClusterFlags)(RedisModuleCtx *ctx, uint64_t flags) REDISMODULE_ATTR;
 REDISMODULE_API unsigned int (*RedisModule_ClusterKeySlot)(RedisModuleString *key) REDISMODULE_ATTR;
 REDISMODULE_API const char *(*RedisModule_ClusterCanonicalKeyNameInSlot)(unsigned int slot) REDISMODULE_ATTR;
-REDISMODULE_API int (*RedisModule_ClusterIsMySlot)(int slot) REDISMODULE_ATTR;
-REDISMODULE_API int (*RedisModule_ClusterReplicateOnSlotMigration)(RedisModuleCtx *ctx, const char *cmdname, const char *fmt, ...) REDISMODULE_ATTR;
+REDISMODULE_API int (*RedisModule_ClusterSlotIsLocal)(int slot) REDISMODULE_ATTR;
+REDISMODULE_API int (*RedisModule_ClusterReplicateForSlotMigration)(RedisModuleCtx *ctx, const char *cmdname, const char *fmt, ...) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_ExportSharedAPI)(RedisModuleCtx *ctx, const char *apiname, void *func) REDISMODULE_ATTR;
 REDISMODULE_API void * (*RedisModule_GetSharedAPI)(RedisModuleCtx *ctx, const char *apiname) REDISMODULE_ATTR;
 REDISMODULE_API RedisModuleCommandFilter * (*RedisModule_RegisterCommandFilter)(RedisModuleCtx *ctx, RedisModuleCommandFilterFunc cb, int flags) REDISMODULE_ATTR;
@@ -1726,8 +1726,8 @@ static int RedisModule_Init(RedisModuleCtx *ctx, const char *name, int ver, int 
     REDISMODULE_GET_API(SetClusterFlags);
     REDISMODULE_GET_API(ClusterKeySlot);
     REDISMODULE_GET_API(ClusterCanonicalKeyNameInSlot);
-    REDISMODULE_GET_API(ClusterIsMySlot);
-    REDISMODULE_GET_API(ClusterReplicateOnSlotMigration);
+    REDISMODULE_GET_API(ClusterSlotIsLocal);
+    REDISMODULE_GET_API(ClusterReplicateForSlotMigration);
     REDISMODULE_GET_API(ExportSharedAPI);
     REDISMODULE_GET_API(GetSharedAPI);
     REDISMODULE_GET_API(RegisterCommandFilter);

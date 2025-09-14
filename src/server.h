@@ -3454,10 +3454,6 @@ int restartServer(int flags, mstime_t delay);
 int getKeySlot(sds key);
 int calculateKeySlot(sds key);
 
-#define GETSLOT_NOKEYS     (-1)
-#define GETSLOT_CROSSSLOT  (-2)
-int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc);
-
 /* kvstore wrappers */
 int dbExpand(redisDb *db, uint64_t db_size, int try_expand);
 int dbExpandExpires(redisDb *db, uint64_t db_size, int try_expand);
@@ -3770,7 +3766,10 @@ void freeReplicationBacklogRefMemAsync(list *blocks, rax *index);
 int getKeysFromCommandWithSpecs(struct redisCommand *cmd, robj **argv, int argc, int search_flags, getKeysResult *result);
 keyReference *getKeysPrepareResult(getKeysResult *result, int numkeys);
 int getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
-int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc);
+
+#define GETSLOT_NOKEYS     (-1)
+#define GETSLOT_CROSSSLOT  (-2)
+int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc, int dont_check_crossslot);
 int doesCommandHaveKeys(struct redisCommand *cmd);
 int getChannelsFromCommand(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
 int doesCommandHaveChannelsWithFlags(struct redisCommand *cmd, int flags);

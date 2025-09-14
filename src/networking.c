@@ -2970,7 +2970,7 @@ int processInputBuffer(client *c) {
                      * thread handle. To avoid memory prefetching on an invalid command. */
                     c->iolookedcmd = NULL;
                 }
-                int slot = getSlotFromCommand(c->iolookedcmd, c->argv, c->argc);
+                int slot = getSlotFromCommand(c->iolookedcmd, c->argv, c->argc, 1);
                 c->slot = (slot == GETSLOT_CROSSSLOT || slot == GETSLOT_NOKEYS) ? -1 : slot;
                 enqueuePendingClientsToMainThread(c, 0);
                 break;

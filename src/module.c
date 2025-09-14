@@ -9309,12 +9309,13 @@ const char *RM_ClusterCanonicalKeyNameInSlot(unsigned int slot) {
 }
 
 /* Returns 1 if the slot is served by the current node, 0 otherwise. */
-int RM_ClusterIsMySlot(int slot) {
+int RM_ClusterSlotIsLocal(int slot) {
     if (slot < 0 || slot >= CLUSTER_SLOTS) return 0;
     return clusterCanAccessKeysInSlot(slot);
 }
 
-int RM_ClusterReplicateOnSlotMigration(RedisModuleCtx *ctx, const char *cmdname, const char *fmt, ...) {
+/* Replicate the command at the beginning of an atomic slot migration. */
+int RM_ClusterReplicateForSlotMigration(RedisModuleCtx *ctx, const char *cmdname, const char *fmt, ...) {
     UNUSED(ctx);
 
     struct redisCommand *cmd;
@@ -9330,7 +9331,7 @@ int RM_ClusterReplicateOnSlotMigration(RedisModuleCtx *ctx, const char *cmdname,
     va_end(ap);
     if (argv == NULL) return REDISMODULE_ERR;
 
-    int ret = asmReplicateOnSlotMigration(argv, argc);
+    int ret = asmReplicateForSlotMigration(argv, argc);
 
     /* Release the argv. */
     for (j = 0; j < argc; j++) decrRefCount(argv[j]);
@@ -14840,8 +14841,8 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(SetClusterFlags);
     REGISTER_API(ClusterKeySlot);
     REGISTER_API(ClusterCanonicalKeyNameInSlot);
-    REGISTER_API(ClusterIsMySlot);
-    REGISTER_API(ClusterReplicateOnSlotMigration);
+    REGISTER_API(ClusterSlotIsLocal);
+    REGISTER_API(ClusterReplicateForSlotMigration);
     REGISTER_API(CreateDict);
     REGISTER_API(FreeDict);
     REGISTER_API(DictSize);
