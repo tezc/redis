@@ -9314,7 +9314,20 @@ int RM_ClusterSlotIsLocal(int slot) {
     return clusterCanAccessKeysInSlot(slot);
 }
 
-/* Replicate the command at the beginning of an atomic slot migration. */
+/* Replicate commands along with slot migration.
+ *
+ * This function allows modules to add commands that will be sent to the
+ * destination node before the actual slot migration begins. It should only be
+ * called during the REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_REPLICATE event.
+ *
+ * This function can be called multiple times within the same event to
+ * replicate multiple commands. All commands will be sent before the
+ * actual slot data migration begins.
+ *
+ * Note: This function is only available in the fork child process just before
+ *       slot snapshot delivery begins.
+ *
+ * Returns REDISMODULE_OK on success, REDISMODULE_ERR on failure. */
 int RM_ClusterReplicateForSlotMigration(RedisModuleCtx *ctx, const char *cmdname, const char *fmt, ...) {
     UNUSED(ctx);
 
@@ -9331,7 +9344,7 @@ int RM_ClusterReplicateForSlotMigration(RedisModuleCtx *ctx, const char *cmdname
     va_end(ap);
     if (argv == NULL) return REDISMODULE_ERR;
 
-    int ret = asmReplicateForSlotMigration(argv, argc);
+    int ret = asmReplicateBeforeSlotSnapshot(cmd, argv, argc);
 
     /* Release the argv. */
     for (j = 0; j < argc; j++) decrRefCount(argv[j]);
@@ -11938,6 +11951,41 @@ static uint64_t moduleEventVersions[] = {
  *     structure with the following fields:
  *
  *         RedisModuleKey *key;    // Key name
+ *
+ *  * * RedisModuleEvent_Cluster
+ *
+ *     Called when a cluster event happens.
+ *     The following sub events are available:
+ *
+ *     * `REDISMODULE_SUBEVENT_CLUSTER_IMPORT_STARTED`
+ *     * `REDISMODULE_SUBEVENT_CLUSTER_IMPORT_FAILED`
+ *     * `REDISMODULE_SUBEVENT_CLUSTER_IMPORT_COMPLETED`
+ *     * `REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_STARTED`
+ *     * `REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_FAILED`
+ *     * `REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_COMPLETED`
+ *     * `REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_REPLICATE`
+ *
+ *     The data pointer can be casted to a RedisModuleClusterMigrationInfo
+ *     structure with the following fields:
+ *
+ *         int32_t dbnum;                     // Database number
+ *         const char *task_id;               // Task ID
+ *         RedisModuleSlotRangeArray* slots;  // Slot ranges
+ *
+ *  * * RedisModuleEvent_ClusterTrim
+ *
+ *     Called when a cluster trim event happens.
+ *     The following sub events are available:
+ *
+ *     * `REDISMODULE_SUBEVENT_CLUSTER_TRIM_STARTED`
+ *     * `REDISMODULE_SUBEVENT_CLUSTER_TRIM_COMPLETED`
+ *     * `REDISMODULE_SUBEVENT_CLUSTER_TRIM_BACKGROUND`
+ *
+ *     The data pointer can be casted to a RedisModuleClusterTrimInfo
+ *     structure with the following fields:
+ *
+ *         int32_t dbnum;                     // Database number
+ *         RedisModuleSlotRangeArray* slots;  // Slot ranges
  *
  * The function returns REDISMODULE_OK if the module was successfully subscribed
  * for the specified event. If the API is called from a wrong context or unsupported event

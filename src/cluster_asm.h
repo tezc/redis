@@ -49,7 +49,6 @@ void asmCancelTrimJobs(void);
 int asmIsTrimInProgress(void);
 void asmActiveTrimCycle(int type);
 int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv);
-
-int asmReplicateForSlotMigration(robj **argv, int argc);
+int asmReplicateBeforeSlotSnapshot(struct redisCommand *cmd, robj **argv, int argc);
 #endif
 

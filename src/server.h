@@ -763,7 +763,7 @@ typedef enum {
 #define NOTIFY_NEW (1<<14)        /* n, new key notification (Note: excluded from NOTIFY_ALL) */
 #define NOTIFY_OVERWRITTEN (1<<15)   /* o, key overwrite notification (Note: excluded from NOTIFY_ALL) */
 #define NOTIFY_TYPE_CHANGED (1<<16) /* c, key type changed notification (Note: excluded from NOTIFY_ALL) */
-#define NOTIFY_TRIMMED (1<<17)     /* module only key space notification, indicate a key trimmed during slot migration */
+#define NOTIFY_TRIMMED (1<<17)     /* module only key space notification, indicates a key trimmed during slot migration */
 #define NOTIFY_ALL (NOTIFY_GENERIC | NOTIFY_STRING | NOTIFY_LIST | NOTIFY_SET | NOTIFY_HASH | NOTIFY_ZSET | NOTIFY_EXPIRED | NOTIFY_EVICTED | NOTIFY_STREAM | NOTIFY_MODULE) /* A flag */
 
 /* Using the following macro you can run code inside serverCron() with the
@@ -3769,7 +3769,7 @@ int getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, getKeysR
 
 #define GETSLOT_NOKEYS     (-1)
 #define GETSLOT_CROSSSLOT  (-2)
-int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc, int dont_check_crossslot);
+int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc, int check_crossslot);
 int doesCommandHaveKeys(struct redisCommand *cmd);
 int getChannelsFromCommand(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
 int doesCommandHaveChannelsWithFlags(struct redisCommand *cmd, int flags);

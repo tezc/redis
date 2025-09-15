@@ -46,6 +46,7 @@ typedef struct asmTask {
     mstime_t dest_slots_snapshot_time;  /* The time when the destination starts applying the slot snapshot */
     mstime_t dest_accum_applied_time;   /* The time when the destination finishes applying the accumulated buffer */
     sds error;                          /* Error message for this task */
+    redisOpArray *module_commands;      /* Module commands to be replicated at the beginning of slot migration */
 } asmTask;
 
 struct asmManager {
@@ -68,8 +69,6 @@ struct asmManager {
     unsigned long long active_trim_cancelled;    /* Number of times active trim was cancelled */
     unsigned long long active_trim_keys_total;   /* Total number of keys to trim in the current job */
     unsigned long long active_trim_keys_deleted; /* Number of keys trimmed in the current job */
-
-    redisOpArray *module_cms_to_replicate;
 };
 
 enum asmState {
@@ -153,7 +152,6 @@ void clusterAsmInit(void) {
     asmManager->active_trim_jobs = listCreate();
     asmManager->active_trim_started = 0;
     asmManager->active_trim_cancelled = 0;
-    asmManager->module_cms_to_replicate = NULL;
     listSetFreeMethod(asmManager->active_trim_jobs, (void (*)(void*))slotRangeArrayFree);
 }
 
@@ -331,6 +329,7 @@ void asmTaskReset(asmTask *task) {
     task->paused_time = 0;
     task->dest_slots_snapshot_time = 0;
     task->dest_accum_applied_time = 0;
+    task->module_commands = NULL;
 }
 
 asmTask *asmTaskCreate(const char *task_id) {
@@ -596,7 +595,7 @@ void asmFeedMigrationClient(robj **argv, int argc) {
         }
     }
 
-    int slot = getSlotFromCommand(cmd, argv, argc, 0);
+    int slot = getSlotFromCommand(cmd, argv, argc, 1);
     /* If the command does not have keys, or has crossslot keys, skip it.
      * TODO: revisit this to see if we are okay with this. */
     if (slot == GETSLOT_CROSSSLOT) return;
@@ -1903,7 +1902,11 @@ static int slotSnapshotSaveKeyValuePair(rio *rdb, kvobj *o, int dbid) {
     return C_OK;
 }
 
-static int deliverModuleData(asmTask *task, rio *rdb) {
+/* Collect module commands for slot migration snapshot. Modules can use
+ * RM_ClusterReplicateForSlotMigration() during the CLUSTER_MIGRATE_MODULE_REPLICATE
+ * event to add commands that should be delivered just before the slot snapshot
+ * delivery starts. */
+static int writeModuleCommands(asmTask *task, rio *rdb) {
     RedisModuleClusterMigrationInfo info = {
             REDISMODULE_CLUSTER_MIGRATIONINFO_VERSION,
             0,
@@ -1911,21 +1914,21 @@ static int deliverModuleData(asmTask *task, rio *rdb) {
             (RedisModuleSlotRangeArray *) task->slot_ranges
     };
 
-    asmManager->module_cms_to_replicate = zcalloc(sizeof(*asmManager->module_cms_to_replicate));
+    task->module_commands = zcalloc(sizeof(*task->module_commands));
     moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER,
                           REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_REPLICATE,
                           &info
     );
 
-    for (int i = 0; i < asmManager->module_cms_to_replicate->numops; i++) {
-        redisOp *op = &asmManager->module_cms_to_replicate->ops[i];
+    /* Write the module commands to the rio */
+    for (int i = 0; i < task->module_commands->numops; i++) {
+        redisOp *op = &task->module_commands->ops[i];
         if (rioWriteBulkCount(rdb, '*', op->argc) == 0) return C_ERR;
         for (int j = 0; j < op->argc; j++)
             if (rioWriteBulkObject(rdb, op->argv[j]) == 0) return C_ERR;
     }
-    zfree(asmManager->module_cms_to_replicate);
-    asmManager->module_cms_to_replicate = NULL;
-
+    zfree(task->module_commands);
+    task->module_commands = NULL;
     return C_OK;
 }
 
@@ -1951,7 +1954,7 @@ int slotSnapshotSaveRio(int req, rio *rdb, int *error) {
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
     serverAssert(task->operation == ASM_MIGRATE);
 
-    if (deliverModuleData(task, rdb) == C_ERR) goto werr;
+    if (writeModuleCommands(task, rdb) == C_ERR) goto werr;
 
     for (int i = 0; i < server.dbnum; i++) {
         char selectcmd[] = "*2\r\n$6\r\nSELECT\r\n";
@@ -2960,28 +2963,35 @@ int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv) {
     return 1;
 }
 
-int asmReplicateForSlotMigration(robj **argv, int argc) {
+/* Collect module commands for slot migration snapshot. Modules can use
+ * RM_ClusterReplicateForSlotMigration() during the CLUSTER_MIGRATE_MODULE_REPLICATE
+ * event to add commands that should be delivered just before the slot snapshot
+ * delivery starts. */
+int asmReplicateBeforeSlotSnapshot(struct redisCommand *cmd, robj **argv, int argc) {
+    /* This API is only called in the fork child, and there is at least one
+     * task in progress. */
     if (server.cluster_enabled == 0 ||
         server.in_fork_child != CHILD_TYPE_RDB ||
-        asmManager->module_cms_to_replicate == NULL ||
         listLength(asmManager->tasks) == 0)
     {
         return C_ERR;
     }
 
+    /* Check if the task state is right. */
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
-    if (task->operation != ASM_MIGRATE || task->state != ASM_SEND_BULK_AND_STREAM)
+    if (task->operation != ASM_MIGRATE ||
+        task->state != ASM_SEND_BULK_AND_STREAM ||
+        task->module_commands == NULL)
+    {
         return C_ERR;
+    }
 
-    /* Check if the command belongs to the task's slot range. */
-    struct redisCommand *cmd = lookupCommandBySds(argv[0]->ptr);
-    if (!cmd) return C_ERR;
-
-    int slot = getSlotFromCommand(cmd, argv, argc, 0);
+    /* Crossslot commands are not allowed */
+    int slot = getSlotFromCommand(cmd, argv, argc, 1);
     if (slot == GETSLOT_CROSSSLOT)
         return C_ERR;
 
-    /* Check if the slot belongs to the task's slot range. */
+    /* Allow no-keys commands or if keys are in the slot range. */
     slotRange sr = {slot, slot};
     if (slot != GETSLOT_NOKEYS && !slotRangeArrayOverlaps(task->slot_ranges, &sr))
         return C_ERR;
@@ -2990,6 +3000,6 @@ int asmReplicateForSlotMigration(robj **argv, int argc) {
     for (int i = 0; i < argc; i++)
         argvcopy[i] = getDecodedObject(argv[i]);
 
-    redisOpArrayAppend(asmManager->module_cms_to_replicate, 0, argvcopy, argc, 0);
+    redisOpArrayAppend(task->module_commands, 0, argvcopy, argc, 0);
     return C_OK;
 }

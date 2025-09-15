@@ -397,7 +397,7 @@ int getKeySlot(sds key) {
 
 /* Return the slot of the key in the command. IO threads use this function
  * to calculate slot to reduce main-thread load */
-int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc, int dont_check_crossslot) {
+int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc, int check_crossslot) {
     int slot = GETSLOT_NOKEYS;
     if (!cmd || !server.cluster_enabled) return slot;
 
@@ -411,7 +411,8 @@ int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc, int dont
         int current_slot = (int) keyHashSlot(key, (int) sdslen(key));
         if (slot == GETSLOT_NOKEYS) {
             slot = current_slot;
-            if (dont_check_crossslot) break;
+            /* Break the loop if we don't need to check for cross slot */
+            if (!check_crossslot) break;
             continue;
         }
         if (current_slot != slot) {
@@ -419,34 +420,6 @@ int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc, int dont
             break;
         }
         if (slot == GETSLOT_CROSSSLOT) break;
-    }
-
-    getKeysFreeResult(&result);
-    return slot;
-}
-
-/* Returns the slot that the command keys belong to.
- *
- * Return values:
- * - Slot number if all keys belong to the same slot
- * - GETSLOT_CROSSSLOT if keys belong to different slots
- * - GETSLOT_NOKEYS if the command has no keys */
-int getSlotFromCommandEx(struct redisCommand *cmd, robj **argv, int argc) {
-    int slot = GETSLOT_NOKEYS, numkeys;
-    getKeysResult result = GETKEYS_RESULT_INIT;
-
-    numkeys = getKeysFromCommand(cmd, argv, argc, &result);
-    for (int i = 0; i < numkeys; i++) {
-        sds key = argv[result.keys[i].pos]->ptr;
-        int current_slot = (int) keyHashSlot(key, (int) sdslen(key));
-        if (slot == GETSLOT_NOKEYS) {
-            slot = current_slot;
-            continue;
-        }
-        if (current_slot != slot) {
-            slot = GETSLOT_CROSSSLOT;
-            break;
-        }
     }
     getKeysFreeResult(&result);
     return slot;

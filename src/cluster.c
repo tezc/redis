@@ -1662,7 +1662,6 @@ unsigned int clusterDelKeysInSlotRangeArray(slotRangeArray *sra, int by_command)
 }
 
 int clusterIsMySlot(int slot) {
-    if (server.masterhost) return 0;
     return getMyClusterNode() == getNodeBySlot(slot);
 }
 
