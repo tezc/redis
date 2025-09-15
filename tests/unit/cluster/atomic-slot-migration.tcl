@@ -1846,20 +1846,20 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
 
     test "Test RM_ClusterSlotIsLocal" {
         # Test invalid slots
-        assert_equal 0 [R 0 asm.cluster_is_slot_local -1]
-        assert_equal 0 [R 0 asm.cluster_is_slot_local 20000]
-        assert_equal 0 [R 2 asm.cluster_is_slot_local 16384]
-        assert_equal 0 [R 5 asm.cluster_is_slot_local 16384]
+        assert_equal 0 [R 0 asm.cluster_slot_is_local -1]
+        assert_equal 0 [R 0 asm.cluster_slot_is_local 20000]
+        assert_equal 0 [R 2 asm.cluster_slot_is_local 16384]
+        assert_equal 0 [R 5 asm.cluster_slot_is_local 16384]
 
         # Test on a master-replica pair
-        assert_equal 1 [R 0 asm.cluster_is_slot_local 0]
-        assert_equal 1 [R 0 asm.cluster_is_slot_local 100]
-        assert_equal 1 [R 3 asm.cluster_is_slot_local 0]
-        assert_equal 1 [R 3 asm.cluster_is_slot_local 100]
+        assert_equal 1 [R 0 asm.cluster_slot_is_local 0]
+        assert_equal 1 [R 0 asm.cluster_slot_is_local 100]
+        assert_equal 1 [R 3 asm.cluster_slot_is_local 0]
+        assert_equal 1 [R 3 asm.cluster_slot_is_local 100]
 
         # Test on a master-replica pair
-        assert_equal 1 [R 2 asm.cluster_is_slot_local 16383]
-        assert_equal 1 [R 5 asm.cluster_is_slot_local 16383]
+        assert_equal 1 [R 2 asm.cluster_slot_is_local 16383]
+        assert_equal 1 [R 5 asm.cluster_slot_is_local 16383]
     }
 
     test "Test RM_ClusterSlotIsLocal returns false for unowned slots" {
@@ -1870,10 +1870,10 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         setup_slot_migration_with_delay 0 1 0 100 3 1000000
 
         # Verify importing slots are not local
-        assert_equal 0 [R 1 asm.cluster_is_slot_local 0]
-        assert_equal 0 [R 1 asm.cluster_is_slot_local 100]
-        assert_equal 0 [R 4 asm.cluster_is_slot_local 0]
-        assert_equal 0 [R 4 asm.cluster_is_slot_local 100]
+        assert_equal 0 [R 1 asm.cluster_slot_is_local 0]
+        assert_equal 0 [R 1 asm.cluster_slot_is_local 100]
+        assert_equal 0 [R 4 asm.cluster_slot_is_local 0]
+        assert_equal 0 [R 4 asm.cluster_slot_is_local 100]
 
         wait_for_condition 1000 10 {
             [CI 0 cluster_slot_migration_task_count] == 0 &&
@@ -1884,10 +1884,10 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         }
 
         # Verify slots that are being trimmed are not local
-        assert_equal 0 [R 0 asm.cluster_is_slot_local 0]
-        assert_equal 0 [R 0 asm.cluster_is_slot_local 100]
-        assert_equal 0 [R 3 asm.cluster_is_slot_local 0]
-        assert_equal 0 [R 3 asm.cluster_is_slot_local 100]
+        assert_equal 0 [R 0 asm.cluster_slot_is_local 0]
+        assert_equal 0 [R 0 asm.cluster_slot_is_local 100]
+        assert_equal 0 [R 3 asm.cluster_slot_is_local 0]
+        assert_equal 0 [R 3 asm.cluster_slot_is_local 100]
 
         # Enabled active trim and wait until it is completed.
         R 0 debug asm-trim-method active 0
@@ -1896,10 +1896,10 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         wait_for_ofs_sync [Rn 0] [Rn 3]
 
         # Verify slots are local after migration
-        assert_equal 1 [R 1 asm.cluster_is_slot_local 0]
-        assert_equal 1 [R 1 asm.cluster_is_slot_local 100]
-        assert_equal 1 [R 4 asm.cluster_is_slot_local 0]
-        assert_equal 1 [R 4 asm.cluster_is_slot_local 100]
+        assert_equal 1 [R 1 asm.cluster_slot_is_local 0]
+        assert_equal 1 [R 1 asm.cluster_slot_is_local 100]
+        assert_equal 1 [R 4 asm.cluster_slot_is_local 0]
+        assert_equal 1 [R 4 asm.cluster_slot_is_local 100]
 
         # cleanup
         R 0 debug asm-trim-method default

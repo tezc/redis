@@ -1902,11 +1902,11 @@ static int slotSnapshotSaveKeyValuePair(rio *rdb, kvobj *o, int dbid) {
     return C_OK;
 }
 
-/* Collect module commands for slot migration snapshot. Modules can use
- * RM_ClusterReplicateForSlotMigration() during the CLUSTER_MIGRATE_MODULE_REPLICATE
- * event to add commands that should be delivered just before the slot snapshot
- * delivery starts. */
-static int writeModuleCommands(asmTask *task, rio *rdb) {
+/* Modules can use RM_ClusterReplicateForSlotMigration() during the
+ * CLUSTER_MIGRATE_MODULE_REPLICATE event to replicate commands that should be
+ * delivered just before the slot snapshot delivery starts. This function
+ * triggers the event, collects the commands and writes them to the rio. */
+static int replicateModuleCommands(asmTask *task, rio *rdb) {
     RedisModuleClusterMigrationInfo info = {
             REDISMODULE_CLUSTER_MIGRATIONINFO_VERSION,
             0,
@@ -1954,7 +1954,7 @@ int slotSnapshotSaveRio(int req, rio *rdb, int *error) {
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
     serverAssert(task->operation == ASM_MIGRATE);
 
-    if (writeModuleCommands(task, rdb) == C_ERR) goto werr;
+    if (replicateModuleCommands(task, rdb) == C_ERR) goto werr;
 
     for (int i = 0; i < server.dbnum; i++) {
         char selectcmd[] = "*2\r\n$6\r\nSELECT\r\n";
@@ -2963,13 +2963,11 @@ int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv) {
     return 1;
 }
 
-/* Collect module commands for slot migration snapshot. Modules can use
- * RM_ClusterReplicateForSlotMigration() during the CLUSTER_MIGRATE_MODULE_REPLICATE
- * event to add commands that should be delivered just before the slot snapshot
- * delivery starts. */
+/* Modules can use RM_ClusterReplicateForSlotMigration() during the
+ * CLUSTER_MIGRATE_MODULE_REPLICATE event to replicate commands that should be
+ * delivered just before the slot snapshot delivery starts. */
 int asmReplicateBeforeSlotSnapshot(struct redisCommand *cmd, robj **argv, int argc) {
-    /* This API is only called in the fork child, and there is at least one
-     * task in progress. */
+    /* This API is only called in the fork child. */
     if (server.cluster_enabled == 0 ||
         server.in_fork_child != CHILD_TYPE_RDB ||
         listLength(asmManager->tasks) == 0)
