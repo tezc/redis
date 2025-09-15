@@ -1919,10 +1919,10 @@ static int slotSnapshotSaveKeyValuePair(rio *rdb, kvobj *o, int dbid) {
 }
 
 /* Modules can use RM_ClusterPropagateForSlotMigration() during the
- * CLUSTER_MIGRATE_MODULE_REPLICATE event to replicate commands that should be
+ * CLUSTER_MIGRATE_MODULE_PROPAGATE event to propagate commands that should be
  * delivered just before the slot snapshot delivery starts. This function
  * triggers the event, collects the commands and writes them to the rio. */
-static int replicateModuleCommands(asmTask *task, rio *rdb) {
+static int propagateModuleCommands(asmTask *task, rio *rdb) {
     RedisModuleClusterMigrationInfo info = {
             REDISMODULE_CLUSTER_MIGRATIONINFO_VERSION,
             0,
@@ -1970,7 +1970,7 @@ int slotSnapshotSaveRio(int req, rio *rdb, int *error) {
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
     serverAssert(task->operation == ASM_MIGRATE);
 
-    if (replicateModuleCommands(task, rdb) == C_ERR) goto werr;
+    if (propagateModuleCommands(task, rdb) == C_ERR) goto werr;
 
     /* Dump functions and send to destination side. */
     rio payload;
@@ -2996,7 +2996,7 @@ int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv) {
 }
 
 /* Modules can use RM_ClusterPropagateForSlotMigration() during the
- * CLUSTER_MIGRATE_MODULE_REPLICATE event to replicate commands that should be
+ * CLUSTER_MIGRATE_MODULE_PROPAGATE event to propagate commands that should be
  * delivered just before the slot snapshot delivery starts. */
 int asmModulePropagateBeforeSlotSnapshot(struct redisCommand *cmd, robj **argv, int argc) {
     /* This API is only called in the fork child. */

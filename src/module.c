@@ -9314,11 +9314,11 @@ int RM_ClusterSlotIsLocal(int slot) {
     return clusterCanAccessKeysInSlot(slot);
 }
 
-/* Replicate commands along with slot migration.
+/* Propagate commands along with slot migration.
  *
  * This function allows modules to add commands that will be sent to the
  * destination node before the actual slot migration begins. It should only be
- * called during the REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_REPLICATE event.
+ * called during the REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_PROPAGATE event.
  *
  * This function can be called multiple times within the same event to
  * replicate multiple commands. All commands will be sent before the
@@ -11963,7 +11963,7 @@ static uint64_t moduleEventVersions[] = {
  *     * `REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_STARTED`
  *     * `REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_FAILED`
  *     * `REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_COMPLETED`
- *     * `REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_REPLICATE`
+ *     * `REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_PROPAGATE`
  *
  *     The data pointer can be casted to a RedisModuleClusterMigrationInfo
  *     structure with the following fields:
