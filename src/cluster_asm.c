@@ -3017,7 +3017,7 @@ int asmReplicateBeforeSlotSnapshot(struct redisCommand *cmd, robj **argv, int ar
     }
 
     /* Crossslot commands are not allowed */
-    int slot = getSlotFromCommand(cmd, argv, argc, 1);
+    int slot = getSlotFromCommand(cmd, argv, argc);
     if (slot == GETSLOT_CROSSSLOT)
         return C_ERR;
 

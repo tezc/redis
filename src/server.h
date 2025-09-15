@@ -3769,7 +3769,7 @@ int getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, getKeysR
 
 #define GETSLOT_NOKEYS     (-1)
 #define GETSLOT_CROSSSLOT  (-2)
-int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc, int check_crossslot);
+int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc);
 int doesCommandHaveKeys(struct redisCommand *cmd);
 int getChannelsFromCommand(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
 int doesCommandHaveChannelsWithFlags(struct redisCommand *cmd, int flags);
