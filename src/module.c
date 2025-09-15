@@ -9327,7 +9327,15 @@ int RM_ClusterSlotIsLocal(int slot) {
  * Note: This function is only available in the fork child process just before
  *       slot snapshot delivery begins.
  *
- * Returns REDISMODULE_OK on success, REDISMODULE_ERR on failure. */
+ * On success REDISMODULE_OK is returned, otherwise
+ * REDISMODULE_ERR is returned and errno is set to the following values:
+ *
+ * * EINVAL: function arguments or format specifiers are invalid.
+ * * EBADF: not called in the correct context, e.g. not called in the REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_PROPAGATE event.
+ * * ENOENT: command does not exist.
+ * * ENOTSUP: command is cross-slot.
+ * * ERANGE: command contains keys that are not within the migrating slot range.
+ */
 int RM_ClusterPropagateForSlotMigration(RedisModuleCtx *ctx, const char *cmdname, const char *fmt, ...) {
     UNUSED(ctx);
 
@@ -9336,20 +9344,34 @@ int RM_ClusterPropagateForSlotMigration(RedisModuleCtx *ctx, const char *cmdname
     int argc = 0, flags = 0, j;
     va_list ap;
 
+    if (ctx == NULL || cmdname == NULL || fmt == NULL) {
+        errno = EINVAL;
+        return REDISMODULE_ERR;
+    }
+
+    errno = 0;
     cmd = lookupCommandByCString((char*)cmdname);
-    if (!cmd) return REDISMODULE_ERR;
+    if (!cmd) {
+        errno = ENOENT;
+        return REDISMODULE_ERR;
+    }
 
     va_start(ap, fmt);
     argv = moduleCreateArgvFromUserFormat(cmdname, fmt, &argc, &flags, ap);
     va_end(ap);
-    if (argv == NULL) return REDISMODULE_ERR;
+    if (argv == NULL) {
+        errno = EINVAL;
+        return REDISMODULE_ERR;
+    }
 
     int ret = asmModulePropagateBeforeSlotSnapshot(cmd, argv, argc);
+    int saved_errno = errno;
 
     /* Release the argv. */
     for (j = 0; j < argc; j++) decrRefCount(argv[j]);
     zfree(argv);
     server.dirty++;
+    errno = saved_errno;
     return ret == C_OK ? REDISMODULE_OK : REDISMODULE_ERR;
 }
 

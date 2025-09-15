@@ -1943,6 +1943,7 @@ static int propagateModuleCommands(asmTask *task, rio *rdb) {
         for (int j = 0; j < op->argc; j++)
             if (rioWriteBulkObject(rdb, op->argv[j]) == 0) return C_ERR;
     }
+    redisOpArrayFree(task->module_commands);
     zfree(task->module_commands);
     task->module_commands = NULL;
     return C_OK;
@@ -3004,6 +3005,7 @@ int asmModulePropagateBeforeSlotSnapshot(struct redisCommand *cmd, robj **argv, 
         server.in_fork_child != CHILD_TYPE_RDB ||
         listLength(asmManager->tasks) == 0)
     {
+        errno = EBADF;
         return C_ERR;
     }
 
@@ -3013,22 +3015,40 @@ int asmModulePropagateBeforeSlotSnapshot(struct redisCommand *cmd, robj **argv, 
         task->state != ASM_SEND_BULK_AND_STREAM ||
         task->module_commands == NULL)
     {
+        errno = EBADF;
         return C_ERR;
+    }
+
+    /* Ensure all arguments are converted to string encoding if necessary,
+     * since getSlotFromCommand expects them to be string-encoded. */
+    for (int i = 0; i < argc; i++) {
+        if (!sdsEncodedObject(argv[i])) {
+            serverAssert(argv[i]->encoding == OBJ_ENCODING_INT);
+            robj *old = argv[i];
+            argv[i] = createStringObjectFromLongLongWithSds((long)old->ptr);
+            decrRefCount(old);
+        }
     }
 
     /* Crossslot commands are not allowed */
     int slot = getSlotFromCommand(cmd, argv, argc);
-    if (slot == GETSLOT_CROSSSLOT)
+    if (slot == GETSLOT_CROSSSLOT) {
+        errno = ENOTSUP;
         return C_ERR;
+    }
 
     /* Allow no-keys commands or if keys are in the slot range. */
     slotRange sr = {slot, slot};
-    if (slot != GETSLOT_NOKEYS && !slotRangeArrayOverlaps(task->slot_ranges, &sr))
+    if (slot != GETSLOT_NOKEYS && !slotRangeArrayOverlaps(task->slot_ranges, &sr)) {
+        errno = ERANGE;
         return C_ERR;
+    }
 
     robj **argvcopy = zmalloc(sizeof(robj*) * argc);
-    for (int i = 0; i < argc; i++)
-        argvcopy[i] = getDecodedObject(argv[i]);
+    for (int i = 0; i < argc; i++) {
+        argvcopy[i] = argv[i];
+        incrRefCount(argv[i]);
+    }
 
     redisOpArrayAppend(task->module_commands, 0, argvcopy, argc, 0);
     return C_OK;

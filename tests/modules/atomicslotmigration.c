@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <memory.h>
+#include <errno.h>
 
 #define MAX_EVENTS 1024
 
@@ -58,10 +59,25 @@ int sanity(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     RedisModule_Assert(RedisModule_ClusterSlotIsLocal(16384) == 0);
     RedisModule_Assert(RedisModule_ClusterSlotIsLocal(100000) == 0);
 
+    /* Call with invalid args. */
+    errno = 0;
     RedisModule_Assert(RedisModule_ClusterPropagateForSlotMigration(NULL, NULL, NULL) == REDISMODULE_ERR);
+    RedisModule_Assert(errno == EINVAL);
+
+    /* Call with invalid args. */
+    errno = 0;
     RedisModule_Assert(RedisModule_ClusterPropagateForSlotMigration(ctx, NULL, NULL) == REDISMODULE_ERR);
+    RedisModule_Assert(errno == EINVAL);
+
+    /* Call with invalid args. */
+    errno = 0;
     RedisModule_Assert(RedisModule_ClusterPropagateForSlotMigration(NULL, "asm.keyless_cmd", "") == REDISMODULE_ERR);
+    RedisModule_Assert(errno == EINVAL);
+
+    /* Call outside of slot migration. */
+    errno = 0;
     RedisModule_Assert(RedisModule_ClusterPropagateForSlotMigration(ctx, "asm.keyless_cmd", "") == REDISMODULE_ERR);
+    RedisModule_Assert(errno == EBADF);
 
     RedisModule_ReplyWithSimpleString(ctx, "OK");
     return REDISMODULE_OK;
@@ -145,18 +161,24 @@ static void testReplicatingOutsideSlotRange(RedisModuleCtx *ctx, RedisModuleClus
     char buf[128] = {0};
     const char *prefix = RedisModule_ClusterCanonicalKeyNameInSlot(slot);
     snprintf(buf, sizeof(buf), "{%s}%s", prefix, "modulekey");
+    errno = 0;
     int ret = RedisModule_ClusterPropagateForSlotMigration(ctx, "SET", "cc", buf, "value");
     RedisModule_Assert(ret == REDISMODULE_ERR);
+    RedisModule_Assert(errno == ERANGE);
 }
 
 static void testReplicatingCrossslotCommand(RedisModuleCtx *ctx) {
+    errno = 0;
     int ret = RedisModule_ClusterPropagateForSlotMigration(ctx, "MSET", "cccccc", "key1", "val1", "key2", "val2", "key3", "val3");
     RedisModule_Assert(ret == REDISMODULE_ERR);
+    RedisModule_Assert(errno == ENOTSUP);
 }
 
 static void testReplicatingUnknownCommand(RedisModuleCtx *ctx) {
+    errno = 0;
     int ret = RedisModule_ClusterPropagateForSlotMigration(ctx, "unknowncommand", "");
     RedisModule_Assert(ret == REDISMODULE_ERR);
+    RedisModule_Assert(errno == ENOENT);
 }
 
 static void testNonFatalScenarios(RedisModuleCtx *ctx, RedisModuleClusterMigrationInfo *info) {

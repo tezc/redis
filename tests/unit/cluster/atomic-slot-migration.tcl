@@ -1185,8 +1185,10 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_asm_done
 
         # Verify the data is migrated
+        wait_for_ofs_sync [Rn 0] [Rn 3]
         assert_equal 0 [R 0 dbsize]
         assert_equal 0 [R 3 dbsize]
+        wait_for_ofs_sync [Rn 1] [Rn 4]
         assert_equal 10000 [R 1 dbsize]
         assert_equal 10000 [R 4 dbsize]
 
