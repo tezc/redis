@@ -395,31 +395,27 @@ int getKeySlot(sds key) {
     return slot;
 }
 
-/* Return the slot of the key in the command. IO threads use this function
- * to calculate slot to reduce main-thread load */
-int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc, int check_crossslot) {
-    int slot = GETSLOT_NOKEYS;
+/* Return the slot of the key in the command.
+ * GETSLOT_NOKEYS if no keys, GETSLOT_CROSSSLOT if cross slot, otherwise the slot number. */
+int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc) {
+    int slot = -1;
     if (!cmd || !server.cluster_enabled) return slot;
 
     /* Get the keys from the command */
     getKeysResult result = GETKEYS_RESULT_INIT;
     int numkeys = getKeysFromCommand(cmd, argv, argc, &result);
-    if (numkeys == 0) return slot;
+    keyReference *keyindex = result.keys;
 
-    for (int i = 0; i < numkeys; i++) {
-        sds key = argv[result.keys[i].pos]->ptr;
-        int current_slot = (int) keyHashSlot(key, (int) sdslen(key));
+    /* Get slot of each key and check if they are all the same */
+    for (int j = 0; j < numkeys; j++) {
+        robj *thiskey = argv[keyindex[j].pos];
+        int thisslot = keyHashSlot((char*)thiskey->ptr, sdslen(thiskey->ptr));
         if (slot == GETSLOT_NOKEYS) {
-            slot = current_slot;
-            /* Break the loop if we don't need to check for cross slot */
-            if (!check_crossslot) break;
-            continue;
-        }
-        if (current_slot != slot) {
-            slot = GETSLOT_CROSSSLOT;
+            slot = thisslot;
+        } else if (slot != thisslot) {
+            slot = GETSLOT_CROSSSLOT; /* Mark as cross slot */
             break;
         }
-        if (slot == GETSLOT_CROSSSLOT) break;
     }
     getKeysFreeResult(&result);
     return slot;
