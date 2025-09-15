@@ -34,8 +34,8 @@ int replicate_module_command(RedisModuleCtx *ctx, RedisModuleString **argv, int 
     /* Set the key name and value to replicate. */
     if (moduleCommandKeyName) RedisModule_FreeString(ctx, moduleCommandKeyName);
     if (moduleCommandKeyVal) RedisModule_FreeString(ctx, moduleCommandKeyVal);
-    moduleCommandKeyName = RedisModule_CreateStringFromString(ctx, argv[1]);
-    moduleCommandKeyVal = RedisModule_CreateStringFromString(ctx, argv[2]);
+    moduleCommandKeyName = RedisModule_CreateStringFromString(ctx, argv[2]);
+    moduleCommandKeyVal = RedisModule_CreateStringFromString(ctx, argv[3]);
 
     RedisModule_ReplyWithSimpleString(ctx, "OK");
     return REDISMODULE_OK;
@@ -58,10 +58,10 @@ int sanity(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     RedisModule_Assert(RedisModule_ClusterSlotIsLocal(16384) == 0);
     RedisModule_Assert(RedisModule_ClusterSlotIsLocal(100000) == 0);
 
-    RedisModule_Assert(RedisModule_ClusterReplicateForSlotMigration(NULL, NULL, NULL) == REDISMODULE_ERR);
-    RedisModule_Assert(RedisModule_ClusterReplicateForSlotMigration(ctx, NULL, NULL) == REDISMODULE_ERR);
-    RedisModule_Assert(RedisModule_ClusterReplicateForSlotMigration(NULL, "asm.keyless_cmd", "") == REDISMODULE_ERR);
-    RedisModule_Assert(RedisModule_ClusterReplicateForSlotMigration(ctx, "asm.keyless_cmd", "") == REDISMODULE_ERR);
+    RedisModule_Assert(RedisModule_ClusterPropagateForSlotMigration(NULL, NULL, NULL) == REDISMODULE_ERR);
+    RedisModule_Assert(RedisModule_ClusterPropagateForSlotMigration(ctx, NULL, NULL) == REDISMODULE_ERR);
+    RedisModule_Assert(RedisModule_ClusterPropagateForSlotMigration(NULL, "asm.keyless_cmd", "") == REDISMODULE_ERR);
+    RedisModule_Assert(RedisModule_ClusterPropagateForSlotMigration(ctx, "asm.keyless_cmd", "") == REDISMODULE_ERR);
 
     RedisModule_ReplyWithSimpleString(ctx, "OK");
     return REDISMODULE_OK;
@@ -145,17 +145,17 @@ static void testReplicatingOutsideSlotRange(RedisModuleCtx *ctx, RedisModuleClus
     char buf[128] = {0};
     const char *prefix = RedisModule_ClusterCanonicalKeyNameInSlot(slot);
     snprintf(buf, sizeof(buf), "{%s}%s", prefix, "modulekey");
-    int ret = RedisModule_ClusterReplicateForSlotMigration(ctx, "SET", "cc", buf, "value");
+    int ret = RedisModule_ClusterPropagateForSlotMigration(ctx, "SET", "cc", buf, "value");
     RedisModule_Assert(ret == REDISMODULE_ERR);
 }
 
 static void testReplicatingCrossslotCommand(RedisModuleCtx *ctx) {
-    int ret = RedisModule_ClusterReplicateForSlotMigration(ctx, "MSET", "cccccc", "key1", "val1", "key2", "val2", "key3", "val3");
+    int ret = RedisModule_ClusterPropagateForSlotMigration(ctx, "MSET", "cccccc", "key1", "val1", "key2", "val2", "key3", "val3");
     RedisModule_Assert(ret == REDISMODULE_ERR);
 }
 
 static void testReplicatingUnknownCommand(RedisModuleCtx *ctx) {
-    int ret = RedisModule_ClusterReplicateForSlotMigration(ctx, "unknowncommand", "");
+    int ret = RedisModule_ClusterPropagateForSlotMigration(ctx, "unknowncommand", "");
     RedisModule_Assert(ret == REDISMODULE_ERR);
 }
 
@@ -168,25 +168,22 @@ static void testNonFatalScenarios(RedisModuleCtx *ctx, RedisModuleClusterMigrati
 void clusterEventCallback(RedisModuleCtx *ctx, RedisModuleEvent e, uint64_t sub, void *data) {
     REDISMODULE_NOT_USED(ctx);
     int ret;
-    char buf[128] = {0};
 
     if (e.id == REDISMODULE_EVENT_CLUSTER) {
         RedisModuleClusterMigrationInfo *info = data;
 
-        if (sub == REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_REPLICATE) {
+        if (sub == REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_PROPAGATE) {
             /* Test some non-fatal scenarios. */
             testNonFatalScenarios(ctx, info);
 
             if (replicateModuleCommand == 0) return;
 
             /* Replicate a keyless command. */
-            ret = RedisModule_ClusterReplicateForSlotMigration(ctx, "asm.keyless_cmd", "");
+            ret = RedisModule_ClusterPropagateForSlotMigration(ctx, "asm.keyless_cmd", "");
             RedisModule_Assert(ret == REDISMODULE_OK);
 
-            /* Replicate command with a key in the slot range. */
-            const char *prefix = RedisModule_ClusterCanonicalKeyNameInSlot(info->slots->ranges[0].start);
-            snprintf(buf, sizeof(buf), "{%s}%s", prefix, "modulekey");
-            ret = RedisModule_ClusterReplicateForSlotMigration(ctx, "SET", "cc", buf, "value");
+            /* Propagate configured key and value. */
+            ret = RedisModule_ClusterPropagateForSlotMigration(ctx, "SET", "ss", moduleCommandKeyName, moduleCommandKeyVal);
             RedisModule_Assert(ret == REDISMODULE_OK);
         } else {
             /* Log the event. */

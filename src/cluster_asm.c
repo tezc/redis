@@ -1918,7 +1918,7 @@ static int slotSnapshotSaveKeyValuePair(rio *rdb, kvobj *o, int dbid) {
     return C_OK;
 }
 
-/* Modules can use RM_ClusterReplicateForSlotMigration() during the
+/* Modules can use RM_ClusterPropagateForSlotMigration() during the
  * CLUSTER_MIGRATE_MODULE_REPLICATE event to replicate commands that should be
  * delivered just before the slot snapshot delivery starts. This function
  * triggers the event, collects the commands and writes them to the rio. */
@@ -1932,7 +1932,7 @@ static int replicateModuleCommands(asmTask *task, rio *rdb) {
 
     task->module_commands = zcalloc(sizeof(*task->module_commands));
     moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER,
-                          REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_REPLICATE,
+                          REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_PROPAGATE,
                           &info
     );
 
@@ -2995,10 +2995,10 @@ int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv) {
     return 1;
 }
 
-/* Modules can use RM_ClusterReplicateForSlotMigration() during the
+/* Modules can use RM_ClusterPropagateForSlotMigration() during the
  * CLUSTER_MIGRATE_MODULE_REPLICATE event to replicate commands that should be
  * delivered just before the slot snapshot delivery starts. */
-int asmReplicateBeforeSlotSnapshot(struct redisCommand *cmd, robj **argv, int argc) {
+int asmModulePropagateBeforeSlotSnapshot(struct redisCommand *cmd, robj **argv, int argc) {
     /* This API is only called in the fork child. */
     if (server.cluster_enabled == 0 ||
         server.in_fork_child != CHILD_TYPE_RDB ||

@@ -9328,7 +9328,7 @@ int RM_ClusterSlotIsLocal(int slot) {
  *       slot snapshot delivery begins.
  *
  * Returns REDISMODULE_OK on success, REDISMODULE_ERR on failure. */
-int RM_ClusterReplicateForSlotMigration(RedisModuleCtx *ctx, const char *cmdname, const char *fmt, ...) {
+int RM_ClusterPropagateForSlotMigration(RedisModuleCtx *ctx, const char *cmdname, const char *fmt, ...) {
     UNUSED(ctx);
 
     struct redisCommand *cmd;
@@ -9344,7 +9344,7 @@ int RM_ClusterReplicateForSlotMigration(RedisModuleCtx *ctx, const char *cmdname
     va_end(ap);
     if (argv == NULL) return REDISMODULE_ERR;
 
-    int ret = asmReplicateBeforeSlotSnapshot(cmd, argv, argc);
+    int ret = asmModulePropagateBeforeSlotSnapshot(cmd, argv, argc);
 
     /* Release the argv. */
     for (j = 0; j < argc; j++) decrRefCount(argv[j]);
@@ -14890,7 +14890,7 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(ClusterKeySlot);
     REGISTER_API(ClusterCanonicalKeyNameInSlot);
     REGISTER_API(ClusterSlotIsLocal);
-    REGISTER_API(ClusterReplicateForSlotMigration);
+    REGISTER_API(ClusterPropagateForSlotMigration);
     REGISTER_API(CreateDict);
     REGISTER_API(FreeDict);
     REGISTER_API(DictSize);
