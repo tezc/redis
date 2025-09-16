@@ -11984,7 +11984,7 @@ static uint64_t moduleEventVersions[] = {
  *
  *         RedisModuleKey *key;    // Key name
  *
- *  * * RedisModuleEvent_Cluster
+ *  * * RedisModuleEvent_ClusterAsm
  *
  *     Called when an atomic slot migration (ASM) event happens.
  *     The following sub events are available:
@@ -11997,14 +11997,13 @@ static uint64_t moduleEventVersions[] = {
  *     * `REDISMODULE_SUBEVENT_CLUSTER_ASM_MIGRATE_COMPLETED`
  *     * `REDISMODULE_SUBEVENT_CLUSTER_ASM_MIGRATE_MODULE_PROPAGATE`
  *
- *     The data pointer can be casted to a RedisModuleClusterMigrationInfo
+ *     The data pointer can be casted to a RedisModuleClusterAsmMigrationInfo
  *     structure with the following fields:
  *
- *         int32_t dbnum;                     // Database number
  *         const char *task_id;               // Task ID
  *         RedisModuleSlotRangeArray* slots;  // Slot ranges
  *
- *  * * RedisModuleEvent_ClusterTrim
+ *  * * RedisModuleEvent_ClusterAsmTrim
  *
  *     Called when a cluster trim event happens.
  *     The following sub events are available:
@@ -12013,10 +12012,9 @@ static uint64_t moduleEventVersions[] = {
  *     * `REDISMODULE_SUBEVENT_CLUSTER_ASM_TRIM_COMPLETED`
  *     * `REDISMODULE_SUBEVENT_CLUSTER_ASM_TRIM_BACKGROUND`
  *
- *     The data pointer can be casted to a RedisModuleClusterTrimInfo
+ *     The data pointer can be casted to a RedisModuleClusterAsmTrimInfo
  *     structure with the following fields:
  *
- *         int32_t dbnum;                     // Database number
  *         RedisModuleSlotRangeArray* slots;  // Slot ranges
  *
  * The function returns REDISMODULE_OK if the module was successfully subscribed
