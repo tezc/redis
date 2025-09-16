@@ -849,23 +849,22 @@ void clusterMigrationCommand(client *c) {
 
 /* Notify the state change to the module and the plugin. */
 void asmNotifyStateChange(asmTask *task, int state) {
-    RedisModuleClusterMigrationInfo info = {
-            REDISMODULE_CLUSTER_MIGRATIONINFO_VERSION,
-            0,
+    RedisModuleClusterAsmMigrationInfo info = {
+            REDISMODULE_CLUSTER_ASM_MIGRATIONINFO_VERSION,
             task->id,
             (RedisModuleSlotRangeArray *) task->slot_ranges
     };
 
     int module_event = -1;
-    if (state == ASM_EVENT_IMPORT_STARTED) module_event = REDISMODULE_SUBEVENT_CLUSTER_IMPORT_STARTED;
-    else if (state == ASM_EVENT_IMPORT_COMPLETED) module_event = REDISMODULE_SUBEVENT_CLUSTER_IMPORT_COMPLETED;
-    else if (state == ASM_EVENT_IMPORT_FAILED) module_event = REDISMODULE_SUBEVENT_CLUSTER_IMPORT_FAILED;
-    else if (state == ASM_EVENT_MIGRATE_STARTED) module_event = REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_STARTED;
-    else if (state == ASM_EVENT_MIGRATE_COMPLETED) module_event = REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_COMPLETED;
-    else if (state == ASM_EVENT_MIGRATE_FAILED) module_event = REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_FAILED;
+    if (state == ASM_EVENT_IMPORT_STARTED) module_event = REDISMODULE_SUBEVENT_CLUSTER_ASM_IMPORT_STARTED;
+    else if (state == ASM_EVENT_IMPORT_COMPLETED) module_event = REDISMODULE_SUBEVENT_CLUSTER_ASM_IMPORT_COMPLETED;
+    else if (state == ASM_EVENT_IMPORT_FAILED) module_event = REDISMODULE_SUBEVENT_CLUSTER_ASM_IMPORT_FAILED;
+    else if (state == ASM_EVENT_MIGRATE_STARTED) module_event = REDISMODULE_SUBEVENT_CLUSTER_ASM_MIGRATE_STARTED;
+    else if (state == ASM_EVENT_MIGRATE_COMPLETED) module_event = REDISMODULE_SUBEVENT_CLUSTER_ASM_MIGRATE_COMPLETED;
+    else if (state == ASM_EVENT_MIGRATE_FAILED) module_event = REDISMODULE_SUBEVENT_CLUSTER_ASM_MIGRATE_FAILED;
     serverAssert(module_event != -1);
 
-    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER, module_event, &info);
+    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_ASM, module_event, &info);
     clusterAsmOnEvent(task->id, state, task->slot_ranges);
 }
 
@@ -1919,20 +1918,19 @@ static int slotSnapshotSaveKeyValuePair(rio *rdb, kvobj *o, int dbid) {
 }
 
 /* Modules can use RM_ClusterPropagateForSlotMigration() during the
- * CLUSTER_MIGRATE_MODULE_PROPAGATE event to propagate commands that should be
+ * CLUSTER_ASM_MIGRATE_MODULE_PROPAGATE event to propagate commands that should be
  * delivered just before the slot snapshot delivery starts. This function
  * triggers the event, collects the commands and writes them to the rio. */
 static int propagateModuleCommands(asmTask *task, rio *rdb) {
-    RedisModuleClusterMigrationInfo info = {
-            REDISMODULE_CLUSTER_MIGRATIONINFO_VERSION,
-            0,
+    RedisModuleClusterAsmMigrationInfo info = {
+            REDISMODULE_CLUSTER_ASM_MIGRATIONINFO_VERSION,
             task->id,
             (RedisModuleSlotRangeArray *) task->slot_ranges
     };
 
     task->module_commands = zcalloc(sizeof(*task->module_commands));
-    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER,
-                          REDISMODULE_SUBEVENT_CLUSTER_MIGRATE_MODULE_PROPAGATE,
+    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_ASM,
+                          REDISMODULE_SUBEVENT_CLUSTER_ASM_MIGRATE_MODULE_PROPAGATE,
                           &info
     );
 
@@ -2603,13 +2601,13 @@ static void propagateTrimSlots(slotRangeArray *slots) {
 
 /* Trim the slots asynchronously in the BIO thread. */
 void asmTriggerBackgroundTrim(slotRangeArray *slots) {
-    RedisModuleClusterTrimInfoV1 fsi = {
-            REDISMODULE_CLUSTER_TRIMINFO_VERSION, 0,
+    RedisModuleClusterAsmTrimInfoV1 fsi = {
+            REDISMODULE_CLUSTER_ASM_TRIMINFO_VERSION,
             (RedisModuleSlotRangeArray *) slots
     };
 
-    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_TRIM,
-                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_BACKGROUND,
+    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_ASM_TRIM,
+                          REDISMODULE_SUBEVENT_CLUSTER_ASM_TRIM_BACKGROUND,
                           &fsi);
     /* TODO: This is going to send invalidation message for all the keys for
      * the tracking clients. We need to consider how we can do that for only
@@ -2821,13 +2819,13 @@ void asmActiveTrimStart(void) {
             asmManager->active_trim_keys_total += kvstoreDictSize(server.db[0].keys, slot);
     }        
 
-    RedisModuleClusterTrimInfoV1 fsi = {
-            REDISMODULE_CLUSTER_TRIMINFO_VERSION, 0,
+    RedisModuleClusterAsmTrimInfoV1 fsi = {
+            REDISMODULE_CLUSTER_ASM_TRIMINFO_VERSION,
             (RedisModuleSlotRangeArray *) slots
     };
 
-    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_TRIM,
-                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_STARTED,
+    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_ASM_TRIM,
+                          REDISMODULE_SUBEVENT_CLUSTER_ASM_TRIM_STARTED,
                           &fsi);
 
     sds str = slotRangeArrayToString(slots);
@@ -2856,13 +2854,13 @@ void asmActiveTrimEnd(int start_next_job) {
     /* Unblock the master if it is blocked */
     asmUnblockMasterAfterTrim();
 
-    RedisModuleClusterTrimInfoV1 fsi = {
-            REDISMODULE_CLUSTER_TRIMINFO_VERSION, 0,
+    RedisModuleClusterAsmTrimInfoV1 fsi = {
+            REDISMODULE_CLUSTER_ASM_TRIMINFO_VERSION,
             (RedisModuleSlotRangeArray *) slots
     };
 
-    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_TRIM,
-                          REDISMODULE_SUBEVENT_CLUSTER_TRIM_COMPLETED,
+    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_ASM_TRIM,
+                          REDISMODULE_SUBEVENT_CLUSTER_ASM_TRIM_COMPLETED,
                           &fsi);
 
     sds str = slotRangeArrayToString(slots);
@@ -2997,7 +2995,7 @@ int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv) {
 }
 
 /* Modules can use RM_ClusterPropagateForSlotMigration() during the
- * CLUSTER_MIGRATE_MODULE_PROPAGATE event to propagate commands that should be
+ * CLUSTER_ASM_MIGRATE_MODULE_PROPAGATE event to propagate commands that should be
  * delivered just before the slot snapshot delivery starts. */
 int asmModulePropagateBeforeSlotSnapshot(struct redisCommand *cmd, robj **argv, int argc) {
     /* This API is only called in the fork child. */
