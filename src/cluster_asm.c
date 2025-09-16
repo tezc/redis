@@ -47,7 +47,7 @@ typedef struct asmTask {
     mstime_t dest_slots_snapshot_time;  /* The time when the destination starts applying the slot snapshot */
     mstime_t dest_accum_applied_time;   /* The time when the destination finishes applying the accumulated buffer */
     sds error;                          /* Error message for this task */
-    redisOpArray *module_commands;      /* Module commands to be replicated at the beginning of slot migration */
+    redisOpArray *module_commands;      /* Module commands to be propagated at the beginning of slot migration */
 } asmTask;
 
 struct asmManager {
@@ -1934,17 +1934,24 @@ static int propagateModuleCommands(asmTask *task, rio *rdb) {
                           &info
     );
 
+    int ret = C_OK;
     /* Write the module commands to the rio */
     for (int i = 0; i < task->module_commands->numops; i++) {
         redisOp *op = &task->module_commands->ops[i];
-        if (rioWriteBulkCount(rdb, '*', op->argc) == 0) return C_ERR;
+        if (rioWriteBulkCount(rdb, '*', op->argc) == 0) {
+            ret = C_ERR;
+            break;
+        }
         for (int j = 0; j < op->argc; j++)
-            if (rioWriteBulkObject(rdb, op->argv[j]) == 0) return C_ERR;
+            if (rioWriteBulkObject(rdb, op->argv[j]) == 0) {
+                ret = C_ERR;
+                break;
+            }
     }
     redisOpArrayFree(task->module_commands);
     zfree(task->module_commands);
     task->module_commands = NULL;
-    return C_OK;
+    return ret;
 }
 
 /* Save the slot ranges snapshot to the file. It generates the DUMP encoded
