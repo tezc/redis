@@ -1945,7 +1945,7 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         # cleanup
         R 0 debug asm-trim-method default
         R 3 debug asm-trim-method default
-        R 0 CLUSTER MIGRATION IMPORT 0 100
+        R 0 CLUSTER MIGRATION IMPORT SLOTS 1 0 100
         wait_for_asm_done
         R 0 flushall
         R 1 flushall
@@ -1962,7 +1962,7 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
             R 0 set $key "value"
 
             # Migrate the slot ranges
-            set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100 200 300]
+            set task_id [R 1 CLUSTER MIGRATION IMPORT SLOTS 2 0 100 200 300]
             wait_for_ofs_sync [Rn 0] [Rn 3]
             wait_for_asm_done
 
@@ -1994,7 +1994,7 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
             assert_equal $trim_event_log [R 3 asm.get_cluster_trim_event_log]
 
             # cleanup
-            R 0 CLUSTER MIGRATION IMPORT 0 100 200 300
+            R 0 CLUSTER MIGRATION IMPORT SLOTS 2 0 100 200 300
             wait_for_asm_done
             clear_module_event_log
             R 0 debug asm-trim-method default
@@ -2083,7 +2083,7 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
 
         # cleanup
         R 0 asm.replicate_module_command 0 "" ""
-        R 0 CLUSTER MIGRATION IMPORT 0 100
+        R 0 CLUSTER MIGRATION IMPORT SLOTS 1 0 100
         wait_for_asm_done
         R 0 flushall
         R 1 flushall
