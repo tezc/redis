@@ -700,17 +700,10 @@ struct COMMAND_ARG CLUSTER_MEET_Args[] = {
 #define CLUSTER_MIGRATION_Keyspecs NULL
 #endif
 
-/* CLUSTER MIGRATION subcommand import slot_range argument table */
-struct COMMAND_ARG CLUSTER_MIGRATION_subcommand_import_slot_range_Subargs[] = {
-{MAKE_ARG("start-slot",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
-{MAKE_ARG("end-slot",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
-};
-
 /* CLUSTER MIGRATION subcommand import argument table */
 struct COMMAND_ARG CLUSTER_MIGRATION_subcommand_import_Subargs[] = {
-{MAKE_ARG("slots-keyword",ARG_TYPE_PURE_TOKEN,-1,"SLOTS",NULL,NULL,CMD_ARG_NONE,0,NULL)},
-{MAKE_ARG("numranges",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
-{MAKE_ARG("slot-range",ARG_TYPE_BLOCK,-1,NULL,NULL,NULL,CMD_ARG_MULTIPLE,2,NULL),.subargs=CLUSTER_MIGRATION_subcommand_import_slot_range_Subargs},
+{MAKE_ARG("start-slot",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
+{MAKE_ARG("end-slot",ARG_TYPE_INTEGER,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
 };
 
 /* CLUSTER MIGRATION subcommand cancel argument table */
@@ -727,7 +720,7 @@ struct COMMAND_ARG CLUSTER_MIGRATION_subcommand_status_Subargs[] = {
 
 /* CLUSTER MIGRATION subcommand argument table */
 struct COMMAND_ARG CLUSTER_MIGRATION_subcommand_Subargs[] = {
-{MAKE_ARG("import",ARG_TYPE_BLOCK,-1,"IMPORT",NULL,NULL,CMD_ARG_NONE,3,NULL),.subargs=CLUSTER_MIGRATION_subcommand_import_Subargs},
+{MAKE_ARG("import",ARG_TYPE_BLOCK,-1,"IMPORT",NULL,NULL,CMD_ARG_MULTIPLE,2,NULL),.subargs=CLUSTER_MIGRATION_subcommand_import_Subargs},
 {MAKE_ARG("cancel",ARG_TYPE_ONEOF,-1,"CANCEL",NULL,NULL,CMD_ARG_NONE,2,NULL),.subargs=CLUSTER_MIGRATION_subcommand_cancel_Subargs},
 {MAKE_ARG("status",ARG_TYPE_BLOCK,-1,"STATUS",NULL,NULL,CMD_ARG_NONE,2,NULL),.subargs=CLUSTER_MIGRATION_subcommand_status_Subargs},
 };

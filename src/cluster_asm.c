@@ -692,33 +692,18 @@ asmTask *asmCreateImportTask(const char *task_id, slotRangeArray *slot_ranges, s
     return task;
 }
 
-/* CLUSTER MIGRATION IMPORT SLOTS <numranges> <start-slot end-slot [start-slot end-slot ...]>
+/* CLUSTER MIGRATION IMPORT <start-slot end-slot [start-slot end-slot ...]>
  *
  * Sent by operator to the destination node to start the migration. */
 static void clusterMigrationCommandImport(client *c) {
-    if (c->argc < 7) {
-        addReplyErrorArity(c);
-        return;
-    }
-
-    if (strcasecmp(c->argv[3]->ptr, "slots") != 0) {
-        addReplyError(c, "unknown argument");
-        return;
-    }
-
-    long numranges = 0;
-    if (getRangeLongFromObjectOrReply(c, c->argv[4], 1, CLUSTER_SLOTS, &numranges,
-                                      "invalid number of slot ranges") != C_OK)
-        return;
-
     /* Validate slot range arg count */
-    int remaining = c->argc - 5;
-    if (remaining == 0 || remaining % 2 != 0 || remaining / 2 != numranges) {
+    int remaining = c->argc - 3;
+    if (remaining == 0 || remaining % 2 != 0) {
         addReplyErrorArity(c);
         return;
     }
 
-    slotRangeArray *slot_ranges = parseSlotRangesOrReply(c, c->argc, 5);
+    slotRangeArray *slot_ranges = parseSlotRangesOrReply(c, c->argc, 3);
     if (!slot_ranges) return;
 
     sds err = NULL;
@@ -848,7 +833,7 @@ static void clusterMigrationCommandStatus(client *c) {
 }
 
 /* CLUSTER MIGRATION
- *      <IMPORT SLOTS <numranges> <start-slot end-slot [start-slot end-slot ...]> |
+ *      <IMPORT <start-slot end-slot [start-slot end-slot ...]> |
  *       STATUS [ID <task-id> | ALL] |
  *       CANCEL [ID <task-id> | ALL]>
 */

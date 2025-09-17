@@ -21,30 +21,15 @@
                         "name": "import",
                         "token": "IMPORT",
                         "type": "block",
+                        "multiple": true,
                         "arguments": [
                             {
-                                "name": "slots-keyword",
-                                "token": "SLOTS",
-                                "type": "pure-token"
-                            },
-                            {
-                                "name": "numranges",
+                                "name": "start-slot",
                                 "type": "integer"
                             },
                             {
-                                "name": "slot-range",
-                                "type": "block",
-                                "multiple": true,
-                                "arguments": [
-                                    {
-                                        "name": "start-slot",
-                                        "type": "integer"
-                                    },
-                                    {
-                                        "name": "end-slot",
-                                        "type": "integer"
-                                    }
-                                ]
+                                "name": "end-slot",
+                                "type": "integer"
                             }
                         ]
                     },
