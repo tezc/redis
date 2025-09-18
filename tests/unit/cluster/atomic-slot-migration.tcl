@@ -1218,7 +1218,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 HSETEX $slot103_hfekey EX 10 FIELDS 1 f1 v1
 
         # migrate slot 0 to node-1
-        R 1 CLUSTER MIGRATION IMPORT SLOTS 1 0 100
+        R 1 CLUSTER MIGRATION IMPORT 0 100
         wait_for_asm_done
 
         # Verify the data is migrated
