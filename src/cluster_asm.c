@@ -2517,12 +2517,12 @@ int asmNotifyConfigUpdated(asmTask *task, sds *err) {
         return C_ERR;
     }
 
-    asmNotifyStateChange(task, event);
-
     /* Clear error message if successful. */
     sdsfree(task->error);
     task->error = sdsempty();
     task->state = ASM_DONE;
+
+    asmNotifyStateChange(task, event);
     asmTaskComplete(task);
 
     /* Trim the slots after the migrate task is done. */
