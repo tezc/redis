@@ -1914,6 +1914,7 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         } else {
             fail "ASM task did not fail"
         }
+        R 1 CLUSTER MIGRATION CANCEL ID $task_id
 
         # Check if the commands are being propagated twice.
         # If that happens, we'll hit the error: 'MULTI calls cannot be nested',
