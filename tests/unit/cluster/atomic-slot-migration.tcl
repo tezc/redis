@@ -1916,10 +1916,7 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         }
         R 1 CLUSTER MIGRATION CANCEL ID $task_id
 
-        # Check if the commands are being propagated twice.
-        # If that happens, we'll hit the error: 'MULTI calls cannot be nested',
-        # because two commands would be propagated and wrapped together
-        # inside a single MULTI/EXEC block.
+        # sanity check if lpush replicated correctly to the replica
         wait_for_ofs_sync [Rn 0] [Rn 3]
         assert_equal {item1} [R 0 lrange $listkey 0 -1]
         R 3 readonly
