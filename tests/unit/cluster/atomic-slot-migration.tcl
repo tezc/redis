@@ -2178,7 +2178,7 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
     }
 }
 
-start_server {tags "cluster"} {
+start_server {tags "cluster external:skip"} {
     test "Test RM_ClusterGetLocalSlotRanges without cluster" {
         r module load $testmodule
         assert_equal [r asm.cluster_get_local_slot_ranges] {{0 16383}}
