@@ -1881,6 +1881,38 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         assert_equal {OK} [R 0 trimslots ranges 1 16383 16383]
         assert_error {*READONLY*} {R 3 trimslots ranges 1 16383 16383}
     }
+
+    test "Restart will clean up unowned slot keys" {
+        R 0 flushall
+        R 1 flushall
+
+        # Set a slot to IMPORTING
+        set slot0_key [slot_key 0 import0]
+        R 0 set $slot0_key "slot0"
+
+        # migrate slot 0 to node-1
+        R 1 cluster setslot 0 importing [R 0 cluster myid]
+        R 0 cluster setslot 0 migrating [R 1 cluster myid]
+        R 0 MIGRATE "127.0.0.1" [get_port 1] "" 0 5000 keys $slot0_key
+        # slot0_key is migrated
+        assert_equal 1 [R 1 dbsize]
+        R 1 asking
+        assert_equal [R 1 get $slot0_key] "slot0"
+
+        # clear migrating/importing state
+        R 1 cluster setslot 0 stable
+        R 0 cluster setslot 0 stable
+
+        # restart node-1
+        restart_server -1 true false true save
+        wait_for_cluster_propagation
+        wait_for_cluster_state "ok"
+        # Node-1 has no keys
+        assert_equal 0 [R 1 dbsize]
+
+        R 1 flushall
+        R 0 flushall
+    }
 }
 
 set testmodule [file normalize tests/modules/atomicslotmigration.so]
