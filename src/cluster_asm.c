@@ -866,8 +866,8 @@ void clusterMigrationCommand(client *c) {
 
 /* Notify the state change to the module and the plugin. */
 void asmNotifyStateChange(asmTask *task, int state) {
-    RedisModuleClusterAsmMigrationInfo info = {
-            .version = REDISMODULE_CLUSTER_ASM_MIGRATIONINFO_VERSION,
+    RedisModuleClusterAsmInfo info = {
+            .version = REDISMODULE_CLUSTER_ASM_INFO_VERSION,
             .task_id = task->id,
             .slots = (RedisModuleSlotRangeArray *) task->slot_ranges
     };
@@ -1949,8 +1949,8 @@ static int slotSnapshotSaveKeyValuePair(rio *rdb, kvobj *o, int dbid) {
  * delivered just before the slot snapshot delivery starts. This function
  * triggers the event, collects the commands and writes them to the rio. */
 static int propagateModuleCommands(asmTask *task, rio *rdb) {
-    RedisModuleClusterAsmMigrationInfo info = {
-            .version = REDISMODULE_CLUSTER_ASM_MIGRATIONINFO_VERSION,
+    RedisModuleClusterAsmInfo info = {
+            .version = REDISMODULE_CLUSTER_ASM_INFO_VERSION,
             .task_id = task->id,
             .slots = (RedisModuleSlotRangeArray *) task->slot_ranges
     };
