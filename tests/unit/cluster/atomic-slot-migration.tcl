@@ -2154,7 +2154,7 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         assert_equal "value" [R 1 GET $key]
 
         # cleanup
-        R 0 cluster migration import 0 1
+        R 0 cluster migration import 0 100
         wait_for_asm_done
     }
 
