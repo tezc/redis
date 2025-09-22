@@ -9385,13 +9385,13 @@ int RM_ClusterPropagateForSlotMigration(RedisModuleCtx *ctx, const char *cmdname
     return ret == C_OK ? REDISMODULE_OK : REDISMODULE_ERR;
 }
 
-/* Returns the slot ranges for the local node.
+/* Returns the locally owned slot ranges for the node.
  *
  * An optional `ctx` can be provided to enable auto-memory management.
  * If cluster mode is disabled, the array will include all slots (0–16383).
  * If the node is a replica, the slot ranges of its master are returned.
  *
- * The returned array must be freed with RM_ClusterFreeSlotRanges.
+ * The returned array must be freed with RM_ClusterFreeSlotRanges().
  */
 RedisModuleSlotRangeArray *RM_ClusterGetLocalSlotRanges(RedisModuleCtx *ctx) {
     slotRangeArray *slots = clusterGetLocalSlotRanges();
@@ -9399,7 +9399,7 @@ RedisModuleSlotRangeArray *RM_ClusterGetLocalSlotRanges(RedisModuleCtx *ctx) {
     return (RedisModuleSlotRangeArray *)slots;
 }
 
-/* Frees a slot range array previously returned by RM_ClusterGetLocalSlotRanges.
+/* Frees a slot range array returned by RM_ClusterGetLocalSlotRanges().
  * Pass the `ctx` pointer only if the array was created with a context. */
 void RM_ClusterFreeSlotRanges(RedisModuleCtx *ctx, RedisModuleSlotRangeArray *slots) {
     if (ctx) autoMemoryFreed(ctx, REDISMODULE_AM_SLOTRANGEARRAY, slots);
