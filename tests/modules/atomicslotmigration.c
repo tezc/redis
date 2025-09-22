@@ -262,6 +262,17 @@ static int keyspaceNotificationTrimmedCallback(RedisModuleCtx *ctx, int type, co
     return REDISMODULE_OK;
 }
 
+/* ASM.PARENT SET key value  (just proxy to Redis SET) */
+static int asmParentSet(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    if (argc != 4) return RedisModule_WrongArity(ctx);
+    RedisModuleCallReply *reply = RedisModule_Call(ctx, "SET", "ss", argv[2], argv[3]);
+    if (!reply) return RedisModule_ReplyWithError(ctx, "ERR internal");
+    RedisModule_ReplyWithCallReply(ctx, reply);
+    RedisModule_FreeCallReply(reply);
+    RedisModule_ReplicateVerbatim(ctx);
+    return REDISMODULE_OK;
+}
+
 /* Clear both the cluster and trim event logs. */
 int clearEventLog(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     REDISMODULE_NOT_USED(argv);
@@ -353,6 +364,16 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
         return REDISMODULE_ERR;
 
     if (RedisModule_CreateCommand(ctx, "asm.lpush_replicate_crossslot_command", lpush_and_replicate_crossslot_command, "write", 0, 0, 0) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx, "asm.parent", NULL, "", 0, 0, 0) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    RedisModuleCommand *parent = RedisModule_GetCommand(ctx, "asm.parent");
+    if (!parent) return REDISMODULE_ERR;
+
+    /* Subcommand: ASM.PARENT SET (write) */
+    if (RedisModule_CreateSubcommand(parent, "set", asmParentSet, "write fast", 2, 2, 1) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
 
     if (RedisModule_SubscribeToServerEvent(ctx, RedisModuleEvent_ClusterAsm, clusterEventCallback) == REDISMODULE_ERR)

@@ -1466,15 +1466,15 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_condition 1000 10 {
             [CI 0 cluster_slot_migration_task_count] == 0 &&
             [CI 0 cluster_slot_migration_active_trim_jobs] == 0 &&
-            [CI 0 cluster_slot_migration_active_trim_keys_deleted] == 1500 &&
+            [CI 0 cluster_slot_migration_active_trim_current_job_trimmed] == 1500 &&
             [CI 3 cluster_slot_migration_active_trim_jobs] == 0 &&
-            [CI 3 cluster_slot_migration_active_trim_keys_deleted] == 1500
+            [CI 3 cluster_slot_migration_active_trim_current_job_trimmed] == 1500
         } else {
             fail "trim failed"
         }
 
-        assert_equal 1500 [CI 0 cluster_slot_migration_active_trim_keys_total]
-        assert_equal 1500 [CI 3 cluster_slot_migration_active_trim_keys_total]
+        assert_equal 1500 [CI 0 cluster_slot_migration_active_trim_current_job_keys]
+        assert_equal 1500 [CI 3 cluster_slot_migration_active_trim_current_job_keys]
 
         assert_equal 500 [R 0 dbsize]
         assert_equal 500 [R 3 dbsize]
@@ -1561,8 +1561,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 1 CLUSTER MIGRATION CANCEL ALL
         wait_for_asm_done
 
-        assert_morethan [CI 1 cluster_slot_migration_active_trim_keys_deleted] 0
-        assert_morethan [CI 4 cluster_slot_migration_active_trim_keys_deleted] 0
+        assert_morethan [CI 1 cluster_slot_migration_active_trim_current_job_keys] 0
+        assert_morethan [CI 4 cluster_slot_migration_active_trim_current_job_trimmed] 0
 
         assert_equal 1000 [R 0 dbsize]
         assert_equal 1000 [R 3 dbsize]
@@ -1721,9 +1721,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # Pause the server and verify no keys are trimmed
         R 0 client pause 100000 write ;# pause 100s
-        set prev [CI 0 cluster_slot_migration_active_trim_keys_deleted]
+        set prev [CI 0 cluster_slot_migration_active_trim_current_job_trimmed]
         after 1000 ; # wait some time to see if any keys are trimmed
-        set curr [CI 0 cluster_slot_migration_active_trim_keys_deleted]
+        set curr [CI 0 cluster_slot_migration_active_trim_current_job_trimmed]
         assert_equal $prev $curr
 
         R 0 client unpause
@@ -1847,7 +1847,6 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 1 flushall
 
         set prev_trim_done [CI 1 cluster_slot_migration_active_trim_done]
-        set prev_trim_keys_total [CI 1 cluster_slot_migration_active_trim_keys_total]
 
         R 1 debug populate 1000 [slot_prefix 0] 100
         R 1 debug populate 1000 [slot_prefix 1] 100
@@ -1860,8 +1859,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 1 exec
 
         wait_for_condition 1000 10 {
-            [CI 1 cluster_slot_migration_active_trim_done] == $prev_trim_done + 3 &&
-            [CI 1 cluster_slot_migration_active_trim_keys_total] == $prev_trim_keys_total + 3000
+            [CI 1 cluster_slot_migration_active_trim_done] == $prev_trim_done + 3
         } else {
             fail "active trim failed"
         }
@@ -2143,5 +2141,16 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
         wait_for_asm_done
         R 0 flushall
         R 1 flushall
+    }
+
+    test "Test subcommand propagation during slot migration" {
+        R 0 flushall
+        R 1 flushall
+        set task_id [setup_slot_migration_with_delay 0 1 0 100]
+
+        set key [slot_key 0 mykey]
+        R 0 asm.parent set $key "value" ;# execute a module subcommand
+        wait_for_asm_done
+        assert_equal "value" [R 1 GET $key]
     }
 }
