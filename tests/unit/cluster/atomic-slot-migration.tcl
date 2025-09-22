@@ -1895,7 +1895,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_cluster_state "ok"
 
         # Node-1 has no keys since unowned slot 0 keys were cleaned up during restart
-        assert {[scan [regexp -inline {keys\=([\d]*)} [R 0 info keyspace]] keys=%d] == {}}
+        assert {[scan [regexp -inline {keys\=([\d]*)} [R 1 info keyspace]] keys=%d] == {}}
 
         R 1 flushall
     }
