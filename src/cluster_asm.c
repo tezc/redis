@@ -298,15 +298,15 @@ sds asmCatInfoString(sds info) {
     }
 
     return sdscatprintf(info ? info : sdsempty(),
-                        "cluster_slot_migration_task_count:%d\r\n"
-                        "cluster_slot_migration_total_done_tasks:%lld\r\n"
-                        "cluster_slot_migration_sync_buffer_peak:%zu\r\n"
-                        "cluster_slot_migration_active_trim_jobs:%lu\r\n"
-                        "cluster_slot_migration_active_trim_started:%llu\r\n"
-                        "cluster_slot_migration_active_trim_done:%llu\r\n"
-                        "cluster_slot_migration_active_trim_cancelled:%llu\r\n"
-                        "cluster_slot_migration_active_trim_current_job_keys:%llu\r\n"
-                        "cluster_slot_migration_active_trim_current_job_trimmed:%llu\r\n",
+                        "slot_migration_task_count:%d\r\n"
+                        "slot_migration_total_done_tasks:%lld\r\n"
+                        "slot_migration_sync_buffer_peak:%zu\r\n"
+                        "slot_migration_active_trim_jobs:%lu\r\n"
+                        "slot_migration_active_trim_started:%llu\r\n"
+                        "slot_migration_active_trim_done:%llu\r\n"
+                        "slot_migration_active_trim_cancelled:%llu\r\n"
+                        "slot_migration_active_trim_current_job_keys:%llu\r\n"
+                        "slot_migration_active_trim_current_job_trimmed:%llu\r\n",
                         active_tasks,
                         asmManager->total_done_tasks,
                         asmGetPeakSyncBufferSize(),
