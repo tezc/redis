@@ -1630,14 +1630,6 @@ void clusterSyncSlotsCommand(client *c) {
             return;
         }
 
-        /* Trimming is skipped on failover to avoid data loss with legacy
-         * migration. Failover during import may leave keys in unowned slots and
-         * once a replica becomes master we cannot tell if legacy method or ASM
-         * was used, since replicas are unaware of migrations. Admin may also
-         * mark unowned slots as migrating to continue the legacy migration.
-         * So, ASM defers trimming unowned slots until the next ASM operation.*/
-        asmTrimSlotsIfNotOwned();
-
         slotRangeArray *slot_ranges = parseSlotRangesOrReply(c, c->argc, 4);
         if (!slot_ranges) return;
 

@@ -1451,34 +1451,13 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_log_messages -4 {"*Detected keys in slots that does not belong*Scheduling trim*"} $loglines 1000 10
         assert {[scan [regexp -inline {keys\=([\d]*)} [R 1 info keyspace]] keys=%d] == 10000}
 
-        # Try the same scenario above but check if trim is triggered on the next
-        # migrate operation
-        R 4 flushall
-        R 0 cluster migration import 0 100 ;# revert
-        wait_for_asm_done
-        set loglines [count_log_lines -1]
-
-        # Fill slots on node-0 and migrate it to node-4 (with some delay)
-        set task_id [setup_slot_migration_with_delay 0 4 0 100 10000 1000]
-        after 1000 ;# wait some time so that some keys are moved
-
-        # Trigger a failover on destination side and verify unowned keys are not
-        # trimmed once replica becomes master.
-        R 1 cluster failover
-        wait_for_failover 0
-        assert {[scan [regexp -inline {keys\=([\d]*)} [R 0 info keyspace]] keys=%d] >= 0}
-
-        # Start next migrate op on the new master and verify trim is triggered
-        set task_id [setup_slot_migration_with_delay 1 0 6000 6100]
-        wait_for_asm_done
-        wait_for_log_messages -1 {"*Detected keys in slots that does not belong*Scheduling trim*"} $loglines 1000 10
-        assert {[scan [regexp -inline {keys\=([\d]*)} [R 1 info keyspace]] keys=%d] == {}} ;# no keys
-
         # cleanup
+        R 1 cluster failover
+        wait_for_failover 1
         R 0 flushall
         R 1 flushall
         R 1 config set rdb-key-save-delay 0
-        R 1 cluster migration import 6000 6100
+        R 0 cluster migration import 0 100
         wait_for_asm_done
     }
 }
