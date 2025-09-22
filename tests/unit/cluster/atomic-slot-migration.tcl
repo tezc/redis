@@ -2135,15 +2135,21 @@ start_cluster 3 3 [list tags {external:skip cluster modules} config_lines [list 
 
     test "Test RM_ClusterGetLocalSlotRanges" {
        assert_equal [R 0 asm.cluster_get_local_slot_ranges] {{0 5461}}
+       assert_equal [R 3 asm.cluster_get_local_slot_ranges] {{0 5461}}
 
        R 0 cluster migration import 5463 6000
        wait_for_asm_done
+       wait_for_cluster_propagation
        assert_equal [R 0 asm.cluster_get_local_slot_ranges] {{0 5461} {5463 6000}}
+       assert_equal [R 3 asm.cluster_get_local_slot_ranges] {{0 5461} {5463 6000}}
 
        R 0 cluster migration import 5462 5462 6001 10922
        wait_for_asm_done
+       wait_for_cluster_propagation
        assert_equal [R 0 asm.cluster_get_local_slot_ranges] {{0 10922}}
+       assert_equal [R 3 asm.cluster_get_local_slot_ranges] {{0 10922}}
        assert_equal [R 1 asm.cluster_get_local_slot_ranges] {}
+       assert_equal [R 4 asm.cluster_get_local_slot_ranges] {}
     }
 }
 
