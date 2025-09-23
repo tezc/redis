@@ -567,6 +567,7 @@ int asmImportInProgress(void) {
 *  for the slot range, 0 otherwise. */
 inline static int asmCanFeedMigrationClient(asmTask *task) {
     return task->operation == ASM_MIGRATE &&
+           !task->cross_slot_during_propagating &&
              (task->state == ASM_SEND_BULK_AND_STREAM ||
               task->state == ASM_SEND_STREAM ||
               task->state == ASM_HANDOFF_PREP);
@@ -581,8 +582,7 @@ void asmFeedMigrationClient(robj **argv, int argc) {
 
     /* Check if there is a migrate task that can receive replication stream. */
     task = listNodeValue(listFirst(asmManager->tasks));
-    if (!asmCanFeedMigrationClient(task) || task->cross_slot_during_propagating)
-        return;
+    if (!asmCanFeedMigrationClient(task)) return;
 
     /* Ensure all arguments are converted to string encoding if necessary,
      * since getSlotFromCommand expects them to be string-encoded.
