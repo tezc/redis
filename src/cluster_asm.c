@@ -12,6 +12,7 @@
 #include "functions.h"
 #include "cluster_legacy.h"
 #include "cluster_asm.h"
+#include "cluster_slot_stats.h"
 
 #define ASM_IMPORT  (1 << 1)
 #define ASM_MIGRATE (1 << 2)
@@ -2535,6 +2536,13 @@ int asmNotifyConfigUpdated(asmTask *task, sds *err) {
                             asmTaskStateToString(task->state));
         asmTaskCancel(task, "slots configuration updated");
         return C_ERR;
+    }
+
+    /* Clear slot stats. */
+    for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
+        slotRange *sr = &task->slot_ranges->ranges[i];
+        for (int j = sr->start; j <= sr->end; j++)
+            clusterSlotStatReset(j);
     }
 
     /* Clear error message if successful. */
