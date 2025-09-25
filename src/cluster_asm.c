@@ -2948,7 +2948,7 @@ void asmTrimSlotsIfNotOwned(slotRangeArray *sra) {
 
 /* Set the task from old master failed when the master of this node is changed
  * or this node promotes to master. */
-static void asmMasterTaskSetFailed(void) {
+void asmMasterTaskSetFailed(void) {
     asmTask *task = asmManager->master_task;
     if (task == NULL) return;
 
@@ -2969,10 +2969,8 @@ static void asmMasterTaskSetFailed(void) {
     }
 
     /* Clear the master task since it is not the master anymore. */
-    if (asmManager->master_task) {
-        asmTaskFree(asmManager->master_task);
-        asmManager->master_task = NULL;
-    }
+    asmTaskFree(asmManager->master_task);
+    asmManager->master_task = NULL;
 }
 
 /* Handle the master task when the master of this node is changed. */

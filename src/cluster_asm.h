@@ -47,6 +47,7 @@ void asmCancelTrimJobs(void);
 void asmNotifySlavesStateOnFullSync(void);
 void asmHandleOnChangeMaster(void);
 void asmHandleOnPromoteToMaster(void);
+void asmMasterTaskSetFailed(void);
 int asmIsTrimInProgress(void);
 void asmActiveTrimCycle(int type);
 int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv);
