@@ -1033,7 +1033,7 @@ void asmNotifyStateChange(asmTask *task, int event) {
     else if (event == ASM_EVENT_MIGRATE_COMPLETED) module_event = REDISMODULE_SUBEVENT_CLUSTER_ASM_MIGRATE_COMPLETED;
     else if (event == ASM_EVENT_MIGRATE_FAILED) module_event = REDISMODULE_SUBEVENT_CLUSTER_ASM_MIGRATE_FAILED;
     serverAssert(module_event != -1);
-    serverLog(LL_NOTICE, "fire event %s for task %s", asmTaskStateToString(task->state), task->id);
+
     moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_ASM, module_event, &info);
 
     /* Propagate state change only when this node is master and has a real active task. */
