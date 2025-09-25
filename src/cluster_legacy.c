@@ -4271,6 +4271,9 @@ void clusterFailoverReplaceYourMaster(void) {
 
     /* 5) If there was a manual failover in progress, clear the state. */
     resetManualFailover();
+
+    /* 6) Handle the ASM task. */
+    asmHandleOnPromoteToMaster();
 }
 
 /* This function is called if we are a slave node and our master serving
@@ -5324,6 +5327,7 @@ static inline void removeAllNotOwnedShardChannelSubscriptions(void) {
 void clusterSetMaster(clusterNode *n) {
     serverAssert(n != myself);
     serverAssert(myself->numslots == 0);
+    int master_changed = 0;
 
     int was_master = clusterNodeIsMaster(myself);
     if (was_master) {
@@ -5331,8 +5335,10 @@ void clusterSetMaster(clusterNode *n) {
         myself->flags |= CLUSTER_NODE_SLAVE;
         clusterCloseAllSlots();
     } else {
-        if (myself->slaveof)
+        if (myself->slaveof) {
             clusterNodeRemoveSlave(myself->slaveof,myself);
+            master_changed = myself->slaveof != n;
+        }
     }
     myself->slaveof = n;
     updateShardId(myself, n->shard_id);
@@ -5343,6 +5349,7 @@ void clusterSetMaster(clusterNode *n) {
 
     /* Cancel all ASM tasks when switching into slave */
     if (was_master) clusterAsmCancel(NULL, "switching to replica");
+    if (master_changed) asmHandleOnChangeMaster();
 }
 
 /* -----------------------------------------------------------------------------
@@ -6560,6 +6567,7 @@ int clusterAllowFailoverCmd(client *c) {
 
 void clusterPromoteSelfToMaster(void) {
     replicationUnsetMaster();
+    asmHandleOnPromoteToMaster();
 }
 
 int clusterAsmOnEvent(const char *task_id, int event, void *arg) {

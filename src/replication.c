@@ -844,6 +844,9 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
             return C_ERR;
         }
     }
+
+    /* Notify slaves about the ongoing ASM task when we start a full sync. */
+    asmNotifySlavesStateOnFullSync();
     return C_OK;
 }
 
@@ -5177,6 +5180,8 @@ void failoverCommand(client *c) {
     
     server.force_failover = force_flag;
     server.failover_state = FAILOVER_WAIT_FOR_SYNC;
+    /* Cancel all ASM tasks when starting failover */
+    clusterAsmCancel(NULL, "failover requested");
     /* Cluster failover will unpause eventually */
     pauseActions(PAUSE_DURING_FAILOVER,
                  LLONG_MAX,

@@ -43,9 +43,10 @@ sds asmCatInfoString(sds info);
 void clusterMigrationCommand(client *c);
 void clusterSyncSlotsCommand(client *c);
 struct asmTask *asmLookupTaskBySlotRangeArray(struct slotRangeArray *sra);
-void asmTrimSlotsIfNotOwned(void);
 void asmCancelTrimJobs(void);
-
+void asmNotifySlavesStateOnFullSync(void);
+void asmHandleOnChangeMaster(void);
+void asmHandleOnPromoteToMaster(void);
 int asmIsTrimInProgress(void);
 void asmActiveTrimCycle(int type);
 int asmActiveTrimDelIfNeeded(redisDb *db, robj *key, kvobj *kv);
