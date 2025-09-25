@@ -2047,28 +2047,34 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
             # Migrate the slot ranges
             set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100 200 300]
             wait_for_asm_done
-            wait_for_ofs_sync [Rn 0] [Rn 3]
-            wait_for_ofs_sync [Rn 0] [Rn 6]
-            wait_for_ofs_sync [Rn 1] [Rn 4]
-            wait_for_ofs_sync [Rn 1] [Rn 7]
 
             set src_id [R 0 cluster myid]
             set dest_id [R 1 cluster myid]
 
             # Verify the events on source, both master and replica
-            foreach {node_id} {0 3 6} {
-                assert_equal [list \
-                    "sub: cluster-asm-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
-                    "sub: cluster-asm-migrate-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
-                ] [R $node_id asm.get_cluster_event_log]
+            set migrate_event_log [list \
+                "sub: cluster-asm-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
+                "sub: cluster-asm-migrate-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
+            ]
+            wait_for_condition 500 10 {
+                [R 0 asm.get_cluster_event_log] eq $migrate_event_log &&
+                [R 3 asm.get_cluster_event_log] eq $migrate_event_log &&
+                [R 6 asm.get_cluster_event_log] eq $migrate_event_log
+            } else {
+                fail "ASM migrate event not received"
             }
 
             # Verify the events on destination, both master and replica
-            foreach {node_id} {1 4 7} {
-                assert_equal [list \
-                    "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
-                    "sub: cluster-asm-import-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
-                ] [R $node_id asm.get_cluster_event_log]
+            set import_event_log [list \
+                "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
+                "sub: cluster-asm-import-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
+            ]
+            wait_for_condition 500 10 {
+                [R 1 asm.get_cluster_event_log] eq $import_event_log &&
+                [R 4 asm.get_cluster_event_log] eq $import_event_log &&
+                [R 7 asm.get_cluster_event_log] eq $import_event_log
+            } else {
+                fail "ASM import event not received"
             }
 
             # Verify the trim events
@@ -2083,9 +2089,13 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
                     "sub: cluster-asm-trim-background, slots:0-100,200-300" \
                 ]
             }
-            assert_equal $trim_event_log [R 0 asm.get_cluster_trim_event_log]
-            assert_equal $trim_event_log [R 3 asm.get_cluster_trim_event_log]
-            assert_equal $trim_event_log [R 6 asm.get_cluster_trim_event_log]
+            wait_for_condition 500 10 {
+                [R 0 asm.get_cluster_trim_event_log] eq $trim_event_log &&
+                [R 3 asm.get_cluster_trim_event_log] eq $trim_event_log &&
+                [R 6 asm.get_cluster_trim_event_log] eq $trim_event_log
+            } else {
+                fail "ASM source trim event not received"
+            }
 
             # cleanup
             R 0 CLUSTER MIGRATION IMPORT 0 100 200 300
@@ -2116,28 +2126,34 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
             }
             R 1 CLUSTER MIGRATION CANCEL ID $task_id
             wait_for_asm_done
-            wait_for_ofs_sync [Rn 0] [Rn 3]
-            wait_for_ofs_sync [Rn 0] [Rn 6]
-            wait_for_ofs_sync [Rn 1] [Rn 4]
-            wait_for_ofs_sync [Rn 1] [Rn 7]
 
             set src_id [R 0 cluster myid]
             set dest_id [R 1 cluster myid]
 
-            # Verify the events on source
-            foreach {node_id} {0 3 6} {
-                assert_equal [list \
-                    "sub: cluster-asm-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                    "sub: cluster-asm-migrate-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                ] [R $node_id asm.get_cluster_event_log]
+            # Verify the events on source, both master and replica
+            set migrate_event_log [list \
+                "sub: cluster-asm-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-asm-migrate-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+            ]
+            wait_for_condition 500 10 {
+                [R 0 asm.get_cluster_event_log] eq $migrate_event_log &&
+                [R 3 asm.get_cluster_event_log] eq $migrate_event_log &&
+                [R 6 asm.get_cluster_event_log] eq $migrate_event_log
+            } else {
+                fail "ASM migrate event not received"
             }
 
-            # Verify the events on destination
-            foreach {node_id} {1 4 7} {
-                assert_equal [list \
-                    "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                    "sub: cluster-asm-import-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                ] [R $node_id asm.get_cluster_event_log]
+            # Verify the events on destination, both master and replica
+            set import_event_log [list \
+                "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-asm-import-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+            ]
+            wait_for_condition 500 10 {
+                [R 1 asm.get_cluster_event_log] eq $import_event_log &&
+                [R 4 asm.get_cluster_event_log] eq $import_event_log &&
+                [R 7 asm.get_cluster_event_log] eq $import_event_log
+            } else {
+                fail "ASM import event not received"
             }
 
             # Verify the trim events on destination (partially imported keys are trimmed)
@@ -2152,14 +2168,20 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
                     "sub: cluster-asm-trim-background, slots:0-100" \
                 ]
             }
-            assert_equal $trim_event_log [R 1 asm.get_cluster_trim_event_log]
-            assert_equal $trim_event_log [R 4 asm.get_cluster_trim_event_log]
-            assert_equal $trim_event_log [R 7 asm.get_cluster_trim_event_log]
+            wait_for_condition 500 10 {
+                [R 1 asm.get_cluster_trim_event_log] eq $trim_event_log &&
+                [R 4 asm.get_cluster_trim_event_log] eq $trim_event_log &&
+                [R 7 asm.get_cluster_trim_event_log] eq $trim_event_log
+            } else {
+                fail "ASM destination trim event not received"
+            }
 
             # cleanup
             clear_module_event_log
             reset_default_trim_mothod
             wait_for_asm_done
+            R 0 flushall
+            R 1 flushall
         }
 
         test "Test cluster module notifications on failover ($trim_method-trim)" {
@@ -2186,28 +2208,33 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
             wait_for_cluster_propagation
             wait_for_asm_done
 
-            wait_for_ofs_sync [Rn 0] [Rn 3]
-            wait_for_ofs_sync [Rn 0] [Rn 6]
-            wait_for_ofs_sync [Rn 4] [Rn 1]
-            wait_for_ofs_sync [Rn 4] [Rn 7]
-
             set src_id [R 0 cluster myid]
             set dest_id [R 1 cluster myid]
 
-            # Verify the events on source
-            foreach {node_id} {0 3 6} {
-                assert_equal [list \
-                    "sub: cluster-asm-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                    "sub: cluster-asm-migrate-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                ] [R $node_id asm.get_cluster_event_log]
+            # Verify the events on source, both master and replica
+            set migrate_event_log [list \
+                "sub: cluster-asm-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-asm-migrate-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+            ]
+            wait_for_condition 500 10 {
+                [R 0 asm.get_cluster_event_log] eq $migrate_event_log &&
+                [R 3 asm.get_cluster_event_log] eq $migrate_event_log &&
+                [R 6 asm.get_cluster_event_log] eq $migrate_event_log
+            } else {
+                fail "ASM migrate event not received"
             }
 
-            # Verify the events on destination
-            foreach {node_id} {1 4 7} {
-                assert_equal [list \
-                    "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                    "sub: cluster-asm-import-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                ] [R $node_id asm.get_cluster_event_log]
+            # Verify the events on destination, both master and replica
+            set import_event_log [list \
+                "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-asm-import-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+            ]
+            wait_for_condition 500 10 {
+                [R 1 asm.get_cluster_event_log] eq $import_event_log &&
+                [R 4 asm.get_cluster_event_log] eq $import_event_log &&
+                [R 7 asm.get_cluster_event_log] eq $import_event_log
+            } else {
+                fail "ASM import event not received"
             }
 
             # Verify the trim events on destination (partially imported keys are trimmed)
@@ -2223,9 +2250,13 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
                     "sub: cluster-asm-trim-background, slots:0-0" \
                 ]
             }
-            assert_equal $trim_event_log [R 1 asm.get_cluster_trim_event_log]
-            assert_equal $trim_event_log [R 4 asm.get_cluster_trim_event_log]
-            assert_equal $trim_event_log [R 7 asm.get_cluster_trim_event_log]
+            wait_for_condition 500 10 {
+                [R 1 asm.get_cluster_trim_event_log] eq $trim_event_log &&
+                [R 4 asm.get_cluster_trim_event_log] eq $trim_event_log &&
+                [R 7 asm.get_cluster_trim_event_log] eq $trim_event_log
+            } else {
+                fail "ASM destination trim event not received"
+            }
 
             # cleanup
             R 1 CLUSTER FAILOVER TAKEOVER
@@ -2233,6 +2264,8 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
             wait_for_cluster_propagation
             clear_module_event_log
             reset_default_trim_mothod
+            R 0 flushall
+            R 1 flushall
         }
     }
 
