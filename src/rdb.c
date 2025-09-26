@@ -3509,7 +3509,7 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
             } else if (!strcasecmp(auxkey->ptr,"redis-bits")) {
                 /* Just ignored. */
             } else if (!strcasecmp(auxkey->ptr,"asm-task")) {
-                asmReplicaHandleMasterAsmTask(auxval->ptr);
+                asmReplicaHandleMasterTask(auxval->ptr);
             } else {
                 /* We ignore fields we don't understand, as by AUX field
                  * contract. */

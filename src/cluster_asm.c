@@ -2066,7 +2066,7 @@ void clusterSyncSlotsCommand(client *c) {
                     addReplyError(c, "CLUSTER SYNCSLOTS CONF ASM-TASK only allowed on replica");
                     return;
                 }
-                if (asmReplicaHandleMasterAsmTask(c->argv[j + 1]->ptr) == C_OK) {
+                if (asmReplicaHandleMasterTask(c->argv[j + 1]->ptr) == C_OK) {
                     addReply(c, shared.ok);
                 } else {
                     addReplyErrorFormat(c, "Failed to handle master task: %s",
@@ -2982,7 +2982,7 @@ void asmHandlePromotionToMaster(void) {
 }
 
 /* The replicas handle the master import ASM task information. */
-int asmReplicaHandleMasterAsmTask(sds task_info) {
+int asmReplicaHandleMasterTask(sds task_info) {
     if (!server.cluster_enabled || !clusterNodeIsSlave(getMyClusterNode())) return C_ERR;
 
     /* If the master task is empty, it means the master finished the task, the replica

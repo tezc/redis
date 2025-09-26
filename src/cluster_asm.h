@@ -45,7 +45,7 @@ void clusterSyncSlotsCommand(client *c);
 struct asmTask *asmLookupTaskBySlotRangeArray(struct slotRangeArray *sra);
 void asmCancelTrimJobs(void);
 sds asmDumpActiveImportTask(void);
-int asmReplicaHandleMasterAsmTask(sds task_info);
+int asmReplicaHandleMasterTask(sds task_info);
 void asmHandleMasterChange(void);
 void asmHandlePromotionToMaster(void);
 void asmHandleOrphanedMasterTask(int trim_slots);
