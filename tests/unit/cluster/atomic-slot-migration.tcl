@@ -2056,13 +2056,9 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
                 "sub: cluster-asm-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
                 "sub: cluster-asm-migrate-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
             ]
-            wait_for_condition 500 10 {
-                [R 0 asm.get_cluster_event_log] eq $migrate_event_log &&
-                [R 3 asm.get_cluster_event_log] eq $migrate_event_log &&
-                [R 6 asm.get_cluster_event_log] eq $migrate_event_log
-            } else {
-                fail "ASM migrate event not received"
-            }
+            assert_equal [R 0 asm.get_cluster_event_log] $migrate_event_log
+            assert_equal [R 3 asm.get_cluster_event_log] {}
+            assert_equal [R 6 asm.get_cluster_event_log] {}
 
             # Verify the events on destination, both master and replica
             set import_event_log [list \
@@ -2135,13 +2131,9 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
                 "sub: cluster-asm-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
                 "sub: cluster-asm-migrate-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
             ]
-            wait_for_condition 500 10 {
-                [R 0 asm.get_cluster_event_log] eq $migrate_event_log &&
-                [R 3 asm.get_cluster_event_log] eq $migrate_event_log &&
-                [R 6 asm.get_cluster_event_log] eq $migrate_event_log
-            } else {
-                fail "ASM migrate event not received"
-            }
+            assert_equal [R 0 asm.get_cluster_event_log] $migrate_event_log
+            assert_equal [R 3 asm.get_cluster_event_log] {}
+            assert_equal [R 6 asm.get_cluster_event_log] {}
 
             # Verify the events on destination, both master and replica
             set import_event_log [list \
@@ -2216,13 +2208,9 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
                 "sub: cluster-asm-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
                 "sub: cluster-asm-migrate-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
             ]
-            wait_for_condition 500 10 {
-                [R 0 asm.get_cluster_event_log] eq $migrate_event_log &&
-                [R 3 asm.get_cluster_event_log] eq $migrate_event_log &&
-                [R 6 asm.get_cluster_event_log] eq $migrate_event_log
-            } else {
-                fail "ASM migrate event not received"
-            }
+            assert_equal [R 0 asm.get_cluster_event_log] $migrate_event_log
+            assert_equal [R 3 asm.get_cluster_event_log] {}
+            assert_equal [R 6 asm.get_cluster_event_log] {}
 
             # Verify the events on destination, both master and replica
             set import_event_log [list \
@@ -2267,6 +2255,134 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
             R 0 flushall
             R 1 flushall
         }
+    }
+    
+    foreach with_rdb {"with" "without"} {
+        test "Test cluster module notifications when replica restart $with_rdb RDB" {
+            clear_module_event_log
+            R 1 debug asm-trim-method $trim_method
+            R 4 debug asm-trim-method $trim_method
+            R 7 debug asm-trim-method $trim_method
+            R 4 config set save ""
+
+            set src_id [R 0 cluster myid]
+            set dest_id [R 1 cluster myid]
+
+            # Set a key in the slot range
+            set key [slot_key 0 mykey]
+            R 0 set $key "value"
+
+            # Start migration, 2s delay
+            set task_id [setup_slot_migration_with_delay 0 1 0 100 0 2000000]
+            # Wait until at least one key is moved to destination
+            wait_for_condition 1000 10 {
+                [scan [regexp -inline {keys\=([\d]*)} [R 1 info keyspace]] keys=%d] >= 1
+            } else {
+                fail "Key not moved to destination"
+            }
+            wait_for_ofs_sync [Rn 1] [Rn 4]
+
+            # restart node 4
+            if {$with_rdb eq "with"} {
+                restart_server -4 true false true save ;# rdb save
+                # the asm task info in rdb will fire module event
+                assert_equal  [list \
+                    "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                ] [R 4 asm.get_cluster_event_log]
+            } else {                
+                restart_server -4 true false true nosave ;# no rdb saved
+            }
+            wait_for_cluster_propagation
+
+            wait_for_asm_done
+
+            # started and completed are paired both master and replicas even restarting
+            set import_event_log [list \
+                "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-asm-import-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+            ]
+            wait_for_condition 500 10 {
+                [R 1 asm.get_cluster_event_log] eq $import_event_log &&
+                [R 4 asm.get_cluster_event_log] eq $import_event_log &&
+                [R 7 asm.get_cluster_event_log] eq $import_event_log
+            } else {
+                fail "ASM import event not received"
+            }
+
+            R 0 CLUSTER MIGRATION IMPORT 0 100
+            wait_for_asm_done
+            R 4 save ;# save an empty rdb to override previous one
+            clear_module_event_log
+            reset_default_trim_mothod
+            R 0 flushall
+            R 1 flushall
+        }
+    }
+
+    test "Test cluster module notifications when replica is disconnected and full resync" {
+        clear_module_event_log
+        R 1 debug asm-trim-method $trim_method
+        R 4 debug asm-trim-method $trim_method
+        R 7 debug asm-trim-method $trim_method
+
+        set src_id [R 0 cluster myid]
+        set dest_id [R 1 cluster myid]
+
+        # Set a key in the slot range
+        set key [slot_key 0 mykey]
+        R 0 set $key "value"
+
+        # Start migration, 2s delay
+        set task_id [setup_slot_migration_with_delay 0 1 0 100 0 2000000]
+        # Wait until at least one key is moved to destination
+        wait_for_condition 1000 10 {
+            [scan [regexp -inline {keys\=([\d]*)} [R 1 info keyspace]] keys=%d] >= 1
+        } else {
+            fail "Key not moved to destination"
+        }
+        wait_for_ofs_sync [Rn 1] [Rn 4]
+
+        # puase node-4
+        set r4_pid [S 4 process_id]
+        pause_process $r4_pid
+
+        # set a small repl-backlog-size and write some commands to make node-4
+        # full resync when reconnecting after waking up
+        R 1 config set repl-backlog-size 16kb
+        R 1 client kill type replica
+        set 1k_str [string repeat "a" 1024]
+        for {set i 0} {$i < 2000} {incr i} {
+            R 1 set [slot_key 6000] $1k_str
+        }
+
+        # after ASM task is completed, wake up node-4
+        wait_for_condition 1000 10 {
+            [CI 1 slot_migration_task_count] == 0 &&
+            [CI 1 slot_migration_active_trim_jobs] == 0
+        } else {
+            fail "ASM tasks did not completed"
+        }
+        resume_process $r4_pid
+
+        # started and completed are paired, and not duplicated
+        set import_event_log [list \
+            "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+            "sub: cluster-asm-import-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+        ]
+        wait_for_condition 500 10 {
+            [R 1 asm.get_cluster_event_log] eq $import_event_log &&
+            [R 4 asm.get_cluster_event_log] eq $import_event_log &&
+            [R 7 asm.get_cluster_event_log] eq $import_event_log
+        } else {
+            fail "ASM import event not received"
+        }
+
+        R 0 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_asm_done
+        clear_module_event_log
+        reset_default_trim_mothod
+        R 0 flushall
+        R 1 flushall
     }
 
     test "Test module replicates commands at the beginning of slot migration " {

@@ -1089,7 +1089,7 @@ void clusterReset(int hard) {
 
     /* Cancel all ASM tasks */
     clusterAsmCancel(NULL, "CLUSTER RESET");
-    asmMasterTaskSetFailed();
+    asmHandleOrphanedMasterTask(0);
     asmCancelTrimJobs();
 
     /* Unassign all the slots. */
@@ -4274,7 +4274,7 @@ void clusterFailoverReplaceYourMaster(void) {
     resetManualFailover();
 
     /* 6) Handle the ASM task. */
-    asmHandleOnPromoteToMaster();
+    asmHandlePromotionToMaster();
 }
 
 /* This function is called if we are a slave node and our master serving
@@ -5350,7 +5350,7 @@ void clusterSetMaster(clusterNode *n) {
 
     /* Cancel all ASM tasks when switching into slave */
     if (was_master) clusterAsmCancel(NULL, "switching to replica");
-    if (master_changed) asmHandleOnChangeMaster();
+    if (master_changed) asmHandleMasterChange();
 }
 
 /* -----------------------------------------------------------------------------
@@ -6568,7 +6568,7 @@ int clusterAllowFailoverCmd(client *c) {
 
 void clusterPromoteSelfToMaster(void) {
     replicationUnsetMaster();
-    asmHandleOnPromoteToMaster();
+    asmHandlePromotionToMaster();
 }
 
 int clusterAsmOnEvent(const char *task_id, int event, void *arg) {

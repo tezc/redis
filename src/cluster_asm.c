@@ -142,6 +142,7 @@ void asmTriggerActiveTrim(slotRangeArray *slots);
 void asmActiveTrimEnd(void);
 int asmIsAnyTrimJobOverlaps(slotRangeArray *slots);
 void asmTrimSlotsIfNotOwned(slotRangeArray *sra);
+void asmNotifyStateChange(asmTask *task, int event);
 
 void clusterAsmInit(void) {
     asmManager = zcalloc(sizeof(*asmManager));
@@ -419,13 +420,13 @@ sds asmTaskSerialize(asmTask *task) {
 asmTask *asmTaskDeserialize(sds data) {
     int count, idx = 0;
     asmTask *task = NULL;
-    if (!data) return NULL;
+    if (!data || sdslen(data) == 0) return NULL;
 
     sds *parts = sdssplitlen(data, sdslen(data), ":", 1, &count);
     if (count < 6) goto err;
 
     /* Parse task ID */
-    if (sdslen(parts[idx]) != CLUSTER_NAMELEN) goto err;
+    if (sdslen(parts[idx]) == 0) goto err;
     task = asmTaskCreate(parts[idx]);
     if (!task) goto err;
     idx++;
@@ -475,17 +476,20 @@ err:
 }
 
 /* Notify slaves about ASM task information to maintain consistency during slot migration.
- * This function sends a CLUSTER SYNCSLOTS CONF MASTER-TASK command to all connected slaves
+ * This function sends a CLUSTER SYNCSLOTS CONF ASM-TASK command to all connected slaves
  * with the serialized task information. */
 void asmNotifySlavesStateChange(struct asmTask *task) {
-    if (!clusterNodeIsMaster(getMyClusterNode()) || listLength(server.slaves) == 0) return;
+    if (!server.cluster_enabled || !clusterNodeIsMaster(getMyClusterNode())) return;
 
-    /* Create command arguments for CLUSTER SYNCSLOTS CONF MASTER-TASK */
+    /* Do not propagate migrate task to slaves, as slaves never migrate data. */
+    if (task->operation == ASM_MIGRATE) return;
+
+    /* Create command arguments for CLUSTER SYNCSLOTS CONF ASM-TASK */
     robj *argv[5];
     argv[0] = createStringObject("CLUSTER", 7);
     argv[1] = createStringObject("SYNCSLOTS", 9);
     argv[2] = createStringObject("CONF", 4);
-    argv[3] = createStringObject("MASTER-TASK", 11);
+    argv[3] = createStringObject("ASM-TASK", 8);
     argv[4] = createObject(OBJ_STRING, asmTaskSerialize(task));
 
     /* Send the command to all slaves */
@@ -497,22 +501,27 @@ void asmNotifySlavesStateChange(struct asmTask *task) {
     }
 }
 
-/* The replica may ask for full sync in the middle of a migration task, and has
- * no idea about ASM start and end. So we need to notify the replica about the
- * current task. This message may be duplicated, but in replica, we only process
- * when the event is changed. */
-void asmNotifySlavesStateOnFullSync(void) {
-    if (!server.cluster_enabled || !clusterNodeIsMaster(getMyClusterNode()) ||
-        listLength(server.slaves) == 0) return;
-    if (!asmManager || listLength(asmManager->tasks) == 0) return;
+/* Dump the active import ASM task information. */
+sds asmDumpActiveImportTask(void) {
+    if (!server.cluster_enabled) return NULL;
 
+    /* For slave, dump the master active task. */
+    if (clusterNodeIsSlave(getMyClusterNode()) &&
+        asmManager->master_task &&
+        asmManager->master_task->state != ASM_FAILED &&
+        asmManager->master_task->state != ASM_DONE)
+    {
+        return asmTaskSerialize(asmManager->master_task);
+    }
+
+    /* For master, dump the first active task. */
+    if (!asmManager || listLength(asmManager->tasks) == 0) return NULL;
     asmTask *task = listNodeValue(listFirst(asmManager->tasks));
-    /* We only need to notify when the task is in progress. We already started
-     * trimming unowned slots if the task is done or failed. */
+    if (task->operation == ASM_MIGRATE) return NULL;
     if (task->state == ASM_NONE || task->state == ASM_FAILED ||
-        task->state == ASM_DONE) return;
+        task->state == ASM_DONE) return NULL;
 
-    asmNotifySlavesStateChange(task);
+    return asmTaskSerialize(task);
 }
 
 size_t asmGetPeakSyncBufferSize(void) {
@@ -1035,6 +1044,8 @@ void asmNotifyStateChange(asmTask *task, int event) {
     serverAssert(module_event != -1);
 
     moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_ASM, module_event, &info);
+    serverLog(LL_DEBUG, "Fire cluster asm module event, task: id=%s, state=%s",
+                        task->id, asmTaskStateToString(task->state));
 
     /* Propagate state change only when this node is master and has a real active task. */
     if (clusterNodeIsMaster(getMyClusterNode()) && task != asmManager->master_task) {
@@ -2049,34 +2060,17 @@ void clusterSyncSlotsCommand(client *c) {
 
                 sdsfreesplitres(parts, count);
                 addReply(c, shared.ok);
-            } else if (!strcasecmp(c->argv[j]->ptr, "master-task")) {
-                /* master-task task_id:source_node:dest_node:operation:state:slot_ranges */
+            } else if (!strcasecmp(c->argv[j]->ptr, "asm-task")) {
+                /* asm-task task_id:source_node:dest_node:operation:state:slot_ranges */
                 if (clusterNodeIsMaster(getMyClusterNode())) {
-                    addReplyError(c, "CLUSTER SYNCSLOTS CONF MASTER-TASK only allowed on replica");
+                    addReplyError(c, "CLUSTER SYNCSLOTS CONF ASM-TASK only allowed on replica");
                     return;
                 }
-                int send_event = 0;
-                sds task_info = c->argv[j + 1]->ptr;
-                asmTask *task = asmTaskDeserialize(task_info);
-                if (task) {
-                    int event = asmTaskStateToEvent(task);
-                    if (asmManager->master_task) {
-                        /* Notify when the task is changed, to avoid duplicated notification. */
-                        if (strcmp(task->id, asmManager->master_task->id) != 0 ||
-                            task->operation != asmManager->master_task->operation ||
-                            event != asmTaskStateToEvent(asmManager->master_task))
-                        {
-                            send_event = 1;
-                        }
-                        asmTaskFree(asmManager->master_task);
-                    } else {
-                        send_event = 1; /* No task before, always notify. */
-                    }
-                    asmManager->master_task = task;
-                    if (send_event) asmNotifyStateChange(task, event);
+                if (asmReplicaHandleMasterAsmTask(c->argv[j + 1]->ptr) == C_OK) {
                     addReply(c, shared.ok);
                 } else {
-                    addReplyErrorFormat(c, "Invalid task info: %s", task_info);
+                    addReplyErrorFormat(c, "Failed to handle master task: %s",
+                                           (char *)c->argv[j + 1]->ptr);
                 }
             } else {
                 addReplyErrorFormat(c, "Unknown option %s", (char *)c->argv[j]->ptr);
@@ -2946,46 +2940,103 @@ void asmTrimSlotsIfNotOwned(slotRangeArray *sra) {
     slotRangeArrayFree(trim_sra);
 }
 
-/* Set the task from old master failed when the master of this node is changed
- * or this node promotes to master. */
-void asmMasterTaskSetFailed(void) {
+/* Handle the orphaned master task when the master of this node is changed or
+ * this node promotes to master. And trim unowned slots when the import task
+ * is failed and trim_slots argument is set. */
+void asmHandleOrphanedMasterTask(int trim_slots) {
+    if (!server.cluster_enabled) return;
+
     asmTask *task = asmManager->master_task;
     if (task == NULL) return;
+    serverAssert(task->operation == ASM_IMPORT);
 
     sds slot_ranges_str = slotRangeArrayToString(task->slot_ranges);
-    serverLog(LL_WARNING, "Failed %s task from old master. id=%s, slots=%s",
-              task->operation == ASM_IMPORT ? "import" : "migrate",
-              task->id, slot_ranges_str);
+    serverLog(LL_WARNING, "Failed import task from old master. id=%s, slots=%s",
+                           task->id, slot_ranges_str);
     sdsfree(slot_ranges_str);
 
     /* Check if there is an ASM task that master did not finish. */
     if (task->state != ASM_DONE && task->state != ASM_FAILED) {
         /* Mark the task as failed and notify the replicas. */
         task->state = ASM_FAILED;
-        if (task->operation == ASM_IMPORT)
-            asmNotifyStateChange(task, ASM_EVENT_IMPORT_FAILED);
-        else
-            asmNotifyStateChange(task, ASM_EVENT_MIGRATE_FAILED);
+        asmNotifyStateChange(task, ASM_EVENT_IMPORT_FAILED);
     }
+
+    /* Trim the slots if the import task is failed. */
+    if (trim_slots && task->state == ASM_FAILED)
+        asmTrimSlotsIfNotOwned(task->slot_ranges);
 
     /* Clear the master task since it is not the master anymore. */
     asmTaskFree(asmManager->master_task);
     asmManager->master_task = NULL;
 }
 
-/* Handle the master task when the master of this node is changed. */
-void asmHandleOnChangeMaster(void) {
-    asmMasterTaskSetFailed();
+/* Handle the orphaned master task when the master of this node is changed. */
+void asmHandleMasterChange(void) {
+    asmHandleOrphanedMasterTask(0);
 }
 
-/* Handle the master task when this node promotes to master. */
-void asmHandleOnPromoteToMaster(void) {
-    /* Trim the slots if the import task is not done. */
-    asmTask *task = asmManager->master_task;
-    if (task && task->operation == ASM_IMPORT && task->state != ASM_DONE)
-        asmTrimSlotsIfNotOwned(task->slot_ranges);
+/* Handle the orphaned master task when this node promotes to master. */
+void asmHandlePromotionToMaster(void) {
+    asmHandleOrphanedMasterTask(1);
+}
 
-    asmMasterTaskSetFailed();
+/* The replicas handle the master import ASM task information. */
+int asmReplicaHandleMasterAsmTask(sds task_info) {
+    if (!server.cluster_enabled || !clusterNodeIsSlave(getMyClusterNode())) return C_ERR;
+
+    /* If the master task is empty, it means the master finished the task, the replica
+     * should check the slot ownership to decide to raise completed or failed event. */
+    if (!task_info || sdslen(task_info) == 0) {
+        asmTask *task = asmManager->master_task;
+        if (task && task->state != ASM_DONE && task->state != ASM_FAILED) {
+            /* Check if the slots are owned by the master. */
+            int owned_by_master = 1;
+            for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
+                slotRange *sr = &task->slot_ranges->ranges[i];
+                for (int j = sr->start; j <= sr->end; j++) {
+                    clusterNode *master = clusterNodeGetMaster(getMyClusterNode());
+                    if (!master || !clusterNodeCoversSlot(master, j)) {
+                        owned_by_master = 0;
+                        break;
+                    }
+                }
+            }
+            if (owned_by_master) {
+                task->state = ASM_DONE;
+                asmNotifyStateChange(task, ASM_EVENT_IMPORT_COMPLETED);
+            } else {
+                task->state = ASM_FAILED;
+                asmNotifyStateChange(task, ASM_EVENT_IMPORT_FAILED);
+            }
+        }
+        return C_OK;
+    }
+
+    asmTask *task = asmTaskDeserialize(task_info);
+    if (!task) return C_ERR;
+    if (task->operation != ASM_IMPORT) {
+        asmTaskFree(task);
+        return C_ERR;
+    }
+
+    int event_changed = 0;
+    int event = asmTaskStateToEvent(task);
+    if (asmManager->master_task) {
+        /* Notify when the task or event is changed, to avoid duplicated notification. */
+        if (strcmp(task->id, asmManager->master_task->id) != 0 ||
+            event != asmTaskStateToEvent(asmManager->master_task))
+        {
+            event_changed = 1;
+        }
+        asmTaskFree(asmManager->master_task);
+    } else {
+        event_changed = 1; /* No task before, always notify. */
+    }
+
+    asmManager->master_task = task;
+    if (event_changed) asmNotifyStateChange(task, event);
+    return C_OK;
 }
 
 /* If this node is a replica and there is an active trim job, we cannot

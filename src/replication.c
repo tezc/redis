@@ -844,9 +844,6 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset) {
             return C_ERR;
         }
     }
-
-    /* Notify slaves about the ongoing ASM task when we start a full sync. */
-    asmNotifySlavesStateOnFullSync();
     return C_OK;
 }
 
