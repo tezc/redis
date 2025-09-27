@@ -2260,7 +2260,7 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
     }
     
     foreach with_rdb {"with" "without"} {
-        test "Test cluster module notifications when replica restart $with_rdb RDB" {
+        test "Test cluster module notifications when replica restart $with_rdb RDB during importing" {
             clear_module_event_log
             R 1 debug asm-trim-method $trim_method
             R 4 debug asm-trim-method $trim_method
@@ -2298,7 +2298,7 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
 
             wait_for_asm_done
 
-            # started and completed are paired both master and replicas even restarting
+            # started and completed are paired, and not duplicated
             set import_event_log [list \
                 "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
                 "sub: cluster-asm-import-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
@@ -2321,7 +2321,7 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
         }
     }
 
-    test "Test cluster module notifications when replica is disconnected and full resync" {
+    test "Test cluster module notifications when replica is disconnected and full resync after importing" {
         clear_module_event_log
         R 1 debug asm-trim-method $trim_method
         R 4 debug asm-trim-method $trim_method
@@ -2350,6 +2350,7 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
 
         # set a small repl-backlog-size and write some commands to make node-4
         # full resync when reconnecting after waking up
+        set r1_full_sync [S 1 sync_full]
         R 1 config set repl-backlog-size 16kb
         R 1 client kill type replica
         set 1k_str [string repeat "a" 1024]
@@ -2359,12 +2360,17 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
 
         # after ASM task is completed, wake up node-4
         wait_for_condition 1000 10 {
-            [CI 1 slot_migration_task_count] == 0 &&
+            [CI 1 slot_migration_active_tasks] == 0 &&
             [CI 1 slot_migration_active_trim_jobs] == 0
         } else {
             fail "ASM tasks did not completed"
         }
         resume_process $r4_pid
+
+        # make sure full resync happens
+        wait_for_sync [Rn 4]
+        wait_for_ofs_sync [Rn 1] [Rn 4]
+        assert_morethan [S 1 sync_full] $r1_full_sync
 
         # started and completed are paired, and not duplicated
         set import_event_log [list \
@@ -2378,6 +2384,10 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
         } else {
             fail "ASM import event not received"
         }
+
+        # since ASM task is completed on node-1 before node-4 reconnects,
+        # no trim event should be received on node-4
+        assert_equal {} [R 4 asm.get_cluster_trim_event_log]
 
         R 0 CLUSTER MIGRATION IMPORT 0 100
         wait_for_asm_done
