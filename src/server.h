@@ -2259,7 +2259,7 @@ struct redisServer {
     long long asm_pause_write_max_gap_size; /* Maximum gap in bytes before pausing writes before ASM handoff. */
     long long asm_pause_write_timeout; /* Timeout in milliseconds to pause writes during ASM handoff. */
     long long asm_sync_buffer_drain_timeout; /* Timeout in milliseconds for sync buffer to drain during ASM. */
-    int asm_max_done_tasks; /* Maximum number of completed ASM tasks to keep in memory. */
+    int asm_max_archived_tasks; /* Maximum number of archived ASM tasks to keep in memory. */
     struct clusterState *cluster;  /* State of the cluster */
     int cluster_migration_barrier; /* Cluster replicas migration barrier. */
     int cluster_allow_replica_migration; /* Automatic replica migrations to orphaned masters and from empty masters */

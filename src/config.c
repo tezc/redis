@@ -3217,7 +3217,7 @@ standardConfig static_configs[] = {
     createIntConfig("shutdown-timeout", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.shutdown_timeout, 10, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("repl-diskless-sync-max-replicas", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.repl_diskless_sync_max_replicas, 0, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("cluster-compatibility-sample-ratio", NULL, MODIFIABLE_CONFIG, 0, 100, server.cluster_compatibility_sample_ratio, 0, INTEGER_CONFIG, NULL, NULL),
-    createIntConfig("slot-migration-max-done-tasks", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, 1, INT_MAX, server.asm_max_done_tasks, 32, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("slot-migration-max-archived-tasks", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, 1, INT_MAX, server.asm_max_archived_tasks, 32, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("slot-migration-trim-slow-cycle-time-perc", NULL, MODIFIABLE_CONFIG, 0, 100, server.asm_trim_slow_cycle_time_perc, 25, INTEGER_CONFIG, NULL, NULL), /* CPU max % for keys collection */
     createIntConfig("slot-migration-trim-fast-cycle-duration", NULL, MODIFIABLE_CONFIG, 0, 1000000, server.asm_trim_fast_cycle_duration, 0, INTEGER_CONFIG, NULL, NULL), /* Microseconds */
 

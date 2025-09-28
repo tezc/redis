@@ -243,8 +243,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 6500 7500}
 
         wait_for_condition 1000 50 {
-            [string match {*done*} [migration_status 0 $task_id state]] &&
-            [string match {*done*} [migration_status 1 $task_id state]]
+            [string match {*completed*} [migration_status 0 $task_id state]] &&
+            [string match {*completed*} [migration_status 1 $task_id state]]
         } else {
             fail "ASM task did not start"
         }
@@ -901,8 +901,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # the importing task on #0 will be retried, and eventually succeed
         # since now #0 is back in the cluster
         wait_for_condition 2000 50 {
-            [string match {*done*} [migration_status 0 $task_id state]] &&
-            [string match {*done*} [migration_status 1 $task_id state]]
+            [string match {*completed*} [migration_status 0 $task_id state]] &&
+            [string match {*completed*} [migration_status 1 $task_id state]]
         } else {
             fail "ASM task did not finish"
         }
@@ -1885,7 +1885,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 1 debug asm-trim-method active 0
         R 1 flushall
 
-        set prev_trim_done [CI 1 slot_migration_active_trim_done]
+        set prev_trim_done [CI 1 slot_migration_active_trim_completed]
 
         R 1 debug populate 1000 [slot_prefix 0] 100
         R 1 debug populate 1000 [slot_prefix 1] 100
@@ -1898,7 +1898,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 1 exec
 
         wait_for_condition 1000 10 {
-            [CI 1 slot_migration_active_trim_done] == $prev_trim_done + 3
+            [CI 1 slot_migration_active_trim_completed] == $prev_trim_done + 3
         } else {
             fail "active trim failed"
         }
