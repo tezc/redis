@@ -2932,7 +2932,7 @@ void asmTrimSlotsIfNotOwned(slotRangeArray *sra) {
 }
 
 /* Handle the master task when it is no longer used. And trim unowned
- * slots when the import task is failed and this node is master. */
+ * slots when the task is failed and this node is master. */
 void asmFinalizeMasterTask(void) {
     if (!server.cluster_enabled) return;
 
@@ -3011,10 +3011,9 @@ int asmReplicaHandleMasterTask(sds task_info) {
         }
         asmTaskFree(asmManager->master_task);
     } else {
-        /* Ignore the task if it is already done or failed. */
-        if (task->state == ASM_FAILED || task->state == ASM_DONE)
-            return C_OK;
-        notify_event = 1;
+        /* Ignore done or failed task when there is no active master task. */
+        if (task->state != ASM_FAILED && task->state != ASM_DONE)
+            notify_event = 1;
     }
 
     asmManager->master_task = task;
