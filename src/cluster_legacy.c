@@ -1078,6 +1078,7 @@ void clusterReset(int hard) {
 
     /* Turn into master. */
     if (nodeIsSlave(myself)) {
+        asmFinalizeMasterTask();
         clusterSetNodeAsMaster(myself);
         replicationUnsetMaster();
         emptyData(-1,EMPTYDB_NO_FLAGS,NULL);
@@ -1089,7 +1090,6 @@ void clusterReset(int hard) {
 
     /* Cancel all ASM tasks */
     clusterAsmCancel(NULL, "CLUSTER RESET");
-    asmHandleOrphanedMasterTask(0);
     asmCancelTrimJobs();
 
     /* Unassign all the slots. */
@@ -4273,8 +4273,8 @@ void clusterFailoverReplaceYourMaster(void) {
     /* 5) If there was a manual failover in progress, clear the state. */
     resetManualFailover();
 
-    /* 6) Handle the ASM task. */
-    asmHandlePromotionToMaster();
+    /* 6) Handle the ASM task from previous master. */
+    asmFinalizeMasterTask();
 }
 
 /* This function is called if we are a slave node and our master serving
@@ -5328,7 +5328,6 @@ static inline void removeAllNotOwnedShardChannelSubscriptions(void) {
 void clusterSetMaster(clusterNode *n) {
     serverAssert(n != myself);
     serverAssert(myself->numslots == 0);
-    int master_changed = 0;
 
     int was_master = clusterNodeIsMaster(myself);
     if (was_master) {
@@ -5336,10 +5335,8 @@ void clusterSetMaster(clusterNode *n) {
         myself->flags |= CLUSTER_NODE_SLAVE;
         clusterCloseAllSlots();
     } else {
-        if (myself->slaveof) {
+        if (myself->slaveof)
             clusterNodeRemoveSlave(myself->slaveof,myself);
-            master_changed = myself->slaveof != n;
-        }
     }
     myself->slaveof = n;
     updateShardId(myself, n->shard_id);
@@ -5350,7 +5347,6 @@ void clusterSetMaster(clusterNode *n) {
 
     /* Cancel all ASM tasks when switching into slave */
     if (was_master) clusterAsmCancel(NULL, "switching to replica");
-    if (master_changed) asmHandleMasterChange();
 }
 
 /* -----------------------------------------------------------------------------
@@ -6568,7 +6564,7 @@ int clusterAllowFailoverCmd(client *c) {
 
 void clusterPromoteSelfToMaster(void) {
     replicationUnsetMaster();
-    asmHandlePromotionToMaster();
+    asmFinalizeMasterTask();
 }
 
 int clusterAsmOnEvent(const char *task_id, int event, void *arg) {

@@ -1282,11 +1282,14 @@ int rdbSaveInfoAuxFields(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     }
     if (rdbSaveAuxFieldStrInt(rdb, "aof-base", aof_base) == -1) return -1;
 
-    /* Save the active import ASM task. */
-    sds task_info = asmDumpActiveImportTask();
-    int ret = rdbSaveAuxFieldStrStr(rdb, "asm-task", task_info ? task_info : "");
-    if (task_info) sdsfree(task_info);
-    if (ret == -1) return -1;
+    /* Save the active import ASM task if cluster is enabled. */
+    if (server.cluster_enabled) {
+        sds task_info = asmDumpActiveImportTask();
+        int ret = rdbSaveAuxFieldStrStr(rdb, "cluster-asm-task",
+                                        task_info ? task_info : "");
+        if (task_info) sdsfree(task_info);
+        if (ret == -1) return -1;
+    }
 
     return 1;
 }
@@ -3506,10 +3509,10 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
             } else if (!strcasecmp(auxkey->ptr, "aof-base")) {
                 long long isbase = strtoll(auxval->ptr, NULL, 10);
                 if (isbase) serverLog(LL_NOTICE, "RDB is base AOF");
+            } else if (!strcasecmp(auxkey->ptr,"cluster-asm-task")) {
+                asmReplicaHandleMasterTask(auxval->ptr);
             } else if (!strcasecmp(auxkey->ptr,"redis-bits")) {
                 /* Just ignored. */
-            } else if (!strcasecmp(auxkey->ptr,"asm-task")) {
-                asmReplicaHandleMasterTask(auxval->ptr);
             } else {
                 /* We ignore fields we don't understand, as by AUX field
                  * contract. */

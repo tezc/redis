@@ -1038,10 +1038,11 @@ void asmNotifyStateChange(asmTask *task, int event) {
     serverLog(LL_DEBUG, "Fire cluster asm module event, task: id=%s, state=%s",
                         task->id, asmTaskStateToString(task->state));
 
-    /* Propagate state change only when this node is master and has a real active task. */
-    if (clusterNodeIsMaster(getMyClusterNode()) && task != asmManager->master_task) {
-        clusterAsmOnEvent(task->id, event, task->slot_ranges);
-        asmNotifySlavesStateChange(task);
+    if (clusterNodeIsMaster(getMyClusterNode())) {
+        /* Notify the plugin only if it is a real active import task. */
+        if (task != asmManager->master_task)
+            clusterAsmOnEvent(task->id, event, task->slot_ranges);
+        asmNotifySlavesStateChange(task); /* Propagate state change to replicas */
     }
 }
 
@@ -1086,7 +1087,7 @@ void asmImportSetFailed(asmTask *task) {
     /* Mark the task as failed and notify the cluster */
     task->state = ASM_FAILED;
     asmNotifyStateChange(task, ASM_EVENT_IMPORT_FAILED);
-    /* Now this node may become replica. Only master can setup new slot trimming jobs. */
+    /* This node may become replica, only master can setup new slot trimming jobs. */
     if (clusterNodeIsMaster(getMyClusterNode()))
         asmTrimJobSchedule(task->slot_ranges);
 }
@@ -2930,10 +2931,9 @@ void asmTrimSlotsIfNotOwned(slotRangeArray *sra) {
     slotRangeArrayFree(trim_sra);
 }
 
-/* Handle the orphaned master task when the master of this node is changed or
- * this node promotes to master. And trim unowned slots when the import task
- * is failed and trim_slots argument is set. */
-void asmHandleOrphanedMasterTask(int trim_slots) {
+/* Handle the master task when it is no longer used. And trim unowned
+ * slots when the import task is failed and this node is master. */
+void asmFinalizeMasterTask(void) {
     if (!server.cluster_enabled) return;
 
     asmTask *task = asmManager->master_task;
@@ -2953,22 +2953,12 @@ void asmHandleOrphanedMasterTask(int trim_slots) {
     }
 
     /* Trim the slots if the import task is failed. */
-    if (trim_slots && task->state == ASM_FAILED)
+    if (clusterNodeIsMaster(getMyClusterNode()) && task->state == ASM_FAILED)
         asmTrimSlotsIfNotOwned(task->slot_ranges);
 
     /* Clear the master task since it is not the master anymore. */
     asmTaskFree(asmManager->master_task);
     asmManager->master_task = NULL;
-}
-
-/* Handle the orphaned master task when the master of this node is changed. */
-void asmHandleMasterChange(void) {
-    asmHandleOrphanedMasterTask(0);
-}
-
-/* Handle the orphaned master task when this node promotes to master. */
-void asmHandlePromotionToMaster(void) {
-    asmHandleOrphanedMasterTask(1);
 }
 
 /* The replicas handle the master import ASM task information. */
@@ -3010,22 +3000,25 @@ int asmReplicaHandleMasterTask(sds task_info) {
         return C_ERR;
     }
 
-    int event_changed = 0;
+    int notify_event = 0;
     int event = asmTaskStateToEvent(task);
     if (asmManager->master_task) {
         /* Notify when the task or event is changed, to avoid duplicated notification. */
         if (strcmp(task->id, asmManager->master_task->id) != 0 ||
             event != asmTaskStateToEvent(asmManager->master_task))
         {
-            event_changed = 1;
+            notify_event = 1;
         }
         asmTaskFree(asmManager->master_task);
     } else {
-        event_changed = 1; /* No task before, always notify. */
+        /* Ignore the task if it is already done or failed. */
+        if (task->state == ASM_FAILED || task->state == ASM_DONE)
+            return C_OK;
+        notify_event = 1;
     }
 
     asmManager->master_task = task;
-    if (event_changed) asmNotifyStateChange(task, event);
+    if (notify_event) asmNotifyStateChange(task, event);
     return C_OK;
 }
 
