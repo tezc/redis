@@ -3240,8 +3240,8 @@ standardConfig static_configs[] = {
     createLongLongConfig("busy-reply-threshold", "lua-time-limit", MODIFIABLE_CONFIG, 0, LONG_MAX, server.busy_reply_threshold, 5000, INTEGER_CONFIG, NULL, NULL),/* milliseconds */
     createLongLongConfig("cluster-node-timeout", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.cluster_node_timeout, 15000, INTEGER_CONFIG, NULL, NULL),
     createLongLongConfig("cluster-ping-interval", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, 0, LLONG_MAX, server.cluster_ping_interval, 0, INTEGER_CONFIG, NULL, NULL),
-    createLongLongConfig("slot-migration-pause-write-max-gap-size", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.asm_pause_write_max_gap_size, 1*1024*1024, MEMORY_CONFIG, NULL, NULL), /* 1MB */
-    createLongLongConfig("slot-migration-pause-write-timeout", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.asm_pause_write_timeout, 10*1000, INTEGER_CONFIG, NULL, NULL), /* 10 seconds */
+    createLongLongConfig("slot-migration-handoff-max-lag-size", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.asm_handoff_max_lag_size, 1*1024*1024, MEMORY_CONFIG, NULL, NULL), /* 1MB */
+    createLongLongConfig("slot-migration-write-pause-timeout", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.asm_write_pause_timeout, 10*1000, INTEGER_CONFIG, NULL, NULL), /* 10 seconds */
     createLongLongConfig("slot-migration-sync-buffer-drain-timeout", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, 0, LLONG_MAX, server.asm_sync_buffer_drain_timeout, 60000, INTEGER_CONFIG, NULL, NULL), /* 60 seconds */
     createLongLongConfig("slowlog-log-slower-than", NULL, MODIFIABLE_CONFIG, -1, LLONG_MAX, server.slowlog_log_slower_than, 10000, INTEGER_CONFIG, NULL, NULL),
     createLongLongConfig("latency-monitor-threshold", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.latency_monitor_threshold, 0, INTEGER_CONFIG, NULL, NULL),

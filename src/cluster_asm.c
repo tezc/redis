@@ -916,14 +916,14 @@ static void replyTaskStatus(client *c, asmTask *task) {
     addReplyMapLen(c, 12);
     addReplyBulkCString(c, "id");
     addReplyBulkCString(c, task->id);
-    addReplyBulkCString(c, "slots_range");
+    addReplyBulkCString(c, "slot_ranges");
     addReplyBulkSds(c, slotRangeArrayToString(task->slot_ranges));
     addReplyBulkCString(c, "source");
     addReplyBulkCBuffer(c, task->source, CLUSTER_NAMELEN);
     addReplyBulkCString(c, "dest");
     addReplyBulkCBuffer(c, task->dest, CLUSTER_NAMELEN);
     addReplyBulkCString(c, "operation");
-    addReplyBulkCString(c, task->operation == ASM_IMPORT ? "importing" : "migrating");
+    addReplyBulkCString(c, task->operation == ASM_IMPORT ? "import" : "migrate");
     addReplyBulkCString(c, "state");
     addReplyBulkCString(c, asmTaskStateToString(task->state));
     addReplyBulkCString(c, "last_error");
@@ -1973,13 +1973,12 @@ void clusterSyncSlotsCommand(client *c) {
 
             /* Pause write if needed */
             if (task->state == ASM_SEND_BULK_AND_STREAM || task->state == ASM_SEND_STREAM) {
-                /* Pause writes on the main channel connection if the gap is
-                 * less than the desired threshold. */
-                if (task->dest_offset + server.asm_pause_write_max_gap_size >= task->source_offset) {
-                    serverLog(LL_NOTICE, "The applied offset gap %lld is less than the threshold %lld, "
+                /* Pause writes on the main channel if the lag is less than the threshold. */
+                if (task->dest_offset + server.asm_handoff_max_lag_size >= task->source_offset) {
+                    serverLog(LL_NOTICE, "The applied offset lag %lld is less than the threshold %lld, "
                                          "pausing writes for slot handoff",
                                          task->source_offset - task->dest_offset,
-                                         server.asm_pause_write_max_gap_size);
+                                         server.asm_handoff_max_lag_size);
                     task->state = ASM_HANDOFF_PREP;
                     clusterAsmOnEvent(task->id, ASM_EVENT_HANDOFF_PREP, task->slot_ranges);
                 }
@@ -2457,7 +2456,7 @@ void asmBeforeSleep(void) {
 
         if (task->state == ASM_HANDOFF) {
             /* To avoid long pause, we fail the task if the pause takes too long. */
-            if (server.mstime - task->paused_time >= server.asm_pause_write_timeout) {
+            if (server.mstime - task->paused_time >= server.asm_write_pause_timeout) {
                 asmTaskSetFailed(task, "Server paused timeout");
                 return;
             }
@@ -2474,7 +2473,7 @@ void asmBeforeSleep(void) {
              * However, the configuration will eventually converge. In most cases,
              * the destination node becomes the winner, since it bumps its config
              * epoch before taking over slot ownership. */
-            if (server.mstime - task->paused_time >= server.asm_pause_write_timeout)
+            if (server.mstime - task->paused_time >= server.asm_write_pause_timeout)
                 asmTaskSetFailed(task, "Server paused timeout");
         }
     }
