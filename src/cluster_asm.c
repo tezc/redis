@@ -403,9 +403,9 @@ sds asmTaskSerialize(asmTask *task) {
     serialized = sdscatprintf(serialized, "%s:", asmTaskStateToString(task->state));
 
     /* Add slot ranges sds */
-    sds slot_str = slotRangeArrayToString(task->slots);
-    serialized = sdscatprintf(serialized, "%s", slot_str);
-    sdsfree(slot_str);
+    sds slots_str = slotRangeArrayToString(task->slots);
+    serialized = sdscatprintf(serialized, "%s", slots_str);
+    sdsfree(slots_str);
 
     return serialized;
 }
@@ -839,10 +839,10 @@ asmTask *asmCreateImportTask(const char *task_id, slotRangeArray *slots, sds *er
     memcpy(task->dest, getMyClusterId(), CLUSTER_NAMELEN);
 
     listAddNodeTail(asmManager->tasks, task);
-    sds slot_str = slotRangeArrayToString(slots);
+    sds slots_str = slotRangeArrayToString(slots);
     serverLog(LL_NOTICE, "Import task created: src=%.40s, dest=%.40s, slots=%s",
-                         task->source, task->dest, slot_str);
-    sdsfree(slot_str);
+                         task->source, task->dest, slots_str);
+    sdsfree(slots_str);
 
     return task;
 }
@@ -1126,11 +1126,11 @@ void asmTaskSetFailed(asmTask *task, const char *fmt, ...) {
     task->error = error;
 
     /* Log the error */
-    sds slot_str = slotRangeArrayToString(task->slots);
+    sds slots_str = slotRangeArrayToString(task->slots);
     serverLog(LL_WARNING, "%s task failed. id=%s, slots=%s, err=%s",
               task->operation == ASM_IMPORT ? "Import" : "Migrate",
-              task->id, slot_str, task->error);
-    sdsfree(slot_str);
+              task->id, slots_str, task->error);
+    sdsfree(slots_str);
 
     if (task->operation == ASM_IMPORT)
         asmImportSetFailed(task);
@@ -1682,7 +1682,7 @@ void clusterSyncSlotsStreamEOF(client *c) {
 /* Start the import task. */
 static void asmStartImportTask(asmTask *task) {
     if (task->operation != ASM_IMPORT || task->state != ASM_NONE) return;
-    sds slot_str = slotRangeArrayToString(task->slots);
+    sds slots_str = slotRangeArrayToString(task->slots);
 
     /* Sanity check: Clean up any keys that exist in slots not owned by this node.
      * This handles cases where users previously migrated slots using legacy method
@@ -1705,10 +1705,10 @@ static void asmStartImportTask(asmTask *task) {
                                                 "server paused";
         if (server.unixtime - last_log >= 5) { /* Log every 5 seconds to avoid spam */
             serverLog(LL_NOTICE, "Can not start import task for slots: %s since %s",
-                                 slot_str, reason);
+                                 slots_str, reason);
             last_log = server.unixtime;
         }
-        sdsfree(slot_str);
+        sdsfree(slots_str);
         return;
     }
 
@@ -1718,18 +1718,18 @@ static void asmStartImportTask(asmTask *task) {
     clusterNode *source = validateImportSlotRanges(task->slots, &err, task);
     if (!source) {
         serverLog(LL_WARNING, "Cancelling the import task for slots: %s, due to error: %s",
-                              slot_str, err);
+                              slots_str, err);
         asmTaskCancel(task, "slots configuration updated");
-        sdsfree(slot_str);
+        sdsfree(slots_str);
         sdsfree(err);
         return;
     }
     /* Now I'm the owner of the slot range, cancel the import task. */
     if (source == getMyClusterNode()) {
         serverLog(LL_NOTICE, "Cancel the import task for slots: %s, since this node is"
-                             " already the owner of the slot range", slot_str);
+                             " already the owner of the slot range", slots_str);
         asmTaskCancel(task, "slots owned by myself");
-        sdsfree(slot_str);
+        sdsfree(slots_str);
         return;
     }
     /* Change the source node if needed. */
@@ -1737,12 +1737,12 @@ static void asmStartImportTask(asmTask *task) {
         task->source_node = source;
         memcpy(task->source, source->name, CLUSTER_NAMELEN);
         serverLog(LL_NOTICE, "Import slots %s task source node changed to %.40s",
-                             slot_str, source->name);
+                             slots_str, source->name);
     }
 
     serverLog(LL_NOTICE, "Import task starting: src=%.40s, dest=%.40s, slots=%s",
-              task->source, task->dest, slot_str);
-    sdsfree(slot_str);
+              task->source, task->dest, slots_str);
+    sdsfree(slots_str);
 
     task->state = ASM_CONNECTING;
     task->start_time = server.mstime;
@@ -1867,10 +1867,10 @@ void clusterSyncSlotsCommand(client *c) {
         /* Wait for RDB channel to be ready */
         task->state = ASM_WAIT_RDBCHANNEL;
 
-        sds slot_str = slotRangeArrayToString(slots);
+        sds slots_str = slotRangeArrayToString(slots);
         serverLog(LL_NOTICE, "Migrate task created: src=%.40s, dest=%.40s, slots=%s",
-                              task->source, task->dest, slot_str);
-        sdsfree(slot_str);
+                              task->source, task->dest, slots_str);
+        sdsfree(slots_str);
 
         asmNotifyStateChange(task, ASM_EVENT_MIGRATE_STARTED);
 
@@ -2930,10 +2930,10 @@ void asmFinalizeMasterTask(void) {
     if (task == NULL) return;
     serverAssert(task->operation == ASM_IMPORT);
 
-    sds slot_str = slotRangeArrayToString(task->slots);
+    sds slots_str = slotRangeArrayToString(task->slots);
     serverLog(LL_WARNING, "Failed import task from old master. id=%s, slots=%s",
-                           task->id, slot_str);
-    sdsfree(slot_str);
+                           task->id, slots_str);
+    sdsfree(slots_str);
 
     /* Check if there is an ASM task that master did not finish. */
     if (task->state != ASM_COMPLETED && task->state != ASM_FAILED) {
