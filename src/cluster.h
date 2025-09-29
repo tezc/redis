@@ -162,6 +162,8 @@ int isValidAuxString(char *s, unsigned int length);
 void migrateCommand(client *c);
 void clusterCommand(client *c);
 ConnectionType *connTypeOfCluster(void);
+void clusterBecameMaster(void);
+void clusterBecameReplica(void);
 
 typedef struct slotRange {
     unsigned short start, end;
