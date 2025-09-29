@@ -2070,13 +2070,3 @@ void resetClusterStats(void) {
 
     clusterSlotStatResetAll();
 }
-
-/* Invoked to clean up state after this node becomes a master. */
-void clusterBecameMaster(void) {
-    asmFinalizeMasterTask();
-}
-
-/* Invoked to clean up state after this node becomes a replica. */
-void clusterBecameReplica(void) {
-    clusterAsmCancel(NULL, "switching to replica");
-}
