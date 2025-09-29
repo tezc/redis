@@ -918,7 +918,7 @@ static void replyTaskStatus(client *c, asmTask *task) {
     addReplyMapLen(c, 12);
     addReplyBulkCString(c, "id");
     addReplyBulkCString(c, task->id);
-    addReplyBulkCString(c, "slots_range");
+    addReplyBulkCString(c, "slots");
     addReplyBulkSds(c, slotRangeArrayToString(task->slots));
     addReplyBulkCString(c, "source");
     addReplyBulkCBuffer(c, task->source, CLUSTER_NAMELEN);

@@ -92,7 +92,7 @@
                             "id": {
                                 "type": "string"
                             },
-                            "slots_range": {
+                            "slots": {
                                 "type": "string"
                             },
                             "source": {
