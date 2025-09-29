@@ -1498,8 +1498,8 @@ typedef struct replDataBufToDbCtx {
     void *privdata;                     /* Private data of context */
     client *client;                     /* Client to process commands */
     size_t applied_offset;              /* Offset applied to the database */
-    int  (*should_continue)(void *ctx); /* Check if should continue */
-    void (*yield_callback)(void *ctx);  /* Yield to event loop */
+    int  (*should_continue)(void *ctx); /* Check if we should continue */
+    void (*yield_callback)(void *ctx);  /* Yield to the event loop */
 } replDataBufToDbCtx;
 
 /* ACL information */
@@ -1646,8 +1646,8 @@ struct redisMemOverhead {
     size_t overhead_db_hashtable_lut;
     size_t overhead_db_hashtable_rehashing;
     unsigned long db_dict_rehashing_count;
-    size_t asm_importing_buffer;
-    size_t asm_migrating_buffer;
+    size_t asm_import_input_buffer;
+    size_t asm_migrate_output_buffer;
     struct {
         size_t dbid;
         size_t overhead_ht_main;
@@ -2256,10 +2256,10 @@ struct redisServer {
     mstime_t cluster_node_timeout; /* Cluster node timeout. */
     mstime_t cluster_ping_interval;    /* A debug configuration for setting how often cluster nodes send ping messages. */
     char *cluster_configfile; /* Cluster auto-generated config file name. */
-    long long asm_pause_write_max_gap_size; /* Maximum gap in bytes before pausing writes before ASM handoff. */
-    long long asm_pause_write_timeout; /* Timeout in milliseconds to pause writes during ASM handoff. */
+    long long asm_handoff_max_lag_bytes; /* Maximum lag in bytes before pausing writes for ASM handoff. */
+    long long asm_write_pause_timeout; /* Timeout in milliseconds to pause writes during ASM handoff. */
     long long asm_sync_buffer_drain_timeout; /* Timeout in milliseconds for sync buffer to drain during ASM. */
-    int asm_max_done_tasks; /* Maximum number of completed ASM tasks to keep in memory. */
+    int asm_max_archived_tasks; /* Maximum number of archived ASM tasks to keep in memory. */
     struct clusterState *cluster;  /* State of the cluster */
     int cluster_migration_barrier; /* Cluster replicas migration barrier. */
     int cluster_allow_replica_migration; /* Automatic replica migrations to orphaned masters and from empty masters */
@@ -3731,7 +3731,7 @@ kvobj *dbUnshareStringValueByLink(redisDb *db, robj *key, kvobj *kv, dictEntryLi
 #define FLUSH_TYPE_ALL   0
 #define FLUSH_TYPE_DB    1
 #define FLUSH_TYPE_SLOTS 2
-void replySlotsFlushAndFree(client *c, struct slotRangeArray *ranges);
+void replySlotsFlushAndFree(client *c, struct slotRangeArray *slots);
 int flushCommandCommon(client *c, int type, int flags, struct slotRangeArray *ranges);
 #define EMPTYDB_NO_FLAGS 0      /* No flags. */
 #define EMPTYDB_ASYNC (1<<0)    /* Reclaim memory in another thread. */
