@@ -1974,11 +1974,11 @@ void clusterSyncSlotsCommand(client *c) {
             /* Pause write if needed */
             if (task->state == ASM_SEND_BULK_AND_STREAM || task->state == ASM_SEND_STREAM) {
                 /* Pause writes on the main channel if the lag is less than the threshold. */
-                if (task->dest_offset + server.asm_handoff_max_lag_size >= task->source_offset) {
+                if (task->dest_offset + server.asm_handoff_max_lag_bytes >= task->source_offset) {
                     serverLog(LL_NOTICE, "The applied offset lag %lld is less than the threshold %lld, "
                                          "pausing writes for slot handoff",
                                          task->source_offset - task->dest_offset,
-                                         server.asm_handoff_max_lag_size);
+                                         server.asm_handoff_max_lag_bytes);
                     task->state = ASM_HANDOFF_PREP;
                     clusterAsmOnEvent(task->id, ASM_EVENT_HANDOFF_PREP, task->slot_ranges);
                 }
