@@ -104,10 +104,10 @@
                             "operation": {
                                 "oneOf": [
                                     {
-                                        "const": "importing"
+                                        "const": "import"
                                     },
                                     {
-                                        "const": "migrating"
+                                        "const": "migrate"
                                     }
                                 ]
                             },
