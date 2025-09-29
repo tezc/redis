@@ -2710,8 +2710,8 @@ int asmNotifyConfigUpdated(asmTask *task, sds *err) {
     /* Reset per-slot statistics for the migrated/imported ranges.
      * Note: cluster_legacy.c also cleans up, so this may run twice, but
      * required if a cluster plugin is in use. */
-    for (int i = 0; i < task->slot_ranges->num_ranges; i++) {
-        slotRange *sr = &task->slot_ranges->ranges[i];
+    for (int i = 0; i < task->slots->num_ranges; i++) {
+        slotRange *sr = &task->slots->ranges[i];
         for (int j = sr->start; j <= sr->end; j++)
             clusterSlotStatReset(j);
     }
