@@ -605,8 +605,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # Set a small replication buffer limit to trigger the error
         R 0 config set replica-full-sync-buffer-limit 1mb
 
-        # start migration from 1 to 0, cost 3s to transfer slots snapshot
-        set task_id [setup_slot_migration_with_delay 1 0 0 100 2 1500000]
+        # start migration from 1 to 0, cost 4s to transfer slots snapshot
+        set task_id [setup_slot_migration_with_delay 1 0 0 100 2 2000000]
         set loglines [count_log_lines 0]
 
         # Start the slot 0 write load on the R 1
@@ -619,10 +619,14 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # verify the peak value, should be greater than 1mb
         assert {[CI 0 slot_migration_sync_buffer_peak] > 1000000}
-
-        after 200 ;# wait for a while to accumulate some buffer on source side
         assert {[S 0 mem_asm_import_input_buffer] > 1000000}
-        assert {[S 1 mem_asm_migrate_output_buffer] > 1000}
+
+        # wait for a while to accumulate some buffer on source side
+        wait_for_condition 500 10 {
+            [S 1 mem_asm_migrate_output_buffer] > 10000
+        } else {
+            fail "not accumulate some buffer on source side"
+        }
 
         stop_write_load $load_handle
         wait_for_asm_done
