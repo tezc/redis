@@ -566,7 +566,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 1 debug repl-pause on-streaming-repl-buf
 
         # Set a small output buffer limit to trigger the error
-        R 0 config set client-output-buffer-limit "replica 1024 0 0"
+        R 0 config set client-output-buffer-limit "replica 4mb 0 0"
 
         set task_id [setup_slot_migration_with_delay 0 1 0 100]
 
@@ -582,6 +582,13 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # Start the slot 0 write load on the R 0
         set load_handle [start_write_load "127.0.0.1" [get_port 0] 1000 $slot0_key]
+
+        # wait for a while to accumulate some buffer on source side
+        wait_for_condition 1000 10 {
+            [S 0 mem_asm_migrate_output_buffer] > 1000000 ;# 1m
+        } else {
+            fail "not accumulate some buffer on source side"
+        }
 
         # After some time, the client output buffer limit should be reached
         wait_for_log_messages 0 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 1000 10
@@ -620,13 +627,6 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # verify the peak value, should be greater than 1mb
         assert {[CI 0 slot_migration_sync_buffer_peak] > 1000000}
         assert {[S 0 mem_asm_import_input_buffer] > 1000000}
-
-        # wait for a while to accumulate some buffer on source side
-        wait_for_condition 500 10 {
-            [S 1 mem_asm_migrate_output_buffer] > 10000
-        } else {
-            fail "not accumulate some buffer on source side"
-        }
 
         stop_write_load $load_handle
         wait_for_asm_done
