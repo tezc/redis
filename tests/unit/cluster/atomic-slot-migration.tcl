@@ -583,11 +583,11 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # Start the slot 0 write load on the R 0
         set load_handle [start_write_load "127.0.0.1" [get_port 0] 1000 $slot0_key]
 
-        # wait for a while to accumulate some buffer on source side
+        # wait for buffer to accumulate on source side (more than 1m)
         wait_for_condition 1000 10 {
-            [S 0 mem_asm_migrate_output_buffer] > 1000000 ;# 1m
+            [S 0 mem_asm_migrate_output_buffer] > 1000000
         } else {
-            fail "not accumulate some buffer on source side"
+            fail "ait for buffer to accumulate on source side (more than 1m)"
         }
 
         # After some time, the client output buffer limit should be reached
