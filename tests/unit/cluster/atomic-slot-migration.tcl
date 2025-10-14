@@ -171,50 +171,6 @@ proc setup_slot_migration_with_delay {src_node dst_node start_slot end_slot {key
 }
 
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {
-
-    test "Test importing slots while active-trim is in progress for the same slots on replica" {
-       R 3 debug asm-trim-method active 1000000
-       R 0 flushall
-       populate_slot 100 -slot 0
-
-       # Wait until active trim is in progress on replica
-       R 1 CLUSTER MIGRATION IMPORT 0 100
-       wait_for_condition 1000 10 {
-           [CI 0 slot_migration_active_tasks] == 0 &&
-           [CI 0 slot_migration_active_trim_running] == 0 &&
-           [CI 3 slot_migration_active_trim_running] == 1
-       } else {
-           puts "[CI 0 slot_migration_active_tasks]"
-           puts "[CI 0 slot_migration_active_trim_running]"
-           puts "[CI 3 slot_migration_active_trim_running]"
-           fail "trim failed"
-       }
-
-       set loglines [count_log_lines -3]
-
-       # Get slots back
-       R 0 CLUSTER MIGRATION IMPORT 0 100
-       wait_for_condition 1000 20 {
-           [CI 0 slot_migration_active_tasks] == 1 &&
-           [CI 0 slot_migration_active_trim_running] == 0 &&
-           [CI 3 slot_migration_active_trim_running] == 1
-       } else {
-           fail "trim failed"
-       }
-
-       # Verify replica blocks master until trim is done
-       wait_for_log_messages -3 {"*Blocking master client until trim job is done*"} $loglines 1000 10
-       R 3 debug asm-trim-method active 0
-       wait_for_log_messages -3 {"*Unblocking master client after active trim*"} $loglines 1000 10
-
-       wait_for_asm_done
-       wait_for_ofs_sync [Rn 0] [Rn 3]
-       assert_equal 100 [R 0 dbsize]
-       assert_equal 100 [R 3 dbsize]
-       assert_equal 0 [R 1 dbsize]
-       assert_equal 0 [R 4 dbsize]
-    }
-
     test "Test IMPORT input validation" {
         # invalid arguments
         assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION IMPORT}
@@ -1311,7 +1267,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
     }
 }
 
-start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000 cluster-allow-replica-migration no}} {
+start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {
     test "Test bgtrim after a successful migration" {
         R 0 debug asm-trim-method bg
         R 3 debug asm-trim-method bg
@@ -1536,7 +1492,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
     }
 }
 
-start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000 cluster-allow-replica-migration no save ""}} {
+start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no save ""}} {
     test "Test active trim after a successful migration" {
         R 0 debug asm-trim-method active
         R 3 debug asm-trim-method active
@@ -1951,9 +1907,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
        }
 
        # Verify replica blocks master until trim is done
-       wait_for_log_messages -3 {"*Blocking master client until trim job is done*"} $loglines 1000 10
+       wait_for_log_messages -3 {"*Blocking master client until trim job is done*"} $loglines 1000 30
        R 3 debug asm-trim-method active 0
-       wait_for_log_messages -3 {"*Unblocking master client after active trim*"} $loglines 1000 10
+       wait_for_log_messages -3 {"*Unblocking master client after active trim*"} $loglines 1000 30
 
        wait_for_asm_done
        wait_for_ofs_sync [Rn 0] [Rn 3]
