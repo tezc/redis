@@ -170,6 +170,129 @@ proc setup_slot_migration_with_delay {src_node dst_node start_slot end_slot {key
     return $task_id
 }
 
+# Helper function to get migration status
+# It extracts the field value from the CLUSTER MIGRATION STATUS ID <task-id> output
+proc get_migration_status {node_id task_id field} {
+    set status [R $node_id CLUSTER MIGRATION STATUS ID $task_id]
+    set task_status [lindex $status 0]
+    set field_value ""
+
+    # Parse the key-value pairs in the task
+    for {set i 0} {$i < [llength $task_status]} {incr i 2} {
+        set key [lindex $task_status $i]
+        set value [lindex $task_status [expr $i + 1]]
+        if {$key eq $field} {
+            set field_value $value
+            break
+        }
+    }
+    return $field_value
+}
+
+start_cluster 2 2 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {
+    test "Test KEYS won't include keys in trimming slots" {
+        # SETUP:
+        # R 0 : MASTER (slots 0-8191), R 2: REPLICA (slots 0-8191)
+        # R 1 : MASTER (slots 8192-16383), R 3: REPLICA (slots 8192-16383)
+
+        R 0 flushall
+        R 1 flushall
+
+        # Disable active trim. Trim will notify the modules but it will not
+        # actually delete the keys. Redis should be started with
+        # "--enable-debug-command yes" to be able to use the debug command.
+        R 0 debug asm-trim-method active -1
+
+        # On node-0, create 3 keys in slot-0
+        for {set i 0} {$i < 3} {incr i} {
+            R 0 SET "{06S}key$i" "value$i"
+        }
+
+        # On node-0, create 3 keys in slot-1
+        for {set i 0} {$i < 3} {incr i} {
+            R 0 SET "{Qi}key$i" "value$i"
+        }
+
+        # Start the migration, migrate slot-0 to node-1
+        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 0]
+
+        # Wait for migration to complete
+        wait_for_condition 1000 10 {
+            [string match {*completed*} [get_migration_status 0 $task_id state]]
+        } else {
+            fail "ASM task did not end"
+        }
+
+        # Get "KEYS *" result and sort it, verify keys in slot-0 are not included
+        assert_equal [lsort [R 0 keys *]] [list "{Qi}key0" "{Qi}key1" "{Qi}key2"]
+
+        # Replica read test
+        # Make node-3 readonly (node-3 is a replica of node-1)
+        # Verify KEYS * result and sort it, verify importing keys are not included as well
+        R 3 readonly
+        assert_equal [lsort [R 2 keys *]] [list "{Qi}key0" "{Qi}key1" "{Qi}key2"]
+    }
+}
+
+start_cluster 2 2 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {
+    test "Test KEYS won't include keys in importing slots" {
+        # SETUP:
+        # R-0 : MASTER (slots 0-8191), R-2: REPLICA (slots 0-8191)
+        # R-1 : MASTER (slots 8192-16383), R-3: REPLICA (slots 8192-16383)
+
+        R 0 flushall
+        R 1 flushall
+
+        # On node-0, create 3 keys in slot-0
+        for {set i 0} {$i < 3} {incr i} {
+            R 0 SET "{06S}key$i" "value$i"
+        }
+
+        # On node-1, create 3 keys on slot-9000
+        for {set i 0} {$i < 3} {incr i} {
+            R 1 SET "{1F4}key$i" "value$i"
+        }
+
+        # Add artificial delay to make migration take longer,
+        # Redis will sleep for 1 second for each key during rdb delivery of the slot keys
+        R 0 config set rdb-key-save-delay 1000000
+
+        # Start the migration. Move slot-0 from node-0 to node-1
+        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 0]
+
+        # Wait for the migration to start, send-bulk-and-stream state
+        # indicates the migration is in progress and node started sending keys
+        wait_for_condition 1000 10 {
+            [string match {*send-bulk-and-stream*} [get_migration_status 0 $task_id state]]
+        } else {
+            fail "ASM task did not start"
+        }
+
+        # Get "KEYS *" result and sort it, verify importing keys are not included
+        assert_equal [lsort [R 1 keys *]] [list "{1F4}key0" "{1F4}key1" "{1F4}key2"]
+
+        # Replica read test
+        # Make node-3 readonly (node-3 is a replica of node-1)
+        # Verify KEYS * result and sort it, verify importing keys are not included as well
+        R 3 readonly
+        assert_equal [lsort [R 3 keys *]] [list "{1F4}key0" "{1F4}key1" "{1F4}key2"]
+
+        # Wait for migration to complete
+        wait_for_condition 1000 10 {
+            [string match {*completed*} [get_migration_status 0 $task_id state]]
+        } else {
+            fail "ASM task did not end"
+        }
+
+        # Get KEYS * result and sort it, verify imported keys are included
+        set keys [lsort [R 1 keys *]]
+        assert_equal [lsort [R 1 keys *]] [list "{06S}key0" "{06S}key1" "{06S}key2" "{1F4}key0" "{1F4}key1" "{1F4}key2"]
+        assert_equal [lsort [R 3 keys *]] [list "{06S}key0" "{06S}key1" "{06S}key2" "{1F4}key0" "{1F4}key1" "{1F4}key2"]
+    }
+}
+
+
+
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {
     test "Test IMPORT input validation" {
         # invalid arguments
