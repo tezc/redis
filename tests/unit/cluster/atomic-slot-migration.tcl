@@ -289,6 +289,9 @@ start_cluster 2 2 {tags {external:skip cluster} overrides {cluster-node-timeout 
         set keys [lsort [R 1 keys *]]
         assert_equal [lsort [R 1 keys *]] [list "{06S}key0" "{06S}key1" "{06S}key2" "{1F4}key0" "{1F4}key1" "{1F4}key2"]
         assert_equal [lsort [R 3 keys *]] [list "{06S}key0" "{06S}key1" "{06S}key2" "{1F4}key0" "{1F4}key1" "{1F4}key2"]
+
+        # cleanup
+        R 0 config set rdb-key-save-delay 0
     }
 }
 
