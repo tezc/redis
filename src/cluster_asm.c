@@ -2841,8 +2841,11 @@ void asmTriggerBackgroundTrim(slotRangeArray *slots) {
                                      KVSTORE_ALLOCATE_DICTS_ON_DEMAND);
     estore *subexpires = estoreCreate(&subexpiresBucketsType, CLUSTER_SLOT_MASK_BITS);
 
+    size_t total_keys = 0;
+
     for (int i = 0; i < slots->num_ranges; i++) {
         for (int slot = slots->ranges[i].start; slot <= slots->ranges[i].end; slot++) {
+            total_keys += kvstoreDictSize(server.db[0].keys, slot);
             kvstoreMoveDict(server.db[0].keys, keys, slot);
             kvstoreMoveDict(server.db[0].expires, expires, slot);
             estoreMoveEbuckets(server.db[0].subexpires, subexpires, slot);
@@ -2852,7 +2855,7 @@ void asmTriggerBackgroundTrim(slotRangeArray *slots) {
     emptyDbDataAsync(keys, expires, subexpires);
 
     sds str = slotRangeArrayToString(slots);
-    serverLog(LL_NOTICE, "Background trim started for slots: %s", str);
+    serverLog(LL_NOTICE, "Background trim started for slots: %s to trim %zu keys.", str, total_keys);
     sdsfree(str);
 }
 
@@ -2895,8 +2898,12 @@ void asmTrimJobSchedule(slotRangeArray *slots) {
 /* Process any pending trim jobs. */
 void asmTrimJobProcessPending(void) {
     /* Check if there is any pending trim job and we can propagate it. */
-    if (!asmTrimJobIsPending() || !canPropagateTrimSlots())
+    if (!asmTrimJobIsPending() ||
+        !canPropagateTrimSlots() ||
+        asmManager->debug_trim_method == ASM_DEBUG_TRIM_NONE)
+    {
         return;
+    }
 
     listIter li;
     listNode *ln;
@@ -3164,7 +3171,8 @@ void asmActiveTrimStart(void) {
                           &fsi);
 
     sds str = slotRangeArrayToString(slots);
-    serverLog(LL_NOTICE, "Active trim initiated for slots: %s", str);
+    serverLog(LL_NOTICE, "Active trim initiated for slots: %s, to trim %llu keys.",
+              str, asmManager->active_trim_current_job_keys);
     sdsfree(str);
 }
 

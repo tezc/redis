@@ -288,6 +288,10 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # 4. Migrate slot 6000 from node-1 to node-0
         # 5. Stop write traffic, verify db's are identical.
 
+        set prev_config [lindex [R 0 config get slot-migration-handoff-max-lag-bytes] 1]
+        R 0 config set slot-migration-handoff-max-lag-bytes 10mb
+        R 1 config set slot-migration-handoff-max-lag-bytes 10mb
+
         R 0 flushall
         R 0 debug asm-trim-method none
         populate_slot 10000 -idx 0 -slot 0
@@ -328,8 +332,10 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         assert_equal [R 0 debug digest] [R 1 debug digest]
 
         # cleanup
+        R 0 config set slot-migration-handoff-max-lag-bytes $prev_config
         R 0 debug asm-trim-method default
         R 0 flushall
+        R 1 config set slot-migration-handoff-max-lag-bytes $prev_config
         R 1 debug asm-trim-method default
         R 1 flushall
 
@@ -1993,8 +1999,18 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # Verify the tracking client received the invalidation message
         set msg [$rd_redirection read]
-        # PubSub invalidation payload is a list of keys; take the first element
-        assert_equal [lindex $msg 2 0] $key0
+        set head [lindex $msg 0]
+
+        if {$head eq "message"} {
+            # RESP 2
+            set got_key [lindex [lindex $msg 2] 0]
+        } elseif {$head eq "invalidate"} {
+            # RESP 3
+            set got_key [lindex $msg 1 0]
+        } else {
+            fail "unexpected invalidation message: $msg"
+        }
+        assert_equal $got_key $key0
 
         # cleanup
         $rd_redirection close
@@ -2550,7 +2566,7 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
         set loglines [count_log_lines -1]
         R 0 CLUSTER MIGRATION IMPORT 0 15
         wait_for_asm_done
-        wait_for_log_messages -1 {"*Background trim started for slots: 0-15"} $loglines 1000 10
+        wait_for_log_messages -1 {"*Background trim started for slots: 0-15*"} $loglines 1000 10
 
         # cleanup
         wait_for_asm_done
