@@ -161,7 +161,7 @@ void clusterAsmInit(void) {
     asmManager->active_trim_started = 0;
     asmManager->active_trim_completed = 0;
     asmManager->active_trim_cancelled = 0;
-    listSetFreeMethod(asmManager->active_trim_jobs, (void (*)(void*))slotRangeArrayFree);
+    listSetFreeMethod(asmManager->active_trim_jobs, slotRangeArrayFreeGeneric);
 }
 
 char *asmTaskStateToString(int state) {
