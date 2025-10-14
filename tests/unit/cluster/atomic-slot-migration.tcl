@@ -198,8 +198,8 @@ start_cluster 2 2 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 flushall
         R 1 flushall
 
-        # Disable active trim. Trim will notify the modules but it will not
-        # actually delete the keys. Redis should be started with
+        # Disable active trim. Redis will notify the modules about trim start
+        # but it will not actually delete the keys. Redis should be started with
         # "--enable-debug-command yes" to be able to use the debug command.
         R 0 debug asm-trim-method active -1
 
@@ -227,10 +227,12 @@ start_cluster 2 2 {tags {external:skip cluster} overrides {cluster-node-timeout 
         assert_equal [lsort [R 0 keys *]] [list "{Qi}key0" "{Qi}key1" "{Qi}key2"]
 
         # Replica read test
-        # Make node-3 readonly (node-3 is a replica of node-1)
-        # Verify KEYS * result and sort it, verify importing keys are not included as well
-        R 3 readonly
+        # Get "KEYS *" result and sort it, verify keys in slot-0 included as well
+        R 2 readonly ;# mark the client as readonly
         assert_equal [lsort [R 2 keys *]] [list "{Qi}key0" "{Qi}key1" "{Qi}key2"]
+
+        # cleanup
+        R 0 debug asm-trim-method default
     }
 }
 
@@ -272,9 +274,8 @@ start_cluster 2 2 {tags {external:skip cluster} overrides {cluster-node-timeout 
         assert_equal [lsort [R 1 keys *]] [list "{1F4}key0" "{1F4}key1" "{1F4}key2"]
 
         # Replica read test
-        # Make node-3 readonly (node-3 is a replica of node-1)
-        # Verify KEYS * result and sort it, verify importing keys are not included as well
-        R 3 readonly
+        # Get "KEYS *" result and sort it, verify importing keys are not included as well
+        R 3 readonly ;# mark the client as readonly
         assert_equal [lsort [R 3 keys *]] [list "{1F4}key0" "{1F4}key1" "{1F4}key2"]
 
         # Wait for migration to complete
@@ -284,7 +285,7 @@ start_cluster 2 2 {tags {external:skip cluster} overrides {cluster-node-timeout 
             fail "ASM task did not end"
         }
 
-        # Get KEYS * result and sort it, verify imported keys are included
+        # Get "KEYS *" result and sort it, verify imported keys are included
         set keys [lsort [R 1 keys *]]
         assert_equal [lsort [R 1 keys *]] [list "{06S}key0" "{06S}key1" "{06S}key2" "{1F4}key0" "{1F4}key1" "{1F4}key2"]
         assert_equal [lsort [R 3 keys *]] [list "{06S}key0" "{06S}key1" "{06S}key2" "{1F4}key0" "{1F4}key1" "{1F4}key2"]
