@@ -628,7 +628,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # Start the slot 0 write load on the R 1
         set slot0_key [slot_key 0 mykey]
-        set load_handle [start_write_load "127.0.0.1" [get_port 1] 1000 $slot0_key]
+        set load_handle [start_write_load "127.0.0.1" [get_port 1] 1000 $slot0_key 1024]
 
         # After some time, slots sync buffer limit should be reached, but migration would not fail
         # since the buffer will be accumulated on source side from now.
