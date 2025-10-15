@@ -1030,7 +1030,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
     test "Cancel import task when streaming buffer into db" {
         # set a delay to have time to cancel import task that is streaming buf to db
-        R 1 config set key-load-delay 50000
+        R 1 config set key-load-delay 200000
         # start slot migration from 0 to 1
         set task_id [setup_slot_migration_with_delay 0 1 0 100]
 
