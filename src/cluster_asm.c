@@ -924,18 +924,18 @@ static void replyTaskStatus(client *c, asmTask *task) {
     addReplyBulkCString(c, "last_error");
     addReplyBulkCBuffer(c, task->error, sdslen(task->error));
     addReplyBulkCString(c, "retries");
-    addReplyBulkLongLong(c, task->retry_count);
+    addReplyLongLong(c, task->retry_count);
     addReplyBulkCString(c, "create_time");
-    addReplyBulkLongLong(c, task->create_time);
+    addReplyLongLong(c, task->create_time);
     addReplyBulkCString(c, "start_time");
-    addReplyBulkLongLong(c, task->start_time);
+    addReplyLongLong(c, task->start_time);
     addReplyBulkCString(c, "end_time");
-    addReplyBulkLongLong(c, task->end_time);
+    addReplyLongLong(c, task->end_time);
 
     if (task->operation == ASM_MIGRATE && task->state == ASM_COMPLETED)
         p = task->end_time - task->paused_time;
     addReplyBulkCString(c, "write_pause_ms");
-    addReplyBulkLongLong(c, p);
+    addReplyLongLong(c, p);
 }
 
 /* CLUSTER MIGRATION STATUS [ID <task-id> | ALL]
