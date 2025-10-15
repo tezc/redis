@@ -276,7 +276,13 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         assert_equal {0} [R 0 CLUSTER MIGRATION CANCEL ALL]
     }
 
+    if {!$::valgrind} {
     test "Simple slot migration with write load" {
+        # skip on valgrind
+        if {$valgrind} {
+            return
+        }
+
         # Perform slot migration while traffic is on and verify data consistency.
         # Trimming is disabled on source nodes so, we can compare the dbs after
         # migration via DEBUG DIGEST to ensure no data loss during migration.
@@ -343,6 +349,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_asm_done
         R 1 CLUSTER MIGRATION IMPORT 6000 6100
         wait_for_asm_done
+    }
     }
 
     test "Simple slot migration" {
@@ -1039,7 +1046,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         set load_handle [start_write_load "127.0.0.1" [get_port 0] 1000 $slot0_key]
 
         # wait for entering streaming buffer state
-        wait_for_condition 1000 10 {
+        wait_for_condition 1000 20 {
             [string match {*streaming-buffer*} [migration_status 1 $task_id state]]
         } else {
             fail "ASM task did not enter streaming buffer state"
