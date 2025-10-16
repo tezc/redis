@@ -1032,13 +1032,13 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # set a delay to have time to cancel import task that is streaming buf to db
         R 1 config set key-load-delay 200000
         # start slot migration from 0 to 1
-        set task_id [setup_slot_migration_with_delay 0 1 0 100]
+        set task_id [setup_slot_migration_with_delay 0 1 0 100 1000]
 
         # start the slot 0 write load on the node 0
-        puts "ozan begin"
+        puts "timestamp: [clock seconds] ozan begin"
         set slot0_key [slot_key 0 mykey]
         set load_handle [start_write_load "127.0.0.1" [get_port 0] 1000 $slot0_key]
-        puts "ozan load started"
+        puts "timestamp: [clock seconds] ozan load started"
 
         # wait for entering streaming buffer state
         wait_for_condition 1000 20 {
