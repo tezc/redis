@@ -15,6 +15,7 @@
 #include "atomicvar.h"
 #include "script.h"
 #include "cluster.h"
+#include "cluster_asm.h"
 #include <math.h>
 
 /* ----------------------------------------------------------------------------
