@@ -1035,14 +1035,16 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         set task_id [setup_slot_migration_with_delay 0 1 0 100]
 
         # start the slot 0 write load on the node 0
+        puts "ozan begin"
         set slot0_key [slot_key 0 mykey]
         set load_handle [start_write_load "127.0.0.1" [get_port 0] 1000 $slot0_key]
+        puts "ozan load started"
 
         # wait for entering streaming buffer state
         wait_for_condition 1000 20 {
             [string match {*streaming-buffer*} [migration_status 1 $task_id state]]
         } else {
-            fail "ASM task did not enter streaming buffer state"
+            fail "ASM task did not enter streaming buffer state, state is: [migration_status 1 $task_id state] "
         }
         stop_write_load $load_handle
 
