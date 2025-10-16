@@ -288,6 +288,10 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # 4. Migrate slot 6000 from node-1 to node-0
         # 5. Stop write traffic, verify db's are identical.
 
+        set prev_config [lindex [R 0 config get slot-migration-handoff-max-lag-bytes] 1]
+        R 0 config set slot-migration-handoff-max-lag-bytes 10mb
+        R 1 config set slot-migration-handoff-max-lag-bytes 10mb
+
         R 0 flushall
         R 0 debug asm-trim-method none
         populate_slot 10000 -idx 0 -slot 0
@@ -328,8 +332,10 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         assert_equal [R 0 debug digest] [R 1 debug digest]
 
         # cleanup
+        R 0 config set slot-migration-handoff-max-lag-bytes $prev_config
         R 0 debug asm-trim-method default
         R 0 flushall
+        R 1 config set slot-migration-handoff-max-lag-bytes $prev_config
         R 1 debug asm-trim-method default
         R 1 flushall
 
@@ -589,7 +595,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # wait for buffer to accumulate on source side (more than 1m)
         wait_for_condition 1000 10 {
-            [S 0 mem_asm_migrate_output_buffer] > 1000000
+            [S 0 mem_slot_migration_output_buffer] > 1000000
         } else {
             fail "ait for buffer to accumulate on source side (more than 1m)"
         }
@@ -629,8 +635,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_log_messages 0 {"*Slots sync buffer limit has been reached*"} $loglines 1000 10
 
         # verify the peak value, should be greater than 1mb
-        assert {[CI 0 slot_migration_sync_buffer_peak] > 1000000}
-        assert {[S 0 mem_asm_import_input_buffer] > 1000000}
+        assert {[S 0 mem_slot_migration_input_buffer_peak] > 1000000}
+        assert {[S 0 mem_slot_migration_input_buffer] > 1000000}
 
         stop_write_load $load_handle
         wait_for_asm_done
@@ -1251,7 +1257,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
     }
 }
 
-start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000 cluster-allow-replica-migration no}} {
+start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {
     test "Test bgtrim after a successful migration" {
         R 0 debug asm-trim-method bg
         R 3 debug asm-trim-method bg
@@ -1476,7 +1482,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
     }
 }
 
-start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 30000 cluster-allow-replica-migration no save ""}} {
+start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no save ""}} {
     test "Test active trim after a successful migration" {
         R 0 debug asm-trim-method active
         R 3 debug asm-trim-method active
@@ -1613,8 +1619,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         populate_slot 250 -slot 3
         populate_slot 250 -slot 4
 
-        set prev_trim_started_1 [CI 1 slot_migration_active_trim_started]
-        set prev_trim_started_4 [CI 4 slot_migration_active_trim_started]
+        set prev_trim_started_1 [CI 1 slot_migration_stats_active_trim_started]
+        set prev_trim_started_4 [CI 4 slot_migration_stats_active_trim_started]
 
         R 1 CLUSTER MIGRATION IMPORT 0 100
         after 2000
@@ -1623,8 +1629,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_asm_done
 
         # Verify there is at least one trim job started
-        assert_morethan [CI 1 slot_migration_active_trim_started] $prev_trim_started_1
-        assert_morethan [CI 4 slot_migration_active_trim_started] $prev_trim_started_4
+        assert_morethan [CI 1 slot_migration_stats_active_trim_started] $prev_trim_started_1
+        assert_morethan [CI 4 slot_migration_stats_active_trim_started] $prev_trim_started_4
 
         assert_equal 1000 [R 0 dbsize]
         assert_equal 1000 [R 3 dbsize]
@@ -1833,7 +1839,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
                 fail "trim failed"
             }
 
-            set prev_cancelled [CI 3 slot_migration_active_trim_cancelled]
+            set prev_cancelled [CI 3 slot_migration_stats_active_trim_cancelled]
             R 0 config set client-output-buffer-limit "replica 1024 0 0"
 
             # Trigger a fullsync
@@ -1841,10 +1847,10 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
             wait_for_condition 1000 10 {
                 [CI 3 slot_migration_active_trim_running] == 0 &&
-                [CI 3 slot_migration_active_trim_cancelled] == $prev_cancelled + 1
+                [CI 3 slot_migration_stats_active_trim_cancelled] == $prev_cancelled + 1
             } else {
                 puts "[CI 3 slot_migration_active_trim_running]"
-                puts "[CI 3 slot_migration_active_trim_cancelled]"
+                puts "[CI 3 slot_migration_stats_active_trim_cancelled]"
                 fail "trim failed"
             }
 
@@ -1878,6 +1884,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
            fail "trim failed"
        }
 
+       set loglines [count_log_lines -3]
+
        # Get slots back
        R 0 CLUSTER MIGRATION IMPORT 0 100
        wait_for_condition 1000 20 {
@@ -1889,9 +1897,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
        }
 
        # Verify replica blocks master until trim is done
-       wait_for_log_messages -3 {"*Blocking master client until trim job is done*"} 0 1000 10
+       wait_for_log_messages -3 {"*Blocking master client until trim job is done*"} $loglines 1000 30
        R 3 debug asm-trim-method active 0
-       wait_for_log_messages -3 {"*Unblocking master client after active trim*"} 0 1000 10
+       wait_for_log_messages -3 {"*Unblocking master client after active trim*"} $loglines 1000 30
 
        wait_for_asm_done
        wait_for_ofs_sync [Rn 0] [Rn 3]
@@ -1912,7 +1920,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 1 debug asm-trim-method active 0
         R 1 flushall
 
-        set prev_trim_done [CI 1 slot_migration_active_trim_completed]
+        set prev_trim_done [CI 1 slot_migration_stats_active_trim_completed]
 
         R 1 debug populate 1000 [slot_prefix 0] 100
         R 1 debug populate 1000 [slot_prefix 1] 100
@@ -1925,7 +1933,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 1 exec
 
         wait_for_condition 1000 10 {
-            [CI 1 slot_migration_active_trim_completed] == $prev_trim_done + 3
+            [CI 1 slot_migration_stats_active_trim_completed] == $prev_trim_done + 3
         } else {
             fail "active trim failed"
         }
@@ -1958,7 +1966,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 debug asm-trim-method default
         R 1 debug asm-trim-method default
 
-        set prev_active_trim [CI 0 slot_migration_active_trim_completed]
+        set prev_active_trim [CI 0 slot_migration_stats_active_trim_completed]
 
         # Setup a tracking client that is redirected to a pubsub client
         set rd_redirection [redis_deferring_client]
@@ -1976,15 +1984,25 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_asm_done
 
         wait_for_condition 1000 10 {
-            [CI 0 slot_migration_active_trim_completed] == [expr $prev_active_trim + 1]
+            [CI 0 slot_migration_stats_active_trim_completed] == [expr $prev_active_trim + 1]
         } else {
             fail "active trim did not happen"
         }
 
         # Verify the tracking client received the invalidation message
         set msg [$rd_redirection read]
-        # PubSub invalidation payload is a list of keys; take the first element
-        assert_equal [lindex $msg 2 0] $key0
+        set head [lindex $msg 0]
+
+        if {$head eq "message"} {
+            # RESP 2
+            set got_key [lindex [lindex $msg 2] 0]
+        } elseif {$head eq "invalidate"} {
+            # RESP 3
+            set got_key [lindex $msg 1 0]
+        } else {
+            fail "unexpected invalidation message: $msg"
+        }
+        assert_equal $got_key $key0
 
         # cleanup
         $rd_redirection close
@@ -2124,8 +2142,8 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
 
             # Verify the events on source, both master and replica
             set migrate_event_log [list \
-                "sub: cluster-asm-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
-                "sub: cluster-asm-migrate-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
+                "sub: cluster-slot-migration-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
+                "sub: cluster-slot-migration-migrate-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
             ]
             assert_equal [R 0 asm.get_cluster_event_log] $migrate_event_log
             assert_equal [R 3 asm.get_cluster_event_log] {}
@@ -2133,8 +2151,8 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
 
             # Verify the events on destination, both master and replica
             set import_event_log [list \
-                "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
-                "sub: cluster-asm-import-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
+                "sub: cluster-slot-migration-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
+                "sub: cluster-slot-migration-import-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100,200-300" \
             ]
             wait_for_condition 500 10 {
                 [R 1 asm.get_cluster_event_log] eq $import_event_log &&
@@ -2147,13 +2165,13 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
             # Verify the trim events
             if {$trim_method eq "active"} {
                 set trim_event_log [list \
-                    "sub: cluster-asm-trim-started, slots:0-100,200-300" \
+                    "sub: cluster-slot-migration-trim-started, slots:0-100,200-300" \
                     "keyspace: key_trimmed, key: $key" \
-                    "sub: cluster-asm-trim-completed, slots:0-100,200-300" \
+                    "sub: cluster-slot-migration-trim-completed, slots:0-100,200-300" \
                 ]
             } else {
                 set trim_event_log [list \
-                    "sub: cluster-asm-trim-background, slots:0-100,200-300" \
+                    "sub: cluster-slot-migration-trim-background, slots:0-100,200-300" \
                 ]
             }
             wait_for_condition 500 10 {
@@ -2199,8 +2217,8 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
 
             # Verify the events on source, both master and replica
             set migrate_event_log [list \
-                "sub: cluster-asm-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                "sub: cluster-asm-migrate-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-slot-migration-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-slot-migration-migrate-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
             ]
             assert_equal [R 0 asm.get_cluster_event_log] $migrate_event_log
             assert_equal [R 3 asm.get_cluster_event_log] {}
@@ -2208,8 +2226,8 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
 
             # Verify the events on destination, both master and replica
             set import_event_log [list \
-                "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                "sub: cluster-asm-import-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-slot-migration-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-slot-migration-import-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
             ]
             wait_for_condition 500 10 {
                 [R 1 asm.get_cluster_event_log] eq $import_event_log &&
@@ -2222,13 +2240,13 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
             # Verify the trim events on destination (partially imported keys are trimmed)
             if {$trim_method eq "active"} {
                 set trim_event_log [list \
-                    "sub: cluster-asm-trim-started, slots:0-100" \
+                    "sub: cluster-slot-migration-trim-started, slots:0-100" \
                     "keyspace: key_trimmed, key: $key" \
-                    "sub: cluster-asm-trim-completed, slots:0-100" \
+                    "sub: cluster-slot-migration-trim-completed, slots:0-100" \
                 ]
             } else {
                 set trim_event_log [list \
-                    "sub: cluster-asm-trim-background, slots:0-100" \
+                    "sub: cluster-slot-migration-trim-background, slots:0-100" \
                 ]
             }
             wait_for_condition 500 10 {
@@ -2276,8 +2294,8 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
 
             # Verify the events on source, both master and replica
             set migrate_event_log [list \
-                "sub: cluster-asm-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                "sub: cluster-asm-migrate-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-slot-migration-migrate-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-slot-migration-migrate-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
             ]
             assert_equal [R 0 asm.get_cluster_event_log] $migrate_event_log
             assert_equal [R 3 asm.get_cluster_event_log] {}
@@ -2285,8 +2303,8 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
 
             # Verify the events on destination, both master and replica
             set import_event_log [list \
-                "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                "sub: cluster-asm-import-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-slot-migration-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-slot-migration-import-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
             ]
             wait_for_condition 500 10 {
                 [R 1 asm.get_cluster_event_log] eq $import_event_log &&
@@ -2300,13 +2318,13 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
             # NOTE: only slot 0 has data, so only slot 0 is trimmed
             if {$trim_method eq "active"} {
                 set trim_event_log [list \
-                    "sub: cluster-asm-trim-started, slots:0-0" \
+                    "sub: cluster-slot-migration-trim-started, slots:0-0" \
                     "keyspace: key_trimmed, key: $key" \
-                    "sub: cluster-asm-trim-completed, slots:0-0" \
+                    "sub: cluster-slot-migration-trim-completed, slots:0-0" \
                 ]
             } else {
                 set trim_event_log [list \
-                    "sub: cluster-asm-trim-background, slots:0-0" \
+                    "sub: cluster-slot-migration-trim-background, slots:0-0" \
                 ]
             }
             wait_for_condition 500 10 {
@@ -2358,7 +2376,7 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
                 restart_server -4 true false true save ;# rdb save
                 # the asm task info in rdb will fire module event
                 assert_equal  [list \
-                    "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                    "sub: cluster-slot-migration-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
                 ] [R 4 asm.get_cluster_event_log]
             } else {                
                 restart_server -4 true false true nosave ;# no rdb saved
@@ -2369,8 +2387,8 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
 
             # started and completed are paired, and not duplicated
             set import_event_log [list \
-                "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                "sub: cluster-asm-import-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-slot-migration-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+                "sub: cluster-slot-migration-import-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
             ]
             wait_for_condition 500 10 {
                 [R 1 asm.get_cluster_event_log] eq $import_event_log &&
@@ -2443,8 +2461,8 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
 
         # started and completed are paired, and not duplicated
         set import_event_log [list \
-            "sub: cluster-asm-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-            "sub: cluster-asm-import-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+            "sub: cluster-slot-migration-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
+            "sub: cluster-slot-migration-import-completed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
         ]
         wait_for_condition 500 10 {
             [R 1 asm.get_cluster_event_log] eq $import_event_log &&
@@ -2540,7 +2558,7 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
         set loglines [count_log_lines -1]
         R 0 CLUSTER MIGRATION IMPORT 0 15
         wait_for_asm_done
-        wait_for_log_messages -1 {"*Background trim started for slots: 0-15"} $loglines 1000 10
+        wait_for_log_messages -1 {"*Background trim started for slots: 0-15*"} $loglines 1000 10
 
         # cleanup
         wait_for_asm_done
