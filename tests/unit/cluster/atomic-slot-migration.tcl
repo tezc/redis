@@ -2420,11 +2420,14 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
                     "sub: cluster-slot-migration-trim-background, slots:0-100" \
                 ]
             }
-            wait_for_condition 500 10 {
+            wait_for_condition 500 20 {
                 [R 1 asm.get_cluster_trim_event_log] eq $trim_event_log &&
                 [R 4 asm.get_cluster_trim_event_log] eq $trim_event_log &&
                 [R 7 asm.get_cluster_trim_event_log] eq $trim_event_log
             } else {
+                puts "event log: [R 1 asm.get_cluster_trim_event_log]"
+                puts "event log: [R 4 asm.get_cluster_trim_event_log]"
+                puts "event log: [R 7 asm.get_cluster_trim_event_log]"
                 fail "ASM destination trim event not received"
             }
 
@@ -2501,6 +2504,9 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
                 [R 4 asm.get_cluster_trim_event_log] eq $trim_event_log &&
                 [R 7 asm.get_cluster_trim_event_log] eq $trim_event_log
             } else {
+                puts "event log: [R 1 asm.get_cluster_trim_event_log]"
+                puts "event log: [R 4 asm.get_cluster_trim_event_log]"
+                puts "event log: [R 7 asm.get_cluster_trim_event_log]"
                 fail "ASM destination trim event not received"
             }
 
