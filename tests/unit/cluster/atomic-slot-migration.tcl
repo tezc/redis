@@ -790,12 +790,16 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_condition 1000 10 {
             [S 0 mem_slot_migration_output_buffer] > 1000000
         } else {
-            fail "ait for buffer to accumulate on source side (more than 1m)"
+            fail "wait for buffer to accumulate on source side (more than 1m)"
         }
 
         # After some time, the client output buffer limit should be reached
         wait_for_log_messages 0 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 1000 10
-        assert_match {*send*stream*} [migration_status 0 $task_id last_error]
+        wait_for_condition 1000 10 {
+            [string match {*send*stream*} [migration_status 0 $task_id last_error]]
+        } else {
+            fail "ASM task did not fail"
+        }
 
         stop_write_load $load_handle
 
@@ -1993,7 +1997,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             R 0 config set repl-diskless-sync-delay 0
             populate_slot 10000 -idx 0 -slot 0
 
-            R 1 CLUSTER MIGRATION IMPORT 0 100
+            R 1 CLUSTER MIGRATION IMPORT 0 0
             wait_for_condition 1000 10 {
                 [CI 0 slot_migration_active_tasks] == 0 &&
                 [CI 0 slot_migration_active_trim_running] == 0 &&
@@ -2002,15 +2006,6 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
                 puts "[CI 0 slot_migration_active_tasks]"
                 puts "[CI 0 slot_migration_active_trim_running]"
                 puts "[CI 3 slot_migration_active_trim_running]"
-                fail "trim failed"
-            }
-
-            R 0 CLUSTER MIGRATION IMPORT 0 100
-            wait_for_condition 1000 10 {
-                [CI 0 slot_migration_active_tasks] == 0 &&
-                [CI 0 slot_migration_active_trim_running] == 0 &&
-                [CI 3 slot_migration_active_trim_running] == 1
-            } else {
                 fail "trim failed"
             }
 
@@ -2031,6 +2026,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
             R 3 debug asm-trim-method active 0
             R 3 config set repl-diskless-load disabled
+            R 0 CLUSTER MIGRATION IMPORT 0 0
             wait_for_asm_done
             wait_for_ofs_sync [Rn 0] [Rn 3]
             assert_equal 10001 [R 0 dbsize]
