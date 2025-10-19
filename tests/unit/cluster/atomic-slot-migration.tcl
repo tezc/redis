@@ -2074,8 +2074,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
        wait_for_asm_done
        wait_for_ofs_sync [Rn 0] [Rn 3]
-       assert_equal 100 [R 0 dbsize]
-       assert_equal 100 [R 3 dbsize]
+       assert_equal 10000 [R 0 dbsize]
+       assert_equal 10000 [R 3 dbsize]
        assert_equal 0 [R 1 dbsize]
        assert_equal 0 [R 4 dbsize]
     }
