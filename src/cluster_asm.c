@@ -3322,12 +3322,6 @@ void asmActiveTrimCycle(void) {
     if (blocked) serverLog(LL_NOTICE, "Active trim cycle is resumed after the write pause is lifted.");
     blocked = 0;
 
-    /* Start an active trim job if no active trim job is running. */
-    if (asmManager->active_trim_it == NULL) {
-        serverAssert(listLength(asmManager->active_trim_jobs) > 0);
-        asmActiveTrimStart();
-    }
-
     /* This works in a similar way to activeExpireCycle, in the sense that
      * we do incremental work across calls. */
     const int trim_cycle_time_perc = 25;
