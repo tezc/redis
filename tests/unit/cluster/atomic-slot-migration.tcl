@@ -2038,9 +2038,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
     }
 
     test "Test importing slots while active-trim is in progress for the same slots on replica" {
-       R 3 debug asm-trim-method active 1000000
+       R 3 debug asm-trim-method active 10000
        R 0 flushall
-       populate_slot 100 -slot 0
+       populate_slot 10000 -slot 0
 
        # Wait until active trim is in progress on replica
        R 1 CLUSTER MIGRATION IMPORT 0 100
