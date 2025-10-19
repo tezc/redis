@@ -1412,12 +1412,13 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # start the slot 0 write load on the node 0
         set slot0_key [slot_key 0 mykey]
-        set load_handle [start_write_load "127.0.0.1" [get_port 0] 1000 $slot0_key]
+        set load_handle [start_write_load "127.0.0.1" [get_port 0] 1000 $slot0_key 1024]
 
         # wait for entering streaming buffer state
         wait_for_condition 1000 10 {
             [string match {*wait-stream-eof*} [migration_status 1 $task_id state]]
         } else {
+            puts "task state: [migration_status 1 $task_id state]"
             fail "ASM task did not enter wait-stream-eof state"
         }
 
