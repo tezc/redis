@@ -125,13 +125,28 @@ proc wait_for_asm_done {} {
     }
 }
 
-proc wait_for_failover {node_id} {
-    wait_for_condition 1000 50 {
-        [string match "*master*" [R $node_id role]]
-    } else {
-        fail "Failover did not complete"
+proc wait_for_failover {node_id {failover_arg ""}} {
+    set max_attempts 5
+    for {set attempt 1} {$attempt <= $max_attempts} {incr attempt} {
+        if {$failover_arg eq ""} {
+            R $node_id cluster failover
+        } else {
+            R $node_id cluster failover $failover_arg
+        }
+
+        set completed 1
+        wait_for_condition 1000 10 {
+            [string match "*master*" [R $node_id role]]
+        } else {
+            set completed 0
+        }
+
+        if {$completed} {
+            wait_for_cluster_propagation
+            return
+        }
     }
-    wait_for_cluster_propagation
+    fail "Failover did not complete after $max_attempts attempts for node $node_id"
 }
 
 proc migration_status {node_id task_id field} {
@@ -958,12 +973,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         set task_id [setup_slot_migration_with_delay 1 0 0 100]
 
         # FAILOVER happens on the destination node, instance #3 become master, #0 become slave
-        R 3 cluster failover
-        wait_for_condition 1000 50 {
-            [S 3 role] eq {master}
-        } else {
-            fail "Instance #3 is not a master after some time"
-        }
+        wait_for_failover 3
 
         # the old master will cancel the importing task, and the migrating task on
         # the source node will be failed
@@ -984,12 +994,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         set task_id [setup_slot_migration_with_delay 3 1 0 100]
 
         # FAILOVER happens on the source node, instance #3 become slave, #0 become master
-        R 0 cluster failover
-        wait_for_condition 1000 50 {
-            [S 0 role] eq {master}
-        } else {
-            fail "Instance #0 is not a master after some time"
-        }
+        wait_for_failover 0
 
         # the old master will cancel the migrating task, but the destination node will
         # retry the importing task, and then succeed.
@@ -1593,7 +1598,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # Trigger a failover with force to simulate unreachable master and
         # verify unowned keys are trimmed once replica becomes master.
-        R 4 cluster failover
+        wait_for_failover 4
         wait_for_log_messages -4 {"*Detected keys in slots that do not belong*Scheduling trim*"} $loglines 1000 10
         wait_for_condition 1000 10 {
             [R 1 dbsize] == 0 &&
@@ -1604,12 +1609,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # cleanup
         wait_for_cluster_propagation
-        R 1 cluster failover
-        wait_for_condition 1000 10 {
-            [getInfoProperty [R 1 info] role] eq {master}
-        } else {
-            fail "Instance #0 is not a master after some time"
-        }
+        wait_for_failover 1
         R 0 config set rdb-key-save-delay 0
         R 1 debug asm-trim-method default
         R 4 debug asm-trim-method default
@@ -1780,7 +1780,6 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         R 1 CLUSTER MIGRATION IMPORT 0 100
         after 2000
-        R 4 CLUSTER FAILOVER
         wait_for_failover 4
         wait_for_asm_done
 
@@ -1794,7 +1793,6 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         assert_equal 0 [R 4 dbsize]
 
         # Cleanup
-        R 1 CLUSTER FAILOVER
         wait_for_failover 1
         R 1 debug asm-trim-method default
         R 4 debug asm-trim-method default
@@ -2440,9 +2438,7 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
                 fail "Key not moved to destination"
             }
 
-            R 4 CLUSTER FAILOVER TAKEOVER
-            wait_for_failover 4
-            wait_for_cluster_propagation
+            wait_for_failover 4 TAKEOVER
             wait_for_asm_done
 
             set src_id [R 0 cluster myid]
@@ -2492,9 +2488,7 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
             }
 
             # cleanup
-            R 1 CLUSTER FAILOVER TAKEOVER
-            wait_for_failover 1
-            wait_for_cluster_propagation
+            wait_for_failover 1 TAKEOVER
             clear_module_event_log
             reset_default_trim_method
             R 0 flushall
