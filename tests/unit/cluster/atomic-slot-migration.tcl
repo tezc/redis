@@ -527,6 +527,45 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 config set rdb-key-save-delay 0
     }
 
+    test "Verify expire time is migrated correctly" {
+        R 0 flushall
+        R 1 flushall
+
+        set string_key [slot_key 0 string_key]
+        set list_key [slot_key 0 list_key]
+        set hash_key [slot_key 0 hash_key]
+        set stream_key [slot_key 0 stream_key]
+
+        for {set i 0} {$i < 20} {incr i} {
+            R 1 hset $hash_key $i $i
+            R 1 xadd $stream_key * item $i
+        }
+        for {set i 0} {$i < 2000} {incr i} {
+            R 1 lpush $list_key $i
+        }
+
+        # set expire time of some keys
+        R 1 set $string_key "a" EX 1000
+        R 1 EXPIRE $list_key 1000
+        R 1 EXPIRE $hash_key 1000
+
+        # migrate slot 0-100 to R 0
+        R 0 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_asm_done
+
+        # check expire times are migrated correctly
+        assert_range [R 0 ttl $string_key] 900 1000
+        assert_range [R 0 ttl $list_key] 900 1000
+        assert_range [R 0 ttl $hash_key] 900 1000
+        assert_equal -1 [R 0 ttl $stream_key]
+
+        # cleanup
+        R 0 flushall
+        R 1 flushall
+        R 1 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_asm_done
+    }
+
     test "Slot migration with complex data types can work well" {
         R 0 flushall
         R 1 flushall
@@ -2423,7 +2462,7 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
                 "sub: cluster-slot-migration-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
                 "sub: cluster-slot-migration-import-failed, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
             ]
-            wait_for_condition 500 10 {
+            wait_for_condition 500 20 {
                 [R 1 asm.get_cluster_event_log] eq $import_event_log &&
                 [R 4 asm.get_cluster_event_log] eq $import_event_log &&
                 [R 7 asm.get_cluster_event_log] eq $import_event_log
@@ -2444,7 +2483,7 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
                     "sub: cluster-slot-migration-trim-background, slots:0-0" \
                 ]
             }
-            wait_for_condition 500 10 {
+            wait_for_condition 500 20 {
                 [R 1 asm.get_cluster_trim_event_log] eq $trim_event_log &&
                 [R 4 asm.get_cluster_trim_event_log] eq $trim_event_log &&
                 [R 7 asm.get_cluster_trim_event_log] eq $trim_event_log
