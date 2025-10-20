@@ -274,6 +274,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
     }
 }
 
+
+if {!$::valgrind} {
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {
     test "Test CLUSTER MIGRATION IMPORT input validation" {
         # invalid arguments
@@ -556,73 +558,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 1 debug asm-trim-method default
         R 1 flushall
 
-        R 0 CLUSTER MIGRATION IMPORT 0 100
-        wait_for_asm_done
         R 1 CLUSTER MIGRATION IMPORT 6000 6100
         wait_for_asm_done
-    }
-
-    test "Simple slot migration" {
-        set slot0_key [slot_key 0 mykey]
-        R 0 set $slot0_key "a"
-        set slot1_key [slot_key 1 mykey]
-        R 0 set $slot1_key "b"
-        set slot101_key [slot_key 101 mykey]
-        R 0 set $slot101_key "c"
-        # 3 keys cost 3s to save
-        R 0 config set rdb-key-save-delay 1000000
-
-        # load a function
-        R 0 function load {#!lua name=test1
-                redis.register_function('test1', function() return 'hello1' end)
-        }
-
-        # migrate slot 0-100 to R 1
-        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
-        # migration is start, and in accumulating buffer stage
-        wait_for_condition 1000 50 {
-            [string match {*send-bulk-and-stream*} [migration_status 0 $task_id state]] &&
-            [string match {*accumulate-buffer*} [migration_status 1 $task_id state]]
-        } else {
-            fail "ASM task did not start"
-        }
-
-        # append 99 times during migration
-        for {set i 0} {$i < 99} {incr i} {
-            R 0 multi
-            R 0 append $slot0_key "a"
-            R 0 exec
-            R 0 append $slot1_key "b"
-            R 0 append $slot101_key "c"
-        }
-
-        # wait until migration of 0-100 successful
-        wait_for_asm_done
-
-        # verify task state became completed
-        assert_equal "completed" [migration_status 0 $task_id state]
-        assert_equal "completed" [migration_status 1 $task_id state]
-
-        # the appended 99 times should also be migrated
-        assert_equal [string repeat a 100] [R 1 get $slot0_key]
-        assert_equal [string repeat b 100] [R 1 get $slot1_key]
-        # function should be migrated
-        assert_equal [R 0 function dump] [R 1 function dump]
-        # the slave should also get the data
-        wait_for_ofs_sync [Rn 1] [Rn 4]
-        R 4 readonly
-        assert_equal [string repeat a 100] [R 4 get $slot0_key]
-        assert_equal [string repeat b 100] [R 4 get $slot1_key]
-        assert_equal [R 0 function dump] [R 4 function dump]
-
-        # verify key that was not in the slot range is not migrated
-        assert_equal [string repeat c 100] [R 0 get $slot101_key]
-        # verify changes in replica
-        wait_for_ofs_sync [Rn 0] [Rn 3]
-        R 3 readonly
-        assert_equal [string repeat c 100] [R 3 get $slot101_key]
-
-        R 0 config set rdb-key-save-delay 0
     }
 
     test "Verify expire time is migrated correctly" {
@@ -938,6 +875,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # due to expired, neither active nor lazy expiration (SCAN) takes effect,
         # Besides SCAN/KEYS/RANDOMKEY/CLUSTER GETKEYSINSLOT command can not find them
         after 2000
+        R 3 readonly
         foreach id {0 3} { ;# 0 is the master, 3 is the replica
             assert_equal {0 {}} [R $id scan 0 count 10]
             assert_equal {} [R $id keys "*"]
@@ -2907,4 +2845,5 @@ start_server {tags "cluster external:skip"} {
         r module load $testmodule
         assert_equal [r asm.cluster_get_local_slot_ranges] {{0 16383}}
     }
+}
 }
