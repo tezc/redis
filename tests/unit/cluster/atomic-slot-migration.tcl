@@ -274,7 +274,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
     }
 }
 
-
+# Skip most of the tests when running under valgrind since it is hard to
+# stabilize tests under valgrind.
 if {!$::valgrind} {
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {
     test "Test CLUSTER MIGRATION IMPORT input validation" {
