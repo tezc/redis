@@ -125,7 +125,7 @@ proc wait_for_asm_done {} {
     }
 }
 
-proc wait_for_failover {node_id {failover_arg ""}} {
+proc failover_and_wait_for_done {node_id {failover_arg ""}} {
     set max_attempts 5
     for {set attempt 1} {$attempt <= $max_attempts} {incr attempt} {
         if {$failover_arg eq ""} {
@@ -1056,7 +1056,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         set task_id [setup_slot_migration_with_delay 1 0 0 100]
 
         # FAILOVER happens on the destination node, instance #3 become master, #0 become slave
-        wait_for_failover 3
+        failover_and_wait_for_done 3
 
         # the old master will cancel the importing task, and the migrating task on
         # the source node will be failed
@@ -1077,7 +1077,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         set task_id [setup_slot_migration_with_delay 3 1 0 100]
 
         # FAILOVER happens on the source node, instance #3 become slave, #0 become master
-        wait_for_failover 0
+        failover_and_wait_for_done 0
 
         # the old master will cancel the migrating task, but the destination node will
         # retry the importing task, and then succeed.
@@ -1681,7 +1681,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # Trigger a failover with force to simulate unreachable master and
         # verify unowned keys are trimmed once replica becomes master.
-        wait_for_failover 4
+        failover_and_wait_for_done 4
         wait_for_log_messages -4 {"*Detected keys in slots that do not belong*Scheduling trim*"} $loglines 1000 10
         wait_for_condition 1000 10 {
             [R 1 dbsize] == 0 &&
@@ -1692,7 +1692,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # cleanup
         wait_for_cluster_propagation
-        wait_for_failover 1
+        failover_and_wait_for_done 1
         R 0 config set rdb-key-save-delay 0
         R 1 debug asm-trim-method default
         R 4 debug asm-trim-method default
@@ -1863,7 +1863,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         R 1 CLUSTER MIGRATION IMPORT 0 100
         after 2000
-        wait_for_failover 4
+        failover_and_wait_for_done 4
         wait_for_asm_done
 
         # Verify there is at least one trim job started
@@ -1876,7 +1876,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         assert_equal 0 [R 4 dbsize]
 
         # Cleanup
-        wait_for_failover 1
+        failover_and_wait_for_done 1
         R 1 debug asm-trim-method default
         R 4 debug asm-trim-method default
         R 0 config set rdb-key-save-delay 0
@@ -2516,7 +2516,7 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
                 fail "Key not moved to destination"
             }
 
-            wait_for_failover 4 TAKEOVER
+            failover_and_wait_for_done 4 TAKEOVER
             wait_for_asm_done
 
             set src_id [R 0 cluster myid]
@@ -2572,7 +2572,7 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
             }
 
             # cleanup
-            wait_for_failover 1 TAKEOVER
+            failover_and_wait_for_done 1 TAKEOVER
             clear_module_event_log
             reset_default_trim_method
             R 0 flushall
