@@ -2932,8 +2932,10 @@ void asmTrimJobProcessPending(void) {
         isPausedActions(PAUSE_ACTION_CLIENT_ALL) ||
         isPausedActions(PAUSE_ACTION_REPLICA))
     {
-        if (logged == 0) serverLog(LL_NOTICE, "Trim job will start after the write pause is lifted.");
-        logged = 1;
+        if (logged == 0) {
+            logged = 1;
+            serverLog(LL_NOTICE, "Trim job will start after the write pause is lifted.");
+        }
         return;
     }
     logged = 0;
@@ -3315,8 +3317,10 @@ void asmActiveTrimCycle(void) {
     if (isPausedActions(PAUSE_ACTION_CLIENT_ALL) ||
         isPausedActions(PAUSE_ACTION_CLIENT_WRITE))
     {
-        if (blocked == 0)  serverLog(LL_NOTICE, "Active trim cycle will continue after the write pause is lifted.");
-        blocked = 1;
+        if (blocked == 0)  {
+            blocked = 1;
+            serverLog(LL_NOTICE, "Active trim cycle will continue after the write pause is lifted.");
+        }
         return;
     }
     if (blocked) serverLog(LL_NOTICE, "Active trim cycle is resumed after the write pause is lifted.");
