@@ -102,8 +102,8 @@ proc populate_slot {num args} {
 # Return 1 if all instances are idle
 proc asm_all_instances_idle {total} {
     for {set i 0} {$i < $total} {incr i} {
-        if {[CI $i slot_migration_active_tasks] != 0} { return 0 }
-        if {[CI $i slot_migration_active_trim_running] != 0} { return 0 }
+        if {[CI $i cluster_slot_migration_active_tasks] != 0} { return 0 }
+        if {[CI $i cluster_slot_migration_active_trim_running] != 0} { return 0 }
     }
     return 1
 }
@@ -117,8 +117,8 @@ proc wait_for_asm_done {} {
     } else {
         # Print the number of active tasks on each instance
         for {set i 0} {$i < $total_instances} {incr i} {
-            set migration_count [CI $i slot_migration_active_tasks]
-            set trim_count [CI $i slot_migration_active_trim_running]
+            set migration_count [CI $i cluster_slot_migration_active_tasks]
+            set trim_count [CI $i cluster_slot_migration_active_trim_running]
             puts "Instance $i: migration_tasks=$migration_count, trim_tasks=$trim_count"
         }
         fail "ASM tasks did not complete on all instances"
@@ -1682,17 +1682,17 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_asm_done
 
         wait_for_condition 1000 10 {
-            [CI 0 slot_migration_active_tasks] == 0 &&
-            [CI 0 slot_migration_active_trim_running] == 0 &&
-            [CI 0 slot_migration_active_trim_current_job_trimmed] == 1500 &&
-            [CI 3 slot_migration_active_trim_running] == 0 &&
-            [CI 3 slot_migration_active_trim_current_job_trimmed] == 1500
+            [CI 0 cluster_slot_migration_active_tasks] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_running] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_current_job_trimmed] == 1500 &&
+            [CI 3 cluster_slot_migration_active_trim_running] == 0 &&
+            [CI 3 cluster_slot_migration_active_trim_current_job_trimmed] == 1500
         } else {
             fail "trim failed"
         }
 
-        assert_equal 1500 [CI 0 slot_migration_active_trim_current_job_keys]
-        assert_equal 1500 [CI 3 slot_migration_active_trim_current_job_keys]
+        assert_equal 1500 [CI 0 cluster_slot_migration_active_trim_current_job_keys]
+        assert_equal 1500 [CI 3 cluster_slot_migration_active_trim_current_job_keys]
 
         assert_equal 500 [R 0 dbsize]
         assert_equal 500 [R 3 dbsize]
@@ -1725,9 +1725,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # Migrate 1500 keys
         R 1 CLUSTER MIGRATION IMPORT 0 1
         wait_for_condition 1000 10 {
-            [CI 0 slot_migration_active_tasks] == 0 &&
-            [CI 0 slot_migration_active_trim_running] == 1 &&
-            [CI 3 slot_migration_active_trim_running] == 1
+            [CI 0 cluster_slot_migration_active_tasks] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_running] == 1 &&
+            [CI 3 cluster_slot_migration_active_trim_running] == 1
         } else {
             fail "migrate failed"
         }
@@ -1735,9 +1735,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # Migrate another slot and verify there are two trim tasks on the source
         R 1 CLUSTER MIGRATION IMPORT 3 3
         wait_for_condition 1000 10 {
-            [CI 0 slot_migration_active_tasks] == 0 &&
-            [CI 0 slot_migration_active_trim_running] == 2 &&
-            [CI 3 slot_migration_active_trim_running] == 2
+            [CI 0 cluster_slot_migration_active_tasks] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_running] == 2 &&
+            [CI 3 cluster_slot_migration_active_trim_running] == 2
         } else {
             fail "migrate failed"
         }
@@ -1779,8 +1779,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 1 CLUSTER MIGRATION CANCEL ALL
         wait_for_asm_done
 
-        assert_morethan [CI 1 slot_migration_active_trim_current_job_keys] 0
-        assert_morethan [CI 4 slot_migration_active_trim_current_job_trimmed] 0
+        assert_morethan [CI 1 cluster_slot_migration_active_trim_current_job_keys] 0
+        assert_morethan [CI 4 cluster_slot_migration_active_trim_current_job_trimmed] 0
 
         assert_equal 1000 [R 0 dbsize]
         assert_equal 1000 [R 3 dbsize]
@@ -1843,8 +1843,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # Migrate 1000 keys
         R 1 CLUSTER MIGRATION IMPORT 0 1
         wait_for_condition 1000 10 {
-            [CI 0 slot_migration_active_tasks] == 0 &&
-            [CI 0 slot_migration_active_trim_running] == 1
+            [CI 0 cluster_slot_migration_active_tasks] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_running] == 1
         } else {
             fail "migrate failed"
         }
@@ -1879,12 +1879,12 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # Start migration and wait until trim is in progress
         R 1 CLUSTER MIGRATION IMPORT 0 1
         wait_for_condition 1000 10 {
-            [CI 0 slot_migration_active_tasks] == 0 &&
-            [CI 0 slot_migration_active_trim_running] == 1 &&
+            [CI 0 cluster_slot_migration_active_tasks] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_running] == 1 &&
             [S 0 rdb_bgsave_in_progress] == 0
         } else {
-            puts "[CI 0 slot_migration_active_tasks]"
-            puts "[CI 0 slot_migration_active_trim_running]"
+            puts "[CI 0 cluster_slot_migration_active_tasks]"
+            puts "[CI 0 cluster_slot_migration_active_trim_running]"
             fail "trim failed"
         }
 
@@ -1922,11 +1922,11 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         R 1 CLUSTER MIGRATION IMPORT 0 1
         wait_for_condition 1000 10 {
-            [CI 0 slot_migration_active_tasks] == 0 &&
-            [CI 0 slot_migration_active_trim_running] == 1
+            [CI 0 cluster_slot_migration_active_tasks] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_running] == 1
         } else {
-            puts "[CI 0 slot_migration_active_tasks]"
-            puts "[CI 0 slot_migration_active_trim_running]"
+            puts "[CI 0 cluster_slot_migration_active_tasks]"
+            puts "[CI 0 cluster_slot_migration_active_trim_running]"
             fail "trim failed"
         }
 
@@ -1967,19 +1967,19 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         R 1 CLUSTER MIGRATION IMPORT 0 100
         wait_for_condition 1000 10 {
-            [CI 0 slot_migration_active_tasks] == 0 &&
-            [CI 0 slot_migration_active_trim_running] == 1
+            [CI 0 cluster_slot_migration_active_tasks] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_running] == 1
         } else {
-            puts "[CI 0 slot_migration_active_tasks]"
-            puts "[CI 0 slot_migration_active_trim_running]"
+            puts "[CI 0 cluster_slot_migration_active_tasks]"
+            puts "[CI 0 cluster_slot_migration_active_trim_running]"
             fail "trim failed"
         }
 
         # Pause the server and verify no keys are trimmed
         R 0 client pause 100000 write ;# pause 100s
-        set prev [CI 0 slot_migration_active_trim_current_job_trimmed]
+        set prev [CI 0 cluster_slot_migration_active_trim_current_job_trimmed]
         after 1000 ; # wait some time to see if any keys are trimmed
-        set curr [CI 0 slot_migration_active_trim_current_job_trimmed]
+        set curr [CI 0 cluster_slot_migration_active_trim_current_job_trimmed]
         assert_equal $prev $curr
 
         R 0 client unpause
@@ -2004,13 +2004,13 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
             R 1 CLUSTER MIGRATION IMPORT 0 0
             wait_for_condition 1000 10 {
-                [CI 0 slot_migration_active_tasks] == 0 &&
-                [CI 0 slot_migration_active_trim_running] == 0 &&
-                [CI 3 slot_migration_active_trim_running] == 1
+                [CI 0 cluster_slot_migration_active_tasks] == 0 &&
+                [CI 0 cluster_slot_migration_active_trim_running] == 0 &&
+                [CI 3 cluster_slot_migration_active_trim_running] == 1
             } else {
-                puts "[CI 0 slot_migration_active_tasks]"
-                puts "[CI 0 slot_migration_active_trim_running]"
-                puts "[CI 3 slot_migration_active_trim_running]"
+                puts "[CI 0 cluster_slot_migration_active_tasks]"
+                puts "[CI 0 cluster_slot_migration_active_trim_running]"
+                puts "[CI 3 cluster_slot_migration_active_trim_running]"
                 fail "trim failed"
             }
 
@@ -2021,10 +2021,10 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             populate_slot 1 -idx 0 -size 2000000 -slot 2
 
             wait_for_condition 1000 10 {
-                [CI 3 slot_migration_active_trim_running] == 0 &&
+                [CI 3 cluster_slot_migration_active_trim_running] == 0 &&
                 [CI 3 cluster_slot_migration_stats_active_trim_cancelled] == $prev_cancelled + 1
             } else {
-                puts "[CI 3 slot_migration_active_trim_running]"
+                puts "[CI 3 cluster_slot_migration_active_trim_running]"
                 puts "[CI 3 cluster_slot_migration_stats_active_trim_cancelled]"
                 fail "trim failed"
             }
@@ -2051,13 +2051,13 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
        # Wait until active trim is in progress on replica
        R 1 CLUSTER MIGRATION IMPORT 0 100
        wait_for_condition 1000 10 {
-           [CI 0 slot_migration_active_tasks] == 0 &&
-           [CI 0 slot_migration_active_trim_running] == 0 &&
-           [CI 3 slot_migration_active_trim_running] == 1
+           [CI 0 cluster_slot_migration_active_tasks] == 0 &&
+           [CI 0 cluster_slot_migration_active_trim_running] == 0 &&
+           [CI 3 cluster_slot_migration_active_trim_running] == 1
        } else {
-           puts "[CI 0 slot_migration_active_tasks]"
-           puts "[CI 0 slot_migration_active_trim_running]"
-           puts "[CI 3 slot_migration_active_trim_running]"
+           puts "[CI 0 cluster_slot_migration_active_tasks]"
+           puts "[CI 0 cluster_slot_migration_active_trim_running]"
+           puts "[CI 3 cluster_slot_migration_active_trim_running]"
            fail "trim failed"
        }
 
@@ -2066,9 +2066,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
        # Get slots back
        R 0 CLUSTER MIGRATION IMPORT 0 100
        wait_for_condition 1000 20 {
-           [CI 0 slot_migration_active_tasks] == 1 &&
-           [CI 0 slot_migration_active_trim_running] == 0 &&
-           [CI 3 slot_migration_active_trim_running] == 1
+           [CI 0 cluster_slot_migration_active_tasks] == 1 &&
+           [CI 0 cluster_slot_migration_active_trim_running] == 0 &&
+           [CI 3 cluster_slot_migration_active_trim_running] == 1
        } else {
            fail "trim failed"
        }
@@ -2265,9 +2265,9 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
         assert_equal 0 [R 4 asm.cluster_can_access_keys_in_slot 100]
 
         wait_for_condition 1000 10 {
-            [CI 0 slot_migration_active_tasks] == 0 &&
-            [CI 0 slot_migration_active_trim_running] == 1 &&
-            [CI 3 slot_migration_active_trim_running] == 1
+            [CI 0 cluster_slot_migration_active_tasks] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_running] == 1 &&
+            [CI 3 cluster_slot_migration_active_trim_running] == 1
         } else {
             fail "migrate failed"
         }
@@ -2633,8 +2633,8 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
 
         # after ASM task is completed, wake up node-4
         wait_for_condition 1000 10 {
-            [CI 1 slot_migration_active_tasks] == 0 &&
-            [CI 1 slot_migration_active_trim_running] == 0
+            [CI 1 cluster_slot_migration_active_tasks] == 0 &&
+            [CI 1 cluster_slot_migration_active_trim_running] == 0
         } else {
             fail "ASM tasks did not completed"
         }
@@ -2782,17 +2782,17 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
 
         R 1 CLUSTER MIGRATION IMPORT 0 0
         wait_for_condition 1000 10 {
-            [CI 0 slot_migration_active_tasks] == 0 &&
-            [CI 1 slot_migration_active_tasks] == 0 &&
-            [CI 0 slot_migration_active_trim_running] == 1
+            [CI 0 cluster_slot_migration_active_tasks] == 0 &&
+            [CI 1 cluster_slot_migration_active_tasks] == 0 &&
+            [CI 0 cluster_slot_migration_active_trim_running] == 1
         } else {
             fail "migrate failed"
         }
 
         # Try to read the key from the slot being trimmed. It will lazily trim the key.
-        set num_trimmed [CI 0 slot_migration_active_trim_current_job_trimmed]
+        set num_trimmed [CI 0 cluster_slot_migration_active_trim_current_job_trimmed]
         assert_equal {} [R 0 asm.get $key]
-        assert_equal [expr $num_trimmed + 1] [CI 0 slot_migration_active_trim_current_job_trimmed]
+        assert_equal [expr $num_trimmed + 1] [CI 0 cluster_slot_migration_active_trim_current_job_trimmed]
 
         # cleanup
         R 0 debug asm-trim-method default
