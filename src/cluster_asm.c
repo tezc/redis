@@ -769,7 +769,7 @@ void asmFeedMigrationClient(robj **argv, int argc) {
      * consistency, we cancel the task if we encounter a cross-slot command. */
     if (slot == GETSLOT_CROSSSLOT) {
         /* We cannot cancel the task directly here, since it may lead to a recursive
-         * call: asmTaskCancel() --> moduleFireServerEvent() --> moduleFreeContext()
+         * call: asmTaskCancel()d --> moduleFireServerEvent() --> moduleFreeContext()
          * --> postExecutionUnitOperations() --> propagateNow(). Even worse, this
          * could result in propagating pending commands to the replication stream twice.
          * To avoid this, we simply set a flag here, cancel the task in beforeSleep. */
