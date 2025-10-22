@@ -1960,9 +1960,11 @@ slotRangeArray *clusterGetLocalSlotRanges(void) {
     }
 
     clusterNode *master = clusterNodeGetMaster(getMyClusterNode());
-    for (int i = 0; i < CLUSTER_SLOTS; i++) {
-        if (master && clusterNodeCoversSlot(master, i))
-            slots = slotRangeArrayAppend(slots, i);
+    if (master) {
+        for (int i = 0; i < CLUSTER_SLOTS; i++) {
+            if (clusterNodeCoversSlot(master, i))
+                slots = slotRangeArrayAppend(slots, i);
+        }
     }
     return slots ? slots : slotRangeArrayCreate(0);
 }
