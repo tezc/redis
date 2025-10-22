@@ -145,7 +145,7 @@ int asmIsAnyTrimJobOverlaps(slotRangeArray *slots);
 void asmTrimSlotsIfNotOwned(slotRangeArray *slots);
 void asmNotifyStateChange(asmTask *task, int event);
 
-void clusterAsmInit(void) {
+void asmInit(void) {
     asmManager = zcalloc(sizeof(*asmManager));
     asmManager->tasks = listCreate();
     asmManager->archived_tasks = listCreate();

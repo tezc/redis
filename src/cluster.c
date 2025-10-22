@@ -2054,10 +2054,6 @@ void readwriteCommand(client *c) {
     addReply(c,shared.ok);
 }
 
-void clusterCommonInit(void) {
-    clusterAsmInit();
-}
-
 /* Resets transient cluster stats that we expose via INFO or other means that we want
  * to reset via CONFIG RESETSTAT. The function is also used in order to
  * initialize these fields in clusterInit() at server startup. */
