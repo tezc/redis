@@ -19,6 +19,7 @@
 #include "script.h"
 #include "fpconv_dtoa.h"
 #include "fmtargs.h"
+#include "cluster_asm.h"
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <math.h>
@@ -231,6 +232,8 @@ client *createClient(connection *conn) {
     c->net_input_bytes = 0;
     c->net_output_bytes = 0;
     c->commands_processed = 0;
+    c->task = NULL;
+    c->node_id = NULL;
     return c;
 }
 
@@ -564,8 +567,13 @@ void afterErrorReply(client *c, const char *s, size_t len, int flags) {
             to = "AOF-loading-client";
             from = "server";
         } else if (ctype == CLIENT_TYPE_MASTER) {
-            to = "master";
-            from = "replica";
+            if (c->flags & CLIENT_ASM_IMPORTING) {
+                to = "source";
+                from = "destination";
+            } else {
+                to = "master";
+                from = "replica";
+            }
         } else {
             to = "replica";
             from = "master";
@@ -577,7 +585,7 @@ void afterErrorReply(client *c, const char *s, size_t len, int flags) {
                              "to its %s: '%.*s' after processing the command "
                              "'%s'", from, to, (int)len, s, cmdname ? cmdname : "<unknown>");
         if (ctype == CLIENT_TYPE_MASTER && server.repl_backlog &&
-            server.repl_backlog->histlen > 0)
+            !(c->flags & CLIENT_ASM_IMPORTING) && server.repl_backlog->histlen > 0)
         {
             showLatestBacklog();
         }
@@ -1755,6 +1763,8 @@ void freeClient(client *c) {
                               c);
     }
 
+    asmCallbackOnFreeClient(c);
+
     /* Notify module system that this client auth status changed. */
     moduleNotifyUserChanged(c);
 
@@ -1899,6 +1909,7 @@ void freeClient(client *c) {
     sdsfree(c->peerid);
     sdsfree(c->sockname);
     sdsfree(c->slave_addr);
+    sdsfree(c->node_id);
     zfree(c);
 }
 
@@ -2164,8 +2175,8 @@ int writeToClient(client *c, int handler_installed) {
         atomicIncr(server.stat_net_repl_output_bytes, totwritten);
     } else {
         /* If we reach this block and client is marked with CLIENT_SLAVE flag
-         * it's because it's a MONITOR client, which are marked as replicas,
-         * but exposed as normal clients */
+         * it's because it's a MONITOR/slot-migration client, which are marked
+         * as replicas, but exposed as normal clients */
         const int is_normal_client = !(c->flags & CLIENT_SLAVE);
         while (_clientHasPendingRepliesNonSlave(c)) {
             int ret = _writeToClientNonSlave(c, &nwritten);
@@ -2751,6 +2762,10 @@ void commandProcessed(client *c) {
         if (applied) {
             replicationFeedStreamFromMasterStream(c->querybuf+c->repl_applied,applied);
             c->repl_applied += applied;
+
+            /* Update the atomic slot migration task's applied bytes. */
+            if (c->flags & CLIENT_ASM_IMPORTING)
+                asmImportIncrAppliedBytes(c->task, applied);
         }
     }
 }
@@ -2893,7 +2908,7 @@ int processInputBuffer(client *c) {
     /* Keep processing while there is something in the input buffer */
     while(c->qb_pos < sdslen(c->querybuf)) {
         /* Immediately abort if the client is in the middle of something. */
-        if (c->flags & CLIENT_BLOCKED) break;
+        if (c->flags & CLIENT_BLOCKED || c->flags & CLIENT_UNBLOCKED) break;
 
         /* Don't process more buffers from clients that have already pending
          * commands to execute in c->argv. */
@@ -2955,7 +2970,9 @@ int processInputBuffer(client *c) {
                      * thread handle. To avoid memory prefetching on an invalid command. */
                     c->iolookedcmd = NULL;
                 }
-                c->slot = getSlotFromCommand(c->iolookedcmd, c->argv, c->argc);
+                int slot = getSlotFromCommand(c->iolookedcmd, c->argv, c->argc);
+                /* Reset to -1, since c->slot expects -1 if no slot is being used */
+                c->slot = (slot == GETSLOT_CROSSSLOT || slot == GETSLOT_NOKEYS) ? -1 : slot;
                 enqueuePendingClientsToMainThread(c, 0);
                 break;
             }
@@ -3215,10 +3232,17 @@ sds catClientInfoString(sds s, client *client) {
     if (client->flags & CLIENT_SLAVE) {
         if (client->flags & CLIENT_MONITOR)
             *p++ = 'O';
+        else if (client->flags & CLIENT_ASM_MIGRATING)
+            *p++ = 'g';
         else
             *p++ = 'S';
     }
-    if (client->flags & CLIENT_MASTER) *p++ = 'M';
+    if (client->flags & CLIENT_MASTER) {
+        if (client->flags & CLIENT_ASM_IMPORTING)
+            *p++ = 'o';
+        else
+            *p++ = 'M';
+    }
     if (client->flags & CLIENT_PUBSUB) *p++ = 'P';
     if (client->flags & CLIENT_MULTI) *p++ = 'x';
     if (client->flags & CLIENT_BLOCKED) *p++ = 'b';
@@ -4267,6 +4291,14 @@ size_t getClientOutputBufferMemoryUsage(client *c) {
     }
 }
 
+size_t getNormalClientPendingReplyBytes(client *c) {
+    serverAssert(!clientTypeIsSlave(c));
+    if (listLength(c->reply) == 0) return c->bufpos;
+
+    clientReplyBlock *block = listNodeValue(listLast(c->reply));
+    return (c->reply_bytes - block->size + block->used) + c->bufpos;
+}
+
 /* Returns the total client's memory usage.
  * Optionally, if output_buffer_mem_usage is not NULL, it fills it with
  * the client output buffer memory usage portion of the total. */
@@ -4315,10 +4347,13 @@ int getClientType(client *c) {
 }
 
 static inline int clientTypeIsSlave(client *c) {
-    /* Even though MONITOR clients are marked as replicas, we
-     * want the expose them as normal clients. */
-    if (unlikely((c->flags & CLIENT_SLAVE) && !(c->flags & CLIENT_MONITOR)))
+    /* Even though MONITOR clients and ASM destination RDB/main channels are
+     * marked as replicas, we want to expose them as normal clients. */
+    if (unlikely((c->flags & CLIENT_SLAVE) &&
+        !(c->flags & (CLIENT_MONITOR | CLIENT_ASM_MIGRATING))))
+    {
         return 1;
+    }
     return 0;
 }
 
@@ -4529,7 +4564,10 @@ static void pauseClientsByClient(mstime_t endTime, int isPauseClientAll) {
         if (p->paused_actions & PAUSE_ACTION_CLIENT_ALL)
             actions = PAUSE_ACTIONS_CLIENT_ALL_SET;
     }
-    
+
+    /* Cancel all ASM tasks when starting client pause */
+    clusterAsmCancel(NULL, "client pause requested");
+
     pauseActions(PAUSE_BY_CLIENT_COMMAND, endTime, actions);
 }
 
@@ -4563,6 +4601,13 @@ void pauseActions(pause_purpose purpose, mstime_t end, uint32_t actions) {
     if (server.in_exec) {
         server.client_pause_in_transaction = 1;
     }
+
+    /* Assert that there is no import task in progress when we are pausing.
+     * otherwise we break the promise that no writes are performed, maybe
+     * causing data lost during a failover. */
+    if (isPausedActions(PAUSE_ACTION_CLIENT_ALL) ||
+        isPausedActions(PAUSE_ACTION_CLIENT_WRITE))
+        serverAssert(!asmImportInProgress());
 }
 
 /* Unpause actions and queue them for reprocessing. */
