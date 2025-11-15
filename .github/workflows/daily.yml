@@ -662,7 +662,7 @@ jobs:
     runs-on: ubuntu-latest
     if: |
       (github.event_name == 'workflow_dispatch' || (github.event_name != 'workflow_dispatch' && github.repository == 'redis/redis')) &&
-      !contains(github.event.inputs.skipjobs, 'sanitizer')
+      !contains(github.event.inputs.skipjobs, 'tsanitizer')
     timeout-minutes: 14400
     strategy:
       matrix:
