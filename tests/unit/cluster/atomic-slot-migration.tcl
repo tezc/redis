@@ -197,11 +197,228 @@ proc setup_slot_migration_with_delay {src_node dst_node start_slot end_slot {key
     return $task_id
 }
 
-
 # Skip most of the tests when running under valgrind since it is hard to
 # stabilize tests under valgrind.
 if {!$::valgrind} {
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no loglevel debug}} {
+    test "Test CLUSTER MIGRATION IMPORT input validation" {
+        # invalid arguments
+        assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION}
+        assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION IMPORT}
+        assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION IMPORT 100}
+        assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION IMPORT 100 200 300}
+        assert_error {*unknown argument*} {R 0 CLUSTER MIGRATION UNKNOWN 1 2}
+
+        # invalid slot range
+        assert_error {*greater than end slot number*} {R 0 CLUSTER MIGRATION IMPORT 200 100}
+        assert_error {*out of range slot*} {R 0 CLUSTER MIGRATION IMPORT 17000 18000}
+        assert_error {*out of range slot*} {R 0 CLUSTER MIGRATION IMPORT 14000 18000}
+        assert_error {*out of range slot*} {R 0 CLUSTER MIGRATION IMPORT 0 16384}
+        assert_error {*out of range slot*} {R 0 CLUSTER MIGRATION IMPORT 0 -1}
+        assert_error {*out of range slot*} {R 0 CLUSTER MIGRATION IMPORT -1 2}
+        assert_error {*out of range slot*} {R 0 CLUSTER MIGRATION IMPORT -2 -1}
+        assert_error {*out of range slot*} {R 0 CLUSTER MIGRATION IMPORT 10 a}
+        assert_error {*out of range slot*} {R 0 CLUSTER MIGRATION IMPORT sd sd}
+        assert_error {*already the owner of the slot*} {R 0 CLUSTER MIGRATION IMPORT 100 200}
+    }
+
+    test "Test CLUSTER MIGRATION CANCEL input validation" {
+        # invalid arguments
+        assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION CANCEL}
+        assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION CANCEL ID}
+        assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION CANCEL ID 12345 EXTRAARG}
+        assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION CANCEL ALL EXTRAARG}
+        assert_error {*unknown argument*} {R 0 CLUSTER MIGRATION CANCEL UNKNOWNARG}
+        assert_error {*unknown argument*} {R 0 CLUSTER MIGRATION CANCEL abc def}
+        # empty string id should not cancel any task
+        assert_equal 0 [R 0 CLUSTER MIGRATION CANCEL ID ""]
+    }
+
+    test "Test CLUSTER MIGRATION STATUS input validation" {
+        # invalid arguments
+        assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION STATUS}
+        assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION STATUS ID}
+        assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION STATUS ID id EXTRAARG}
+        assert_error {*wrong number of arguments*} {R 0 CLUSTER MIGRATION STATUS ALL EXTRAARG}
+        assert_error {*unknown argument*} {R 0 CLUSTER MIGRATION STATUS ABC DEF}
+        assert_error {*unknown argument*} {R 0 CLUSTER MIGRATION STATUS UNKNOWNARG}
+        # empty string id should not list any task
+        assert_equal {} [R 0 CLUSTER MIGRATION STATUS ID ""]
+    }
+
+    test "Test TRIMSLOTS input validation" {
+        # Wrong number of arguments
+        assert_error {*wrong number of arguments*} {R 0 TRIMSLOTS}
+        assert_error {*wrong number of arguments*} {R 0 TRIMSLOTS RANGES}
+        assert_error {*wrong number of arguments*} {R 0 TRIMSLOTS RANGES 1}
+        assert_error {*wrong number of arguments*} {R 0 TRIMSLOTS RANGES 2 100}
+        assert_error {*wrong number of arguments*} {R 0 TRIMSLOTS RANGES 17000 1}
+        assert_error {*wrong number of arguments*} {R 0 TRIMSLOTS RANGES abc}
+
+        # Missing ranges argument
+        assert_error {*missing ranges argument*} {R 0 TRIMSLOTS UNKNOWN 1 100 200}
+
+        # Invalid number of ranges
+        assert_error {*invalid number of ranges*} {R 0 TRIMSLOTS RANGES 0 1 1}
+        assert_error {*invalid number of ranges*} {R 0 TRIMSLOTS RANGES -1 2 2}
+        assert_error {*invalid number of ranges*} {R 0 TRIMSLOTS RANGES 17000 1 2}
+        assert_error {*invalid number of ranges*} {R 0 TRIMSLOTS RANGES 2 100 200 300}
+
+        # Invalid slot numbers
+        assert_error {*out of range slot*} {R 0 TRIMSLOTS RANGES 1 -1 0}
+        assert_error {*out of range slot*} {R 0 TRIMSLOTS RANGES 1 -2 -1}
+        assert_error {*out of range slot*} {R 0 TRIMSLOTS RANGES 1 0 16384}
+        assert_error {*out of range slot*} {R 0 TRIMSLOTS RANGES 1 abc def}
+        assert_error {*out of range slot*} {R 0 TRIMSLOTS RANGES 1 100 abc}
+
+        # Start slot greater than end slot
+        assert_error {*greater than end slot number*} {R 0 TRIMSLOTS RANGES 1 200 100}
+    }
+
+    test "Test IMPORT not allowed on replica" {
+        assert_error {* not allowed on replica*} {R 4 CLUSTER MIGRATION IMPORT 100 200}
+    }
+
+    test "Test IMPORT not allowed during manual migration" {
+        set dst_id [R 1 CLUSTER MYID]
+
+        # Set a slot to IMPORTING
+        R 0 CLUSTER SETSLOT 15000 IMPORTING $dst_id
+        assert_error {*must be STABLE to start*slot migration*} {R 0 CLUSTER MIGRATION IMPORT 100 200}
+        # Revert the change
+        R 0 CLUSTER SETSLOT 15000 STABLE
+
+        # Same test with setting a slot to MIGRATING
+        R 0 CLUSTER SETSLOT 5000 MIGRATING $dst_id
+        assert_error {*must be STABLE to start*slot migration*} {R 0 CLUSTER MIGRATION IMPORT 100 200}
+        # Revert the change
+        R 0 CLUSTER SETSLOT 5000 STABLE
+    }
+
+    test "Test IMPORT not allowed if the node is already the owner" {
+        assert_error {*already the owner of the slot*} {R 0 CLUSTER MIGRATION IMPORT 100 100}
+    }
+
+    test "Test IMPORT not allowed for a slot without an owner" {
+        # Slot will have no owner
+        R 0 CLUSTER DELSLOTS 5000
+
+        assert_error {*slot has no owner: 5000*} {R 0 CLUSTER MIGRATION IMPORT 5000 5000}
+
+        # Revert the change
+        R 0 CLUSTER ADDSLOTS 5000
+    }
+
+    test "Test IMPORT not allowed if slot ranges belong to different nodes" {
+        assert_error {*slots belong to different source nodes*} {R 0 CLUSTER MIGRATION IMPORT 7000 15000}
+        assert_error {*slots belong to different source nodes*} {R 0 CLUSTER MIGRATION IMPORT 7000 8000 14000 15000}
+    }
+
+    test "Test IMPORT not allowed if slot is given multiple times" {
+        assert_error {*Slot*specified multiple times*} {R 0 CLUSTER MIGRATION IMPORT 7000 8000 8000 9000}
+        assert_error {*Slot*specified multiple times*} {R 0 CLUSTER MIGRATION IMPORT 7000 8000 7900 9000}
+    }
+
+    test "Test CLUSTER MIGRATION STATUS ALL lists all tasks" {
+        # Create 3 completed tasks
+        R 0 CLUSTER MIGRATION IMPORT 7000 7001
+        wait_for_asm_done
+        R 0 CLUSTER MIGRATION IMPORT 7002 7003
+        wait_for_asm_done
+        R 0 CLUSTER MIGRATION IMPORT 7004 7005
+        wait_for_asm_done
+
+        # Get node IDs for verification
+        set node0_id [R 0 cluster myid]
+        set node1_id [R 1 cluster myid]
+
+        # Verify CLUSTER MIGRATION STATUS ALL reply from both nodes
+        foreach node_idx {0 1} {
+            set tasks [R $node_idx CLUSTER MIGRATION STATUS ALL]
+            assert_equal 3 [llength $tasks]
+
+            for {set i 0} {$i < 3} {incr i} {
+                set task [lindex $tasks $i]
+
+                # Verify field order
+                set expected_fields {id slots source dest operation state
+                                    last_error retries create_time start_time
+                                    end_time write_pause_ms}
+                for {set j 0} {$j < [llength $expected_fields]} {incr j} {
+                    set expected_field [lindex $expected_fields $j]
+                    set actual_field [lindex $task [expr $j * 2]]
+                    assert_equal $expected_field $actual_field
+                }
+
+                # Verify basic fields
+                assert_equal "completed" [dict get $task state]
+                assert_equal "" [dict get $task last_error]
+                assert_equal 0 [dict get $task retries]
+                assert {[dict get $task write_pause_ms] >= 0}
+
+                # Verify operation based on node
+                if {$node_idx == 0} {
+                    assert_equal "import" [dict get $task operation]
+                } else {
+                    assert_equal "migrate" [dict get $task operation]
+                }
+
+                # Verify node IDs (all tasks: node1 -> node0)
+                assert_equal $node1_id [dict get $task source]
+                assert_equal $node0_id [dict get $task dest]
+
+                # Verify timestamps exist and are reasonable
+                set create_time [dict get $task create_time]
+                set start_time [dict get $task start_time]
+                set end_time [dict get $task end_time]
+                assert {$create_time > 0}
+                assert {$start_time >= $create_time}
+                assert {$end_time >= $start_time}
+
+                # Verify specific slot ranges for each task
+                set slots [dict get $task slots]
+                if {$i == 0} {
+                    assert_equal "7004-7005" $slots
+                } elseif {$i == 1} {
+                    assert_equal "7002-7003" $slots
+                } elseif {$i == 2} {
+                    assert_equal "7000-7001" $slots
+                }
+            }
+        }
+
+        # cleanup
+        R 1 CLUSTER MIGRATION IMPORT 7000 7005
+        wait_for_asm_done
+    }
+
+    test "Test IMPORT not allowed if there is an overlapping import" {
+        # Let slot migration take long time, so that we can test overlapping import
+        R 1 config set rdb-key-save-delay 1000000
+        R 1 set tag22273 tag22273 ;# slot hash is 7000
+        R 1 set tag9283 tag9283 ;# slot hash is 8000
+
+        set task_id [R 0 CLUSTER MIGRATION IMPORT 7000 8000]
+        assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 8000 9000}
+        assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 7500 8500}
+        assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 6000 7000}
+        assert_error {*overlapping import exists*} {R 0 CLUSTER MIGRATION IMPORT 6500 7500}
+
+        wait_for_condition 1000 50 {
+            [string match {*completed*} [migration_status 0 $task_id state]] &&
+            [string match {*completed*} [migration_status 1 $task_id state]]
+        } else {
+            fail "ASM task did not start"
+        }
+        assert_equal "tag22273" [R 0 get tag22273]
+        assert_equal "tag9283" [R 0 get tag9283]
+        R 1 config set rdb-key-save-delay 0
+
+        # revert the migration
+        R 1 CLUSTER MIGRATION IMPORT 7000 8000
+        wait_for_asm_done
+    }
+
     test "Simple slot migration with write load" {
         # Perform slot migration while traffic is on and verify data consistency.
         # Trimming is disabled on source nodes so, we can compare the dbs after
