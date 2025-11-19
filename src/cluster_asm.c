@@ -1026,7 +1026,7 @@ void asmNotifyStateChange(asmTask *task, int event) {
     serverAssert(module_event != -1);
 
     moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_SLOT_MIGRATION, module_event, &info);
-    serverLog(LL_DEBUG, "Fire cluster asm module event, task %s: state=%s",
+    serverLog(LL_WARNING, "Fire cluster asm module event, task %s: state=%s",
                         task->id, asmTaskStateToString(task->state));
 
     if (clusterNodeIsMaster(getMyClusterNode())) {
@@ -1310,7 +1310,7 @@ void asmRdbChannelSyncWithSource(connection *conn) {
 
         /* Ignore ‘\n' sent from the source node to keep the connection alive. */
         if (sdslen(err) == 0) {
-            serverLog(LL_DEBUG, "Received an empty line in RDBCHANNEL reply, slots snapshot delivery will start later");
+            serverLog(LL_WARNING, "Received an empty line in RDBCHANNEL reply, slots snapshot delivery will start later");
             sdsfree(err);
             return;
         }
@@ -1545,7 +1545,7 @@ write_error: /* Handle sendCommand() errors. */
 
 int asmImportSendACK(asmTask *task) {
     serverAssert(task->operation == ASM_IMPORT && task->state == ASM_WAIT_STREAM_EOF);
-    serverLog(LL_DEBUG, "Destination node applied offset is %lld", task->dest_offset);
+    serverLog(LL_WARNING, "Destination node applied offset is %lld", task->dest_offset);
 
     char offset[64];
     ull2string(offset, sizeof(offset), task->dest_offset);
@@ -1990,7 +1990,7 @@ void clusterSyncSlotsCommand(client *c) {
                 return;
             }
             task->dest_offset = offset;
-            serverLog(LL_DEBUG, "CLUSTER SYNCSLOTS ACK received, dest state: %s, "
+            serverLog(LL_WARNING, "CLUSTER SYNCSLOTS ACK received, dest state: %s, "
                                 "updated dest offset to %lld, source offset: %lld",
                 asmTaskStateToString(dest_state), task->dest_offset, task->source_offset);
 
@@ -2333,7 +2333,7 @@ static void asmSyncBufferStreamYieldCallback(void *ctx) {
         sdsfree(err);
         freeClient(c);
     }
-    serverLog(LL_DEBUG, "Yielding sending ACK during streaming buffer, applied offset: %zu",
+    serverLog(LL_WARNING, "Yielding sending ACK during streaming buffer, applied offset: %zu",
                          context->applied_offset);
 }
 

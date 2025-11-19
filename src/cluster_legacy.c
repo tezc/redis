@@ -2445,15 +2445,9 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
              * update from cluster protocol, and we need to cancel any
              * conflicting tasks that overlap with the slot ranges. */
             clusterAsmCancelBySlotRangeArray(sra, "slots configuration updated");
-        } else {
-            if (asmNotifyConfigUpdated(asm_task, &err) != C_OK) {
-                serverLog(LL_WARNING, "ASM config update failed: %s", err);
-                sdsfree(err);
-            } else {
-                serverLog(LL_NOTICE, "ASM task done, config sender epoch: %llu, node epoch: %llu, cluster epoch: %llu",
-                    (unsigned long long) senderConfigEpoch, (unsigned long long) sender->configEpoch,
-                    (unsigned long long) server.cluster->currentEpoch);
-            }
+        } else if (asmNotifyConfigUpdated(asm_task, &err) != C_OK) {
+            serverLog(LL_WARNING, "ASM config update failed: %s", err);
+            sdsfree(err);
         }
     }
     slotRangeArrayFree(sra);
@@ -3206,12 +3200,10 @@ int clusterProcessPacket(clusterLink *link) {
                     if (server.cluster->slots[j]->configEpoch >
                         senderConfigEpoch)
                     {
-                        clusterNode *n = server.cluster->slots[j];
                         serverLog(LL_VERBOSE,
                             "Node %.40s has old slots configuration, sending "
-                            "an UPDATE message about %.40s, n->epoch %llu, sender->epoch %llu",
-                                sender->name, n->name, (unsigned long long) n->configEpoch,
-                                (unsigned long long) senderConfigEpoch);
+                            "an UPDATE message about %.40s",
+                                sender->name, server.cluster->slots[j]->name);
                         clusterSendUpdate(sender->link,
                             server.cluster->slots[j]);
 
@@ -6611,7 +6603,6 @@ int clusterAsmOnEvent(const char *task_id, int event, void *arg) {
             clusterSaveConfigOrDie(1);
             clusterBroadcastPong(CLUSTER_BROADCAST_ALL);
             clusterAsmProcess(task_id, ASM_EVENT_DONE, NULL, NULL);
-            serverLog(LL_NOTICE, "Import task %s completed for slots: %s, my epoch is %llu, cluster epoch is %llu", task_id, str, (unsigned long long) myself->configEpoch, (unsigned long long) server.cluster->currentEpoch);
             break;
         case ASM_EVENT_IMPORT_COMPLETED:
             serverLog(LL_NOTICE, "Import task %s completed for slots: %s", task_id, str);
