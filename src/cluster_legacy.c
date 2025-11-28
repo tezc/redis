@@ -6562,7 +6562,7 @@ int clusterAsmOnEvent(const char *task_id, int event, void *arg) {
             /* Bump config epoch and broadcast the new config to the other nodes. */
             clusterBumpConfigEpochWithoutConsensus();
             clusterSaveConfigOrDie(1);
-            clusterDoBeforeSleep(CLUSTER_BROADCAST_ALL);
+            clusterDoBeforeSleep(CLUSTER_TODO_BROADCAST_PONG);
             clusterAsmProcess(task_id, ASM_EVENT_DONE, NULL, NULL);
             break;
         case ASM_EVENT_IMPORT_COMPLETED:
