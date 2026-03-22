@@ -210,7 +210,7 @@ SetExRes hashTypeSetEx(robj *o, sds field, uint64_t expireAt, HashTypeSetEx *exI
 
 void hashTypeSetExDone(HashTypeSetEx *e);
 
-void hashTmplConvertToListpackEx(robj *o);
+void hashTypeConvertTmplToListpackEx(robj *o);
 
 /*-----------------------------------------------------------------------------
  * Accessor functions for dictType of hash
@@ -1715,7 +1715,7 @@ int hashTypeSetExInit(robj *key, kvobj *o, client *c, redisDb *db,
     } else if (o->encoding == OBJ_ENCODING_TMPL_LP ||
                o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
         /* Convert tmpl-based hash to listpack-ex for expiration support. */
-        hashTmplConvertToListpackEx(o);
+        hashTypeConvertTmplToListpackEx(o);
     } else if (o->encoding == OBJ_ENCODING_HT) {
         dict *ht = o->ptr;
         /* Take care dict has HFE metadata */
@@ -2295,7 +2295,7 @@ static kvobj *hashTypeLookupWriteOrCreate(client *c, robj *key) {
 
 /* Convert tmpl-based hash to LISTPACK_EX for field expiration support.
  * Called when expiration is about to be set on a TMPL_LP or TMPL_ARRAY. */
-void hashTmplConvertToListpackEx(robj *o) {
+void hashTypeConvertTmplToListpackEx(robj *o) {
     serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP ||
                  o->encoding == OBJ_ENCODING_TMPL_ARRAY);
 
@@ -2356,7 +2356,7 @@ void hashTypeConvertListpack(robj *o, int enc);
 
 /* Check if TMPL_LP can be converted to LISTPACK.
  * Returns 1 if it fits, 0 otherwise. */
-static int hashTmplLpCanConvertToListpack(robj *o) {
+static int hashTypeCanConvertTmplLpToListpack(robj *o) {
     serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
 
     unsigned char *lp = o->ptr;
@@ -2383,7 +2383,7 @@ static int hashTmplLpCanConvertToListpack(robj *o) {
 }
 
 /* TMPL_LP -> LISTPACK */
-static void hashTmplLpConvertToListpack(robj *o) {
+static void hashTypeConvertTmplLpToListpack(robj *o) {
     serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
 
     unsigned char *old_lp = o->ptr;
@@ -2411,13 +2411,13 @@ static void hashTmplLpConvertToListpack(robj *o) {
 }
 
 /* TMPL_LP -> LISTPACK_EX */
-static void hashTmplLpConvertToListpackEx(robj *o) {
-    hashTmplLpConvertToListpack(o);
+static void hashTypeConvertTmplLpToListpackEx(robj *o) {
+    hashTypeConvertTmplLpToListpack(o);
     hashTypeConvertListpack(o, OBJ_ENCODING_LISTPACK_EX);
 }
 
 /* TMPL_LP -> TMPL_ARRAY */
-static void hashTmplLpConvertToArray(robj *o) {
+static void hashTypeConvertTmplLpToArray(robj *o) {
     serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
 
     unsigned char *lp = o->ptr;
@@ -2446,7 +2446,7 @@ static void hashTmplLpConvertToArray(robj *o) {
 }
 
 /* TMPL_LP -> HT */
-static void hashTmplLpConvertToHT(robj *o) {
+static void hashTypeConvertTmplLpToHT(robj *o) {
     serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
 
     hashTypeIterator hi;
@@ -2470,7 +2470,7 @@ static void hashTmplLpConvertToHT(robj *o) {
 }
 
 /* TMPL_ARRAY -> LISTPACK (for RDB low-refcount disassembly) */
-void hashTmplArrayConvertToListpack(robj *o) {
+void hashTypeConvertTmplArrayToListpack(robj *o) {
     serverAssert(o->encoding == OBJ_ENCODING_TMPL_ARRAY);
 
     hashTemplateArray *hta = o->ptr;
@@ -2490,7 +2490,7 @@ void hashTmplArrayConvertToListpack(robj *o) {
 }
 
 /* TMPL_ARRAY -> HT */
-static void hashTmplArrayConvertToHT(robj *o) {
+static void hashTypeConvertTmplArrayToHT(robj *o) {
     serverAssert(o->encoding == OBJ_ENCODING_TMPL_ARRAY);
 
     hashTypeIterator hi;
@@ -2636,19 +2636,19 @@ void hashTypeConvertTplLp(robj *o, int enc) {
     if (enc == OBJ_ENCODING_TMPL_LP) {
         /* Nothing to do. */
     } else if (enc == OBJ_ENCODING_LISTPACK) {
-        if (hashTmplLpCanConvertToListpack(o))
-            hashTmplLpConvertToListpack(o);
+        if (hashTypeCanConvertTmplLpToListpack(o))
+            hashTypeConvertTmplLpToListpack(o);
         else
-            hashTmplLpConvertToHT(o);
+            hashTypeConvertTmplLpToHT(o);
     } else if (enc == OBJ_ENCODING_LISTPACK_EX) {
-        if (hashTmplLpCanConvertToListpack(o))
-            hashTmplLpConvertToListpackEx(o);
+        if (hashTypeCanConvertTmplLpToListpack(o))
+            hashTypeConvertTmplLpToListpackEx(o);
         else
-            hashTmplLpConvertToHT(o);
+            hashTypeConvertTmplLpToHT(o);
     } else if (enc == OBJ_ENCODING_TMPL_ARRAY) {
-        hashTmplLpConvertToArray(o);
+        hashTypeConvertTmplLpToArray(o);
     } else if (enc == OBJ_ENCODING_HT) {
-        hashTmplLpConvertToHT(o);
+        hashTypeConvertTmplLpToHT(o);
     } else {
         serverPanic("Unknown target encoding: %d", enc);
     }
@@ -2661,7 +2661,7 @@ void hashTypeConvertTplArray(robj *o, int enc) {
     if (enc == OBJ_ENCODING_TMPL_ARRAY) {
         /* Nothing to do. */
     } else if (enc == OBJ_ENCODING_HT) {
-        hashTmplArrayConvertToHT(o);
+        hashTypeConvertTmplArrayToHT(o);
     } else {
         /* TMPL_ARRAY can only go to HT. */
         serverPanic("Invalid conversion from TMPL_ARRAY to %d", enc);
