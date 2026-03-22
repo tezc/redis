@@ -87,6 +87,8 @@ char *rdb_type_string[] = {
     "hash-hashtable-md",
     "hash-listpack-md",
     "stream-v4",
+    "hash-template",
+    "hash-template-ref",
 };
 
 /* Show a few stats collected into 'rdbstate' */

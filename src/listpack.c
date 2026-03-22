@@ -1303,6 +1303,82 @@ unsigned char *lpAppendInteger(unsigned char *lp, long long lval) {
     return lpInsertInteger(lp, lval, eofptr, LP_BEFORE, NULL);
 }
 
+/* Create a new listpack with the given entries in a single allocation.
+ * This is more efficient than lpNew() + lpBatchAppend() as it calculates
+ * the exact size needed and allocates once. */
+unsigned char *lpNewWithEntries(listpackEntry *entries, unsigned int len) {
+    if (entries == NULL || len == 0) return lpNew(0);
+
+    struct listpackInsertEntry {
+        int enctype;
+        uint64_t enclen;
+        unsigned char intenc[LP_MAX_INT_ENCODING_LEN];
+        unsigned char backlen[LP_MAX_BACKLEN_SIZE];
+        unsigned long backlen_size;
+    };
+
+    uint64_t addedlen = 0;
+    struct listpackInsertEntry tmp[64];
+    struct listpackInsertEntry *enc = tmp;
+
+    if (len > sizeof(tmp) / sizeof(struct listpackInsertEntry)) {
+        enc = lp_malloc(len * sizeof(struct listpackInsertEntry));
+        if (enc == NULL) return NULL;
+    }
+
+    /* Calculate encoding for each entry and total size. */
+    for (unsigned int i = 0; i < len; i++) {
+        listpackEntry *e = &entries[i];
+        if (e->sval) {
+            enc[i].enctype = lpEncodeGetType(e->sval, e->slen,
+                                             enc[i].intenc, &enc[i].enclen);
+        } else {
+            enc[i].enctype = LP_ENCODING_INT;
+            lpEncodeIntegerGetType(e->lval, enc[i].intenc, &enc[i].enclen);
+        }
+        addedlen += enc[i].enclen;
+        enc[i].backlen_size = lpEncodeBacklen(enc[i].backlen, enc[i].enclen);
+        addedlen += enc[i].backlen_size;
+    }
+
+    uint64_t listpack_bytes = LP_HDR_SIZE + addedlen + 1; /* +1 for EOF */
+    if (listpack_bytes > UINT32_MAX) {
+        if (enc != tmp) lp_free(enc);
+        return NULL;
+    }
+
+    /* Allocate listpack with exact size. */
+    unsigned char *lp = lp_malloc(listpack_bytes);
+    if (lp == NULL) {
+        if (enc != tmp) lp_free(enc);
+        return NULL;
+    }
+
+    /* Write entries. */
+    unsigned char *dst = lp + LP_HDR_SIZE;
+    for (unsigned int i = 0; i < len; i++) {
+        listpackEntry *ent = &entries[i];
+        if (enc[i].enctype == LP_ENCODING_INT)
+            memcpy(dst, enc[i].intenc, enc[i].enclen);
+        else
+            lpEncodeString(dst, ent->sval, ent->slen);
+        dst += enc[i].enclen;
+        memcpy(dst, enc[i].backlen, enc[i].backlen_size);
+        dst += enc[i].backlen_size;
+    }
+
+    /* Write EOF and header. */
+    *dst = LP_EOF;
+    lpSetTotalBytes(lp, listpack_bytes);
+    if (len < LP_HDR_NUMELE_UNKNOWN)
+        lpSetNumElements(lp, len);
+    else
+        lpSetNumElements(lp, LP_HDR_NUMELE_UNKNOWN);
+
+    if (enc != tmp) lp_free(enc);
+    return lp;
+}
+
 /* Append batch of entries to the listpack.
  *
  * This call is more efficient than multiple lpAppend() calls as it only does

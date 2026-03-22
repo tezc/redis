@@ -2033,6 +2033,70 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
         }
         setDeferredArrayLen(c,replylen,cur_length);
         return;
+    } else if (o->type == OBJ_HASH &&
+               (o->encoding == OBJ_ENCODING_TMPL_LP ||
+                o->encoding == OBJ_ENCODING_TMPL_ARRAY)) {
+        /* Schema-based hash encoding. Iterate using hashType iterator. */
+        void *replylen = NULL;
+        unsigned long cur_length = 0;
+
+        listRelease(keys);
+
+        /* Reply to the client. */
+        addReplyArrayLen(c, 2);
+        /* Cursor is always 0 given we iterate over all hash fields. */
+        addReplyBulkLongLong(c, 0);
+
+        /* Defer reply length if using pattern, otherwise we know the size. */
+        if (use_pattern)
+            replylen = addReplyDeferredLen(c);
+        else {
+            unsigned long array_reply_len = hashTypeLength(o, 0);
+            if (!no_values) array_reply_len *= 2;
+            addReplyArrayLen(c, array_reply_len);
+        }
+
+        hashTypeIterator hi;
+        hashTypeInitIterator(&hi, o);
+        while (hashTypeNext(&hi, 0) != C_ERR) {
+            unsigned char *field;
+            unsigned int flen;
+            long long fll;
+            hashTypeCurrentObject(&hi, OBJ_HASH_KEY, &field, &flen, &fll, NULL);
+
+            /* Convert integer field to string if needed. */
+            char buf[LONG_STR_SIZE];
+            if (field == NULL) {
+                flen = ll2string(buf, sizeof(buf), fll);
+                field = (unsigned char *)buf;
+            }
+
+            if (use_pattern && !stringmatchlen(pat, patlen, (char *)field, flen, 0)) {
+                continue;
+            }
+
+            /* Add field. */
+            addReplyBulkCBuffer(c, field, flen);
+            cur_length++;
+
+            /* Add value if needed. */
+            if (!no_values) {
+                unsigned char *val;
+                unsigned int vlen;
+                long long vll;
+                hashTypeCurrentObject(&hi, OBJ_HASH_VALUE, &val, &vlen, &vll, NULL);
+                if (val)
+                    addReplyBulkCBuffer(c, val, vlen);
+                else
+                    addReplyBulkLongLong(c, vll);
+                cur_length++;
+            }
+        }
+        hashTypeResetIterator(&hi);
+
+        if (use_pattern)
+            setDeferredArrayLen(c, replylen, cur_length);
+        return;
     } else {
         serverPanic("Not handled encoding in SCAN.");
     }

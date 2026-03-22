@@ -1,0 +1,97 @@
+{
+    "HIMPORT": {
+        "summary": "Session-based hash import using hinted field templates.",
+        "complexity": "O(N) for PREPARE and SET where N is the number of fields.",
+        "group": "hash",
+        "since": "9.0.0",
+        "arity": -2,
+        "function": "himportCommand",
+	        "command_flags": [
+	            "WRITE",
+	            "DENYOOM",
+	            "FAST"
+	        ],
+	        "reply_schema": {
+	            "const": "OK"
+	        },
+        "acl_categories": [
+            "HASH"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RW",
+                    "INSERT",
+                    "UPDATE"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 2
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 2,
+                        "step": 1,
+                        "limit": 1
+                    }
+                }
+            }
+        ],
+		        "arguments": [
+		            {
+		                "name": "subcommand",
+		                "type": "oneof",
+		                "arguments": [
+		                    {
+		                        "name": "prepare",
+		                        "token": "PREPARE",
+		                        "type": "block",
+		                        "arguments": [
+		                            {
+		                                "name": "template-name",
+		                                "type": "string"
+		                            },
+		                            {
+		                                "name": "field",
+		                                "type": "string",
+		                                "multiple": true
+		                            }
+		                        ]
+		                    },
+		                    {
+		                        "name": "set",
+		                        "token": "SET",
+		                        "type": "block",
+		                        "arguments": [
+		                            {
+		                                "name": "key",
+		                                "type": "key",
+		                                "key_spec_index": 0
+		                            },
+		                            {
+		                                "name": "template-name",
+		                                "type": "string"
+		                            },
+		                            {
+		                                "name": "value",
+		                                "type": "string",
+		                                "multiple": true
+		                            }
+		                        ]
+		                    },
+		                    {
+		                        "name": "discard",
+		                        "token": "DISCARD",
+		                        "type": "string"
+		                    },
+		                    {
+		                        "name": "discardall",
+		                        "token": "DISCARDALL",
+		                        "type": "pure-token"
+		                    }
+		                ]
+		            }
+		        ]
+    }
+}

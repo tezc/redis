@@ -755,6 +755,11 @@ void dismissHashObject(robj *o, size_t size_hint) {
     } else if (o->encoding == OBJ_ENCODING_LISTPACK_EX) {
         listpackEx *lpt = o->ptr;
         dismissMemory(lpt->lp, lpBytes((unsigned char*)lpt->lp));
+    } else if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+        unsigned char *lp = o->ptr;
+        dismissMemory(lp, lpBytes(lp));
+    } else if (o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        /* hashTemplateArray uses sds array, no large contiguous memory to dismiss. */
     } else {
         serverPanic("Unknown hash encoding type");
     }
@@ -1210,6 +1215,8 @@ char *strEncoding(int encoding) {
     case OBJ_ENCODING_SKIPLIST: return "skiplist";
     case OBJ_ENCODING_EMBSTR: return "embstr";
     case OBJ_ENCODING_STREAM: return "stream";
+    case OBJ_ENCODING_TMPL_LP: return "hashtmpl-lp";
+    case OBJ_ENCODING_TMPL_ARRAY: return "hashtmpl-ar";
     default: return "unknown";
     }
 }

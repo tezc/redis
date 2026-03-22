@@ -1719,6 +1719,11 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         pendingCommandPoolCron();
     }
 
+    /* Free templates whose key_refcount dropped to 0 from bio thread. */
+    run_with_period(1000) {
+        hashTemplateDrainDeferredFree();
+    }
+
     /* Resize tracking keys table if needed. This is also done at every
      * command execution, but we want to be sure that if the last command
      * executed changes the value via CONFIG SET, the server will perform
@@ -2218,6 +2223,7 @@ void createSharedObjects(void) {
     shared.hpersist = createStringObject("HPERSIST",8);
     shared.hdel = createStringObject("HDEL",4);
     shared.hsetex = createStringObject("HSETEX",6);
+    shared.hsetc = createStringObject("HSETC",5);
 
     /* Shared command argument */
     shared.left = createStringObject("left",4);
@@ -2935,6 +2941,7 @@ void initServer(void) {
         exit(1);
     }
 
+    hashTemplatesInit();
     createSharedObjects();
     adjustOpenFilesLimit();
     const char *clk_msg = monotonicInit();
@@ -6808,6 +6815,12 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
                                     j, keys, vkeys, server.db[j].avg_ttl, subexpiry);
             }
         }
+        /* Hash template stats (for development) */
+        info = sdscatprintf(info,
+                            "hash_templates:%zu\r\n"
+                            "hash_template_keys:%zu\r\n",
+                            hashTemplateRegistrySize(),
+                            hashTemplateKeyCount());
     }
 
     /* keysizes */
