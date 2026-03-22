@@ -3269,7 +3269,7 @@ static int himportTemplateListSearch(himportTemplateRef *arr,
     int lo = 0, hi = count - 1;
     while (lo <= hi) {
         int mid = lo + (hi - lo) / 2;
-        int cmp = sdscmp(arr[mid].name, name);
+        int cmp = sdscmplen(arr[mid].name, name);
         if (cmp == 0) return mid;
         if (cmp < 0) lo = mid + 1;
         else hi = mid - 1;
