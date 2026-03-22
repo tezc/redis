@@ -329,7 +329,6 @@ hashTemplate *hashTemplateGetById(uint64_t id) {
     return htemplates->by_id[id];
 }
 
-/* Compute hash from sorted sds fields array. Simple FNV-1a variant. */
 /* Compute SipHash for a single field. */
 static uint64_t computeFieldHash(sds field) {
     return dictGenHashFunction(field, sdslen(field));
@@ -420,8 +419,7 @@ static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsi
     tmpl->field_objs = zmalloc(sizeof(robj *) * field_count);
     for (unsigned long long i = 0; i < field_count; i++) {
         tmpl->fields[i] = sdsdup(fields[i]);
-        tmpl->field_objs[i] = createObject(OBJ_STRING,
-                                           tmpl->fields[i]);
+        tmpl->field_objs[i] = createObject(OBJ_STRING, tmpl->fields[i]);
     }
     tmpl->id = allocateTemplateId(tmpl);
     return tmpl;
@@ -581,7 +579,7 @@ unsigned char *hashTemplateLpSetTemplate(unsigned char *lp, hashTemplate *tmpl) 
 }
 
 /* Get pointer to first value entry (skip template ID). */
-unsigned char *hashTemplateLpFirstValue(unsigned char *lp) {
+static unsigned char *hashTemplateLpFirstValue(unsigned char *lp) {
     unsigned char *p = lpFirst(lp);  /* template ID entry */
     return lpNext(lp, p);            /* first value */
 }
@@ -622,8 +620,8 @@ void hashTemplateLpFree(unsigned char *lp) {
 
 /* Get value at field index from template listpack. Returns NULL if not found.
  * field_idx is 0-based index into values (not counting template ID). */
-unsigned char *hashTemplateLpGet(unsigned char *lp, int field_idx,
-                                  unsigned int *vlen, long long *vll) {
+static unsigned char *hashTemplateLpGet(unsigned char *lp, int field_idx,
+                                        unsigned int *vlen, long long *vll) {
     int field_count = (int)lpLength(lp) - 1;
     if (field_idx < 0 || field_idx >= field_count) return NULL;
 
@@ -3242,7 +3240,6 @@ void hsetCommand(client *c) {
 typedef struct himportTemplateRef {
     sds name;           /* Template name. */
     hashTemplate *tmpl;  /* Shared tmpl (client_refcount held, sorted fields). */
-    unsigned long long field_count;    /* Number of fields. */
     int *value_order;   /* Maps tmpl index -> user argv index (pre-computed). */
 } himportTemplateRef;
 
@@ -3282,19 +3279,16 @@ static himportTemplateRef *himportTemplateGet(client *c, sds name) {
     himportTemplateList *list = c->himport_templates;
     if (!list) return NULL;
 
-    int idx = himportTemplateListSearch(list->arr, list->count,
-                                       name);
+    int idx = himportTemplateListSearch(list->arr, list->count, name);
     return (idx >= 0) ? &list->arr[idx] : NULL;
 }
 
 /* Add or replace a template in client's template list. */
 static void himportTemplateHoldRef(client *c, sds name,
                                    hashTemplate *tmpl,
-                                   unsigned long long field_count,
                                    int *value_order) {
     himportTemplateList *list = c->himport_templates;
-    himportTemplateRef newref = {name, tmpl, field_count,
-                                value_order};
+    himportTemplateRef newref = {name, tmpl, value_order};
 
     if (!list) {
         list = zmalloc(sizeof(himportTemplateList));
@@ -3333,15 +3327,13 @@ static int himportTemplateRemove(client *c, sds name) {
     himportTemplateList *list = c->himport_templates;
     if (!list) return 0;
 
-    int idx = himportTemplateListSearch(list->arr, list->count,
-                                       name);
+    int idx = himportTemplateListSearch(list->arr, list->count, name);
     if (idx < 0) return 0;
 
     himportTemplateRefFree(&list->arr[idx]);
     if (idx < list->count - 1) {
         memmove(&list->arr[idx], &list->arr[idx + 1],
-                sizeof(himportTemplateRef) *
-                    (list->count - 1 - idx));
+                sizeof(himportTemplateRef) * (list->count - 1 - idx));
     }
     list->count--;
     if (list->count == 0) {
@@ -3352,8 +3344,8 @@ static int himportTemplateRemove(client *c, sds name) {
     return 1;
 }
 
-/* Remove all templates from client's template list. */
-static void himportTemplateRemoveAll(client *c) {
+/* Free client's template list. Called from freeClient(). */
+void himportTemplateFreeList(client *c) {
     himportTemplateList *list = c->himport_templates;
     if (!list) return;
 
@@ -3363,11 +3355,6 @@ static void himportTemplateRemoveAll(client *c) {
     zfree(list->arr);
     zfree(list);
     c->himport_templates = NULL;
-}
-
-/* Free client's template list. Called from freeClient(). */
-void himportTemplateFreeList(client *c) {
-    himportTemplateRemoveAll(c);
 }
 
 /* Compare function for sorting field indexes by field name. */
@@ -3407,7 +3394,7 @@ static void himportPrepareCommand(client *c) {
     hashTemplate *tmpl = hashTemplateGetForClient(sorted_fields, field_count);
     zfree(sorted_fields);
 
-    himportTemplateHoldRef(c, sdsdup(template_name), tmpl, field_count, field_order);
+    himportTemplateHoldRef(c, sdsdup(template_name), tmpl, field_order);
     addReply(c, shared.ok);
 }
 
@@ -3490,7 +3477,7 @@ static void himportDiscardCommand(client *c, int all) {
     }
 
     if (all) {
-        himportTemplateRemoveAll(c);
+        himportTemplateFreeList(c);
     } else {
         himportTemplateRemove(c, c->argv[2]->ptr);
     }

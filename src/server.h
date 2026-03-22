@@ -3832,7 +3832,6 @@ void hashTemplateDrainDeferredFree(void);
 hashTemplate *hashTemplateGetById(uint64_t id);
 void hashTemplatesInit(void);
 hashTemplate *hashTemplateLpGetTemplate(unsigned char *lp);
-unsigned char *hashTemplateLpFirstValue(unsigned char *lp);
 unsigned char *hashTemplateLpCreate(hashTemplate *tmpl, sds *values);
 hashTemplateArray *hashTemplateArrayCreate(hashTemplate *tmpl, sds *values);
 robj *createTmplHashObject(hashTemplate *tmpl, sds *values);
