@@ -1,4 +1,4 @@
-start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "skip:cluster"}} {
+start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}} {
 
     # Helper to check encoding
     proc assert_hashtmpl_encoding {key} {
@@ -598,7 +598,7 @@ start_server {tags {"hash" "hinted-hash-templates" "rdb" "needs:debug"}} {
 # Replication tests
 # ============================================================
 
-start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug"}} {
+start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug" "cluster:skip"}} {
     start_server {} {
         test {HIMPORT SET replicates as HSETC} {
             set master [srv -1 client]
