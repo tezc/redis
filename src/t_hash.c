@@ -380,14 +380,19 @@ static void templateRegistryKeyDestructor(dict *d, void *key) {
     hashTemplate *tmpl = key;
     /* Recycle the ID for reuse. */
     recycleTemplateId(tmpl->id);
-    /* Free tmpl internals directly since refcount should be 0.
-     * field_objs[i]->ptr == fields[i], so decrRefCount frees
-     * the sds. No separate sdsfree needed. */
-    for (unsigned long long i = 0; i < tmpl->field_count; i++) {
-        decrRefCount(tmpl->field_objs[i]);
+    if (tmpl->field_objs) {
+        /* field_objs[i]->ptr == fields[i], so decrRefCount frees the sds. */
+        for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+            decrRefCount(tmpl->field_objs[i]);
+        }
+        zfree(tmpl->field_objs);
+        zfree(tmpl->fields);
+    } else {
+        for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+            sdsfree(tmpl->fields[i]);
+        }
+        zfree(tmpl->fields);
     }
-    zfree(tmpl->fields);
-    zfree(tmpl->field_objs);
     zfree(tmpl);
 }
 
@@ -422,10 +427,9 @@ static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsi
     tmpl->next_deferred = NULL;
     tmpl->deferred = 0;
     tmpl->fields = zmalloc(sizeof(sds) * field_count);
-    tmpl->field_objs = zmalloc(sizeof(robj *) * field_count);
+    tmpl->field_objs = NULL; /* Lazy: allocated on first propagation. */
     for (unsigned long long i = 0; i < field_count; i++) {
         tmpl->fields[i] = sdsdup(fields[i]);
-        tmpl->field_objs[i] = createObject(OBJ_STRING, tmpl->fields[i]);
     }
     tmpl->id = allocateTemplateId(tmpl);
     return tmpl;
@@ -3570,6 +3574,14 @@ static void himportSetCommand(client *c) {
                       zmalloc(sizeof(robj *) * (2 + field_count * 2));
     propargv[0] = shared.hsetc;
     propargv[1] = c->argv[2]; /* key */
+
+    /* Lazy-init field_objs on first propagation. */
+    if (!tmpl->field_objs) {
+        tmpl->field_objs = zmalloc(sizeof(robj *) * field_count);
+        for (unsigned long long i = 0; i < field_count; i++) {
+            tmpl->field_objs[i] = createObject(OBJ_STRING, tmpl->fields[i]);
+        }
+    }
 
     for (unsigned long long i = 0; i < field_count; i++) {
         robj *valobj = c->argv[4 + value_order[i]];
