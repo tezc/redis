@@ -598,7 +598,7 @@ start_server {tags {"hash" "hinted-hash-templates" "rdb" "needs:debug"}} {
 # Replication tests
 # ============================================================
 
-start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug" "cluster:skip"}} {
+start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}} {
     start_server {} {
         test {HIMPORT SET replicates as HSETC} {
             set master [srv -1 client]
