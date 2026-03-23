@@ -2,9 +2,8 @@ start_server {tags {"hash" "hinted-hash-templates"}} {
 
     # Helper to check encoding
     proc assert_hashtmpl_encoding {key} {
-        set encoding [r debug object $key]
-        assert {[string match "*encoding:hashtmpl-lp*" $encoding] ||
-                [string match "*encoding:hashtmpl-ar*" $encoding]}
+        set enc [r debug encoding $key]
+        assert {$enc eq "hashtmpl-lp" || $enc eq "hashtmpl-ar"}
     }
 
     proc assert_listpack_encoding {key} {
@@ -557,15 +556,12 @@ start_server {tags {"hash" "hinted-hash-templates"}} {
 start_server {tags {"hash" "hinted-hash-templates" "rdb"}} {
 
     proc assert_hashtmpl_encoding {key} {
-        set encoding [r debug object $key]
-        assert {[string match "*encoding:hashtmpl-lp*" $encoding] ||
-                [string match "*encoding:hashtmpl-ar*" $encoding]}
+        set enc [r debug encoding $key]
+        assert {$enc eq "hashtmpl-lp" || $enc eq "hashtmpl-ar"}
     }
 
     test {RDB save and load preserves template-based hash} {
-        # Set thresholds so templates are kept after reload
         r config set rdb-load-hash-template-threshold-fields 1
-        r config set rdb-load-hash-template-threshold-keys 1
 
         r hsetc rdb:test name alice email alice@example.com age 25
         assert_hashtmpl_encoding rdb:test
@@ -579,7 +575,6 @@ start_server {tags {"hash" "hinted-hash-templates" "rdb"}} {
 
     test {RDB save and load multiple template-based hashes with shared template} {
         r config set rdb-load-hash-template-threshold-fields 1
-        r config set rdb-load-hash-template-threshold-keys 1
 
         r flushall
         r hsetc rdb:multi1 a 1 b 2 c 3
@@ -595,21 +590,7 @@ start_server {tags {"hash" "hinted-hash-templates" "rdb"}} {
         assert_equal [r hget rdb:multi2 b] 5
     }
 
-    test {RDB load disassembles low-refcount templates based on config} {
-        r config set rdb-load-hash-template-threshold-fields 1
-        r config set rdb-load-hash-template-threshold-keys 5
 
-        r flushall
-        # Only 2 keys share this template - below threshold of 5
-        r hsetc rdb:low1 f1 v1 f2 v2
-        r hsetc rdb:low2 f1 v3 f2 v4
-
-        r debug reload
-
-        # Should be disassembled to listpack due to low key count
-        set encoding [r debug object rdb:low1]
-        assert {[string match "*encoding:listpack*" $encoding]}
-    }
 
 }
 
@@ -643,13 +624,13 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl"}} {
             }
 
             # Check encoding on replica
-            set master_enc [$master debug object repl:test]
-            set replica_enc [$replica debug object repl:test]
+            set master_enc [$master debug encoding repl:test]
+            set replica_enc [$replica debug encoding repl:test]
 
-            assert {[string match "*encoding:hashtmpl-lp*" $master_enc] ||
-                    [string match "*encoding:hashtmpl-ar*" $master_enc]}
-            assert {[string match "*encoding:hashtmpl-lp*" $replica_enc] ||
-                    [string match "*encoding:hashtmpl-ar*" $replica_enc]}
+            assert {$master_enc eq "hashtmpl-lp" ||
+                    $master_enc eq "hashtmpl-ar"}
+            assert {$replica_enc eq "hashtmpl-lp" ||
+                    $replica_enc eq "hashtmpl-ar"}
             # Length-first sort: name (4) < email (5)
             assert_equal [$replica hgetall repl:test] {name alice email alice@example.com}
         }

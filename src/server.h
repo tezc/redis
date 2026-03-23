@@ -2380,7 +2380,7 @@ struct redisServer {
     size_t hash_max_listpack_value;
     /* Hash template config */
     size_t rdb_load_hash_template_threshold_fields; /* Min fields to create tmpl */
-    size_t rdb_load_hash_template_threshold_keys;   /* Min keys to keep tmpl */
+
     hash_templates *htemplates;                     /* Global template registry */
     size_t set_max_intset_entries;
     size_t set_max_listpack_entries;
@@ -3827,13 +3827,14 @@ hashTemplate *hashTemplateGetOrCreate(sds *fields, unsigned long long field_coun
 hashTemplate *hashTemplateGetOrCreateWithHash(uint64_t hash, sds *fields, unsigned long long field_count);
 void hashTemplateRetainForKey(hashTemplate *tmpl);
 void hashTemplateReleaseFromClient(hashTemplate *tmpl);
-void hashTemplateDisassembleLowRefTemplates(size_t min_keys);
+
 void hashTemplateDrainDeferredFree(void);
 hashTemplate *hashTemplateGetById(uint64_t id);
 void hashTemplatesInit(void);
 hashTemplate *hashTemplateLpGetTemplate(unsigned char *lp);
+char *hashTmplEquivalentEncoding(robj *o);
 unsigned char *hashTemplateLpCreate(hashTemplate *tmpl, sds *values);
-hashTemplateArray *hashTemplateArrayCreate(hashTemplate *tmpl, sds *values);
+hashTemplateArray *hashTemplateArrayCreate(hashTemplate *tmpl, sds *values, int take);
 robj *createTmplHashObject(hashTemplate *tmpl, sds *values);
 size_t hashTemplateRegistrySize(void);
 size_t hashTemplateCountActive(void);

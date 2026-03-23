@@ -2096,6 +2096,19 @@ static int rioWriteHashIteratorCursor(rio *r, hashTypeIterator *hi, int what) {
         size_t len;
         hashTypeCurrentFromHashTable(hi, what, &str, &len, NULL);
         return rioWriteBulkString(r, str, len);
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_LP ||
+               hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        unsigned char *vstr = NULL;
+        unsigned int vlen = UINT_MAX;
+        long long vll = LLONG_MAX;
+
+        hashTypeCurrentObject(hi, what,
+                              &vstr, &vlen, &vll, NULL);
+        if (vstr)
+            return rioWriteBulkString(r,
+                                     (char *)vstr, vlen);
+        else
+            return rioWriteBulkLongLong(r, vll);
     }
 
     serverPanic("Unknown hash encoding");

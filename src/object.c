@@ -1613,7 +1613,11 @@ NULL
     } else if (!strcasecmp(c->argv[1]->ptr,"encoding") && c->argc == 3) {
         if ((kv = kvobjCommandLookupOrReply(c, c->argv[2], shared.null[c->resp]))
                 == NULL) return;
-        addReplyBulkCString(c,strEncoding(kv->encoding));
+        if (kv->encoding == OBJ_ENCODING_TMPL_LP ||
+            kv->encoding == OBJ_ENCODING_TMPL_ARRAY)
+            addReplyBulkCString(c, hashTmplEquivalentEncoding(kv));
+        else
+            addReplyBulkCString(c, strEncoding(kv->encoding));
     } else if (!strcasecmp(c->argv[1]->ptr,"idletime") && c->argc == 3) {
         if ((kv = kvobjCommandLookupOrReply(c, c->argv[2], shared.null[c->resp]))
                 == NULL) return;

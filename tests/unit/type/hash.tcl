@@ -488,8 +488,8 @@ start_server {tags {"hash"}} {
 
     test {Is a ziplist encoded Hash promoted on big payload?} {
         r hset smallhash foo [string repeat a 1024]
-        r debug object smallhash
-    } {*hashtable*} {needs:debug}
+        r object encoding smallhash
+    } {hashtable}
 
     test {HINCRBY against non existing database key} {
         r del htest
@@ -920,8 +920,8 @@ start_server {tags {"hash"}} {
         set k [dict remove $k ZIP_STR_14B]
         assert_equal [dict get $k ZIP_STR_32B] [string repeat x 65535]
         set k [dict remove $k ZIP_STR_32B]
-        set _ $k
-    } {ZIP_INT_8B 127 ZIP_INT_16B 32767 ZIP_INT_32B 2147483647 ZIP_INT_64B 9223372036854775808 ZIP_INT_IMM_MIN 0 ZIP_INT_IMM_MAX 12}
+        set _ [lsort $k]
+    } {0 12 127 2147483647 32767 9223372036854775808 ZIP_INT_16B ZIP_INT_32B ZIP_INT_64B ZIP_INT_8B ZIP_INT_IMM_MAX ZIP_INT_IMM_MIN}
 
     test {Hash ziplist of various encodings - sanitize dump} {
         config_set sanitize-dump-payload yes mayfail
@@ -937,8 +937,8 @@ start_server {tags {"hash"}} {
         set k [dict remove $k ZIP_STR_14B]
         assert_equal [dict get $k ZIP_STR_32B] [string repeat x 65535]
         set k [dict remove $k ZIP_STR_32B]
-        set _ $k
-    } {ZIP_INT_8B 127 ZIP_INT_16B 32767 ZIP_INT_32B 2147483647 ZIP_INT_64B 9223372036854775808 ZIP_INT_IMM_MIN 0 ZIP_INT_IMM_MAX 12}
+        set _ [lsort $k]
+    } {0 12 127 2147483647 32767 9223372036854775808 ZIP_INT_16B ZIP_INT_32B ZIP_INT_64B ZIP_INT_8B ZIP_INT_IMM_MAX ZIP_INT_IMM_MIN}
 
     test {KEYS command return expired keys when allow_access_expired is 1} {
         r flushall

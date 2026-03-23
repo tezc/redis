@@ -3386,9 +3386,12 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                 if (hashTypeLength(o, 0) > server.hash_max_listpack_entries)
                     hashTypeConvert(NULL /*db*/, o, OBJ_ENCODING_HT);
 
-                /* Try to convert to template-based hash if threshold met.
-                 * Only for LISTPACK (no HFE). */
-                if (rdbtype == RDB_TYPE_HASH_LISTPACK)
+                /* Try to convert to template-based hash if threshold
+                 * met. Only for LISTPACK (no HFE). Skip when
+                 * integrity was not deeply validated to avoid
+                 * iterating over a corrupt listpack. */
+                if (rdbtype == RDB_TYPE_HASH_LISTPACK &&
+                    deep_integrity_validation)
                     hashTypeTryConvertToTemplate(o);
 
                 break;
@@ -4464,11 +4467,6 @@ int rdbLoadWithEmptyFunc(char *filename, rdbSaveInfo *rsi, int rdbflags, void (*
 
     /* Clear RDB template array after load. */
     rdbClearHashTemplates();
-
-    /* After successful RDB load, disassemble templates with low key_refcount. */
-    if (retval == C_OK && server.rdb_load_hash_template_threshold_keys > 0) {
-        hashTemplateDisassembleLowRefTemplates(server.rdb_load_hash_template_threshold_keys);
-    }
 
     stopLoading(retval==C_OK);
     /* Reclaim the cache backed by rdb */
