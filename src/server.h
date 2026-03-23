@@ -1917,7 +1917,7 @@ typedef enum childInfoType {
 } childInfoType;
 
 typedef struct hotkeyStats hotkeyStats;
-typedef struct hash_templates hash_templates;
+
 
 struct redisServer {
     /* General */
@@ -2381,7 +2381,7 @@ struct redisServer {
     /* Hash template config */
     size_t rdb_load_hash_template_threshold_fields; /* Min fields to create tmpl */
 
-    hash_templates *htemplates;                     /* Global template registry */
+    struct hash_templates *htemplates;               /* Global template registry */
     size_t set_max_intset_entries;
     size_t set_max_listpack_entries;
     size_t set_max_listpack_value;

@@ -1,4 +1,4 @@
-start_server {tags {"hash" "hinted-hash-templates"}} {
+start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "skip:cluster"}} {
 
     # Helper to check encoding
     proc assert_hashtmpl_encoding {key} {
@@ -553,7 +553,7 @@ start_server {tags {"hash" "hinted-hash-templates"}} {
 # RDB SAVE/LOAD tests (require server restart)
 # ============================================================
 
-start_server {tags {"hash" "hinted-hash-templates" "rdb"}} {
+start_server {tags {"hash" "hinted-hash-templates" "rdb" "needs:debug"}} {
 
     proc assert_hashtmpl_encoding {key} {
         set enc [r debug encoding $key]
@@ -598,7 +598,7 @@ start_server {tags {"hash" "hinted-hash-templates" "rdb"}} {
 # Replication tests
 # ============================================================
 
-start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl"}} {
+start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug"}} {
     start_server {} {
         test {HIMPORT SET replicates as HSETC} {
             set master [srv -1 client]

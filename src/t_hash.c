@@ -3486,12 +3486,15 @@ void himportTemplateFreeList(client *c) {
     c->himport_templates = NULL;
 }
 
+/* Context for himportCmpFieldIdx, set before qsort call. */
+static robj **himport_cmp_argv = NULL;
+
 /* Compare function for sorting field indexes by field name. */
-static int himportCmpFieldIdx(const void *a, const void *b, void *ctx) {
-    robj **argv = ctx;
+static int himportCmpFieldIdx(const void *a, const void *b) {
     int ia = *(const int *)a;
     int ib = *(const int *)b;
-    return sdscmplen(argv[ia]->ptr, argv[ib]->ptr);
+    return sdscmplen(himport_cmp_argv[ia]->ptr,
+                     himport_cmp_argv[ib]->ptr);
 }
 
 /* HIMPORT PREPARE <template_name> <field1> [field2 ...] */
@@ -3512,7 +3515,8 @@ static void himportPrepareCommand(client *c) {
     for (int i = 0; i < field_count; i++)
         field_order[i] = i;
 
-    qsort_r(field_order, field_count, sizeof(int), himportCmpFieldIdx, field_argv);
+    himport_cmp_argv = field_argv;
+    qsort(field_order, field_count, sizeof(int), himportCmpFieldIdx);
 
     /* Build sorted fields array for tmpl lookup. */
     sds *sorted_fields = zmalloc(sizeof(sds) * field_count);
