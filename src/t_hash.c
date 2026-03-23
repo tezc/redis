@@ -968,12 +968,12 @@ unsigned char *hashTypeListpackGetLp(robj *o) {
  * Hash type API
  *----------------------------------------------------------------------------*/
 
-int hashFitsInTmplLp(int count, sds *values) {
+int hashFitsInTmplLp(unsigned long long count, sds *values) {
     if ((size_t)count > server.hash_max_listpack_entries)
         return 0;
 
     size_t sum = 0;
-    for (int i = 0; i < count; i++) {
+    for (unsigned long long i = 0; i < count; i++) {
         size_t len = sdslen(values[i]);
         if (len > server.hash_max_listpack_value)
             return 0;
