@@ -579,6 +579,155 @@ void feedReplicationBuffer(char *s, size_t len) {
     }
 }
 
+/* ---- replStream: direct-write API for the replication backlog ----
+ *
+ * Unlike feedReplicationBuffer() which does bookkeeping (replica iteration,
+ * backlog index, trim) on every call, the stream API defers all bookkeeping
+ * to replStreamEnd(). Each replStreamWrite() only does a memcpy into the
+ * tail block, allocating a new block when needed. */
+
+void replStreamBegin(replStream *s) {
+    listNode *ln = listLast(server.repl_buffer_blocks);
+    replBufBlock *tail = ln ? listNodeValue(ln) : NULL;
+    s->start_node = ln;
+    s->start_pos = tail ? tail->used : 0;
+    s->total_len = 0;
+    s->new_blocks = 0;
+    s->tail = tail;
+    s->avail = tail ? (tail->size - tail->used) : 0;
+}
+
+/* Slow path for replStreamWrite: handles block boundary / allocation. */
+void _replStreamWriteSlow(replStream *s, const char *buf, size_t len) {
+    static long long repl_block_id = 0;
+
+    while (len > 0) {
+        if (s->avail > 0) {
+            size_t copy = (s->avail >= len) ? len : s->avail;
+            memcpy(s->tail->buf + s->tail->used, buf, copy);
+            s->tail->used += copy;
+            s->avail -= copy;
+            buf += copy;
+            len -= copy;
+            s->total_len += copy;
+        }
+
+        if (len == 0) break;
+
+        /* Allocate a new block. */
+        size_t usable_size;
+        size_t limit = max((size_t)server.repl_backlog_size / 16, (size_t)PROTO_REPLY_CHUNK_BYTES);
+        size_t bsize = min(max(len, (size_t)PROTO_REPLY_CHUNK_BYTES), limit);
+        s->tail = zmalloc_usable(bsize + sizeof(replBufBlock), &usable_size);
+        s->tail->size = usable_size - sizeof(replBufBlock);
+        s->tail->used = 0;
+        s->tail->refcount = 0;
+        s->tail->repl_offset = server.master_repl_offset + s->total_len + 1;
+        s->tail->id = repl_block_id++;
+        listAddNodeTail(server.repl_buffer_blocks, s->tail);
+        server.repl_buffer_mem += (usable_size + sizeof(listNode));
+        s->avail = s->tail->size;
+        s->new_blocks++;
+
+        if (s->start_node == NULL) {
+            s->start_node = listLast(server.repl_buffer_blocks);
+            s->start_pos = 0;
+        }
+    }
+}
+
+/* Write a complete RESP bulk string: $<len>\r\n<data>\r\n
+ * Resolves position once and writes everything in one shot when possible. */
+void replStreamWriteBulk(replStream *s, robj *arg) {
+    char aux[LONG_STR_SIZE+3];
+    long objlen = stringObjectLen(arg);
+
+    /* Resolve prefix: $<len>\r\n */
+    const char *prefix;
+    size_t prefix_len;
+    if (objlen < OBJ_SHARED_BULKHDR_LEN) {
+        prefix = shared.bulkhdr[objlen]->ptr;
+        prefix_len = OBJ_SHARED_HDR_STRLEN(objlen);
+    } else {
+        aux[0] = '$';
+        int n = ll2string(aux+1, sizeof(aux)-1, objlen);
+        aux[n+1] = '\r';
+        aux[n+2] = '\n';
+        prefix = aux;
+        prefix_len = n + 3;
+    }
+
+    /* Resolve data pointer. */
+    const char *data;
+    size_t data_len;
+    if (arg->encoding == OBJ_ENCODING_INT) {
+        /* INT: convert to string. prefix already resolved above,
+         * and for INT objects objlen <= 20, so shared.bulkhdr was used
+         * — aux is free for the integer conversion. */
+        data_len = ll2string(aux, sizeof(aux), (long)arg->ptr);
+        data = aux;
+    } else {
+        data = arg->ptr;
+        data_len = objlen;
+    }
+
+    size_t total = prefix_len + data_len + 2; /* +2 for trailing \r\n */
+
+    /* Fast path: everything fits in the current tail block. */
+    if (s->avail >= total) {
+        char *dst = s->tail->buf + s->tail->used;
+        memcpy(dst, prefix, prefix_len);
+        memcpy(dst + prefix_len, data, data_len);
+        dst[prefix_len + data_len] = '\r';
+        dst[prefix_len + data_len + 1] = '\n';
+        s->tail->used += total;
+        s->avail -= total;
+        s->total_len += total;
+        return;
+    }
+
+    /* Slow path: write pieces through the stream. */
+    _replStreamWriteSlow(s, prefix, prefix_len);
+    _replStreamWriteSlow(s, data, data_len);
+    _replStreamWriteSlow(s, "\r\n", 2);
+}
+
+void replStreamEnd(replStream *s) {
+    if (s->total_len == 0) return;
+
+    clusterSlotStatsIncrNetworkBytesOutForReplication(s->total_len);
+    server.master_repl_offset += s->total_len;
+    server.repl_backlog->histlen += s->total_len;
+
+    /* For output buffer of replicas. */
+    listIter li;
+    listNode *ln;
+    listRewind(server.slaves, &li);
+    while ((ln = listNext(&li))) {
+        client *slave = ln->value;
+        if (!canFeedReplicaReplBuffer(slave)) continue;
+
+        if (slave->ref_repl_buf_node == NULL) {
+            slave->ref_repl_buf_node = s->start_node;
+            slave->ref_block_pos = s->start_pos;
+            ((replBufBlock *)listNodeValue(s->start_node))->refcount++;
+        }
+
+        if (s->new_blocks) closeClientOnOutputBufferLimitReached(slave, 1);
+    }
+
+    /* For replication backlog */
+    if (server.repl_backlog->ref_repl_buf_node == NULL) {
+        server.repl_backlog->ref_repl_buf_node = s->start_node;
+        ((replBufBlock *)listNodeValue(s->start_node))->refcount++;
+        serverAssert(s->new_blocks > 0 && s->start_pos == 0);
+    }
+    if (s->new_blocks) {
+        createReplicationBacklogIndex(listLast(server.repl_buffer_blocks));
+        incrementalTrimReplicationBacklog(REPL_BACKLOG_TRIM_BLOCKS_PER_CALL);
+    }
+}
+
 /* Propagate write commands to replication stream.
  *
  * This function is used if the instance is a master: we use the commands
@@ -655,30 +804,26 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         server.slaveseldb = dictid;
     }
 
-    /* Write the command to the replication buffer if any. */
+    /* Write command directly into the replication backlog using the stream API.
+     * Bookkeeping (replica refs, backlog index, trim) is done once at end. */
     char aux[LONG_STR_SIZE+3];
+    replStream s;
+    replStreamBegin(&s);
 
-    /* Add the multi bulk reply length. */
-    aux[0] = '*';
-    len = ll2string(aux+1,sizeof(aux)-1,argc);
-    aux[len+1] = '\r';
-    aux[len+2] = '\n';
-    feedReplicationBuffer(aux,len+3);
+    /* *<argc>\r\n */
+    if (argc < OBJ_SHARED_BULKHDR_LEN) {
+        replStreamWrite(&s, shared.mbulkhdr[argc]->ptr, OBJ_SHARED_HDR_STRLEN(argc));
+    } else {
+        aux[0] = '*';
+        len = ll2string(aux+1, sizeof(aux)-1, argc);
+        replStreamWriteCRLF(&s, aux, len+1);
+    }
 
     for (j = 0; j < argc; j++) {
-        long objlen = stringObjectLen(argv[j]);
-
-        /* We need to feed the buffer with the object as a bulk reply
-         * not just as a plain string, so create the $..CRLF payload len
-         * and add the final CRLF */
-        aux[0] = '$';
-        len = ll2string(aux+1,sizeof(aux)-1,objlen);
-        aux[len+1] = '\r';
-        aux[len+2] = '\n';
-        feedReplicationBuffer(aux,len+3);
-        feedReplicationBufferWithObject(argv[j]);
-        feedReplicationBuffer(aux+len+1,2);
+        replStreamWriteBulk(&s, argv[j]);
     }
+
+    replStreamEnd(&s);
 }
 
 /* This is a debugging function that gets called when we detect something
@@ -2743,7 +2888,7 @@ char *sendCommand(connection *conn, ...) {
     return NULL;
 }
 
-/* Compose a multi-bulk command and send it to the connection. 
+/* Compose a multi-bulk command and send it to the connection.
  * Used to send AUTH and REPLCONF commands to the master before starting the
  * replication.
  *

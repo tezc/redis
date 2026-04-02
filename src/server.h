@@ -124,7 +124,7 @@ struct hdr_histogram;
 #define PROTO_SHARED_SELECT_CMDS 10
 #define OBJ_SHARED_INTEGERS 10000
 #define OBJ_SHARED_BULKHDR_LEN 32
-#define OBJ_SHARED_HDR_STRLEN(_len_) (((_len_) < 10) ? 4 : 5) /* see shared.mbulkhdr etc. */
+#define OBJ_SHARED_HDR_STRLEN(n) ((n) < 10 ? 4 : 5) /* strlen("$<n>\r\n") for n < 32 */
 #define LOG_MAX_LEN    1024 /* Default maximum length of syslog messages.*/
 #define AOF_REWRITE_ITEMS_PER_CMD 64
 #define AOF_ANNOTATION_LINE_MAX_LEN 1024
@@ -3359,6 +3359,54 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc);
 void replicationFeedStreamFromMasterStream(char *buf, size_t buflen);
 void resetReplicationBuffer(void);
 void feedReplicationBuffer(char *buf, size_t len);
+
+/* Stream API for direct writes into the replication backlog. */
+typedef struct replStream {
+    listNode *start_node;
+    size_t start_pos;
+    size_t total_len;
+    int new_blocks;
+    replBufBlock *tail;  /* Cached tail block to avoid listLast per write. */
+    size_t avail;        /* Cached available space in tail block. */
+} replStream;
+void replStreamBegin(replStream *s);
+void _replStreamWriteSlow(replStream *s, const char *buf, size_t len);
+void replStreamEnd(replStream *s);
+
+/* Inline fast path: fits in cached tail block — no function call overhead.
+ * Uses restrict + locals to help the compiler keep values in registers. */
+static inline void replStreamWrite(replStream * restrict s, const char *buf, size_t len) {
+    size_t avail = s->avail;
+    if (avail >= len) {
+        replBufBlock *t = s->tail;
+        memcpy(t->buf + t->used, buf, len);
+        t->used += len;
+        s->avail = avail - len;
+        s->total_len += len;
+        return;
+    }
+    _replStreamWriteSlow(s, buf, len);
+}
+
+/* Write buf + "\r\n" in one call. Saves a separate replStreamWrite for CRLF. */
+static inline void replStreamWriteCRLF(replStream * restrict s, const char *buf, size_t len) {
+    size_t total = len + 2;
+    size_t avail = s->avail;
+    if (likely(avail >= total)) {
+        replBufBlock *t = s->tail;
+        char *dst = t->buf + t->used;
+        memcpy(dst, buf, len);
+        dst[len] = '\r';
+        dst[len+1] = '\n';
+        t->used += total;
+        s->avail = avail - total;
+        s->total_len += total;
+        return;
+    }
+    _replStreamWriteSlow(s, buf, len);
+    _replStreamWriteSlow(s, "\r\n", 2);
+}
+
 void freeReplicaReferencedReplBuffer(client *replica);
 void replicationFeedMonitors(client *c, list *monitors, int dictid, robj **argv, int argc);
 void updateSlavesWaitingBgsave(int bgsaveerr, int type);
