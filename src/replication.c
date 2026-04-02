@@ -686,10 +686,12 @@ void replStreamWriteBulk(replStream *s, robj *arg) {
         return;
     }
 
-    /* Slow path: write pieces through the stream. */
-    _replStreamWriteSlow(s, prefix, prefix_len);
-    _replStreamWriteSlow(s, data, data_len);
-    _replStreamWriteSlow(s, "\r\n", 2);
+    /* Slow path: doesn't fit in current block. Write pieces individually;
+     * after the first write allocates a new block, the rest likely hit
+     * the inline fast path. */
+    replStreamWrite(s, prefix, prefix_len);
+    replStreamWrite(s, data, data_len);
+    replStreamWrite(s, "\r\n", 2);
 }
 
 void replStreamEnd(replStream *s) {
@@ -816,7 +818,8 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     } else {
         aux[0] = '*';
         len = ll2string(aux+1, sizeof(aux)-1, argc);
-        replStreamWriteCRLF(&s, aux, len+1);
+        replStreamWrite(&s, aux, len+1);
+        replStreamWrite(&s, "\r\n", 2);
     }
 
     for (j = 0; j < argc; j++) {
@@ -2888,7 +2891,7 @@ char *sendCommand(connection *conn, ...) {
     return NULL;
 }
 
-/* Compose a multi-bulk command and send it to the connection.
+/* Compose a multi-bulk command and send it to the connection. 
  * Used to send AUTH and REPLCONF commands to the master before starting the
  * replication.
  *
