@@ -3358,36 +3358,6 @@ ssize_t syncReadLine(int fd, char *ptr, ssize_t size, long long timeout);
 void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc);
 void replicationFeedStreamFromMasterStream(char *buf, size_t buflen);
 void resetReplicationBuffer(void);
-void feedReplicationBuffer(char *buf, size_t len);
-
-/* Stream API for direct writes into the replication backlog. */
-typedef struct replStream {
-    listNode *start_node;
-    size_t start_pos;
-    size_t total_len;
-    int new_blocks;
-    replBufBlock *tail;  /* Cached tail block to avoid listLast per write. */
-    size_t avail;        /* Cached available space in tail block. */
-} replStream;
-void replStreamBegin(replStream *s);
-void _replStreamWriteSlow(replStream *s, const char *buf, size_t len);
-void replStreamEnd(replStream *s);
-
-/* Inline fast path: fits in cached tail block — no function call overhead.
- * Uses restrict + locals to help the compiler keep values in registers. */
-static inline void replStreamWrite(replStream * restrict s, const char *buf, size_t len) {
-    size_t avail = s->avail;
-    if (avail >= len) {
-        replBufBlock *t = s->tail;
-        memcpy(t->buf + t->used, buf, len);
-        t->used += len;
-        s->avail = avail - len;
-        s->total_len += len;
-        return;
-    }
-    _replStreamWriteSlow(s, buf, len);
-}
-
 void freeReplicaReferencedReplBuffer(client *replica);
 void replicationFeedMonitors(client *c, list *monitors, int dictid, robj **argv, int argc);
 void updateSlavesWaitingBgsave(int bgsaveerr, int type);
