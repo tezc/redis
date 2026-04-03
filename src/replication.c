@@ -636,63 +636,6 @@ void _replStreamWriteSlow(replStream *s, const char *buf, size_t len) {
     }
 }
 
-/* Write a complete RESP bulk string: $<len>\r\n<data>\r\n
- * Resolves position once and writes everything in one shot when possible. */
-void replStreamWriteBulk(replStream *s, robj *arg) {
-    char aux[LONG_STR_SIZE+3];
-    long objlen = stringObjectLen(arg);
-
-    /* Resolve prefix: $<len>\r\n */
-    const char *prefix;
-    size_t prefix_len;
-    if (objlen < OBJ_SHARED_BULKHDR_LEN) {
-        prefix = shared.bulkhdr[objlen]->ptr;
-        prefix_len = OBJ_SHARED_HDR_STRLEN(objlen);
-    } else {
-        aux[0] = '$';
-        int n = ll2string(aux+1, sizeof(aux)-1, objlen);
-        aux[n+1] = '\r';
-        aux[n+2] = '\n';
-        prefix = aux;
-        prefix_len = n + 3;
-    }
-
-    /* Resolve data pointer. */
-    const char *data;
-    size_t data_len;
-    if (arg->encoding == OBJ_ENCODING_INT) {
-        /* INT: convert to string. prefix already resolved above,
-         * and for INT objects objlen <= 20, so shared.bulkhdr was used
-         * — aux is free for the integer conversion. */
-        data_len = ll2string(aux, sizeof(aux), (long)arg->ptr);
-        data = aux;
-    } else {
-        data = arg->ptr;
-        data_len = objlen;
-    }
-
-    size_t total = prefix_len + data_len + 2; /* +2 for trailing \r\n */
-
-    /* Fast path: everything fits in the current tail block. */
-    if (s->avail >= total) {
-        char *dst = s->tail->buf + s->tail->used;
-        memcpy(dst, prefix, prefix_len);
-        memcpy(dst + prefix_len, data, data_len);
-        dst[prefix_len + data_len] = '\r';
-        dst[prefix_len + data_len + 1] = '\n';
-        s->tail->used += total;
-        s->avail -= total;
-        s->total_len += total;
-        return;
-    }
-
-    /* Slow path: doesn't fit in current block. Write pieces individually;
-     * after the first write allocates a new block, the rest likely hit
-     * the inline fast path. */
-    replStreamWrite(s, prefix, prefix_len);
-    replStreamWrite(s, data, data_len);
-    replStreamWrite(s, "\r\n", 2);
-}
 
 void replStreamEnd(replStream *s) {
     if (s->total_len == 0) return;
@@ -823,7 +766,28 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     }
 
     for (j = 0; j < argc; j++) {
-        replStreamWriteBulk(&s, argv[j]);
+        long objlen = stringObjectLen(argv[j]);
+
+        /* $<len>\r\n */
+        if (objlen < OBJ_SHARED_BULKHDR_LEN) {
+            replStreamWrite(&s, shared.bulkhdr[objlen]->ptr, OBJ_SHARED_HDR_STRLEN(objlen));
+        } else {
+            aux[0] = '$';
+            int n = ll2string(aux+1, sizeof(aux)-1, objlen);
+            aux[n+1] = '\r'; aux[n+2] = '\n';
+            replStreamWrite(&s, aux, n+3);
+        }
+
+        /* <data> */
+        if (argv[j]->encoding == OBJ_ENCODING_INT) {
+            int n = ll2string(aux, sizeof(aux), (long)argv[j]->ptr);
+            replStreamWrite(&s, aux, n);
+        } else {
+            replStreamWrite(&s, argv[j]->ptr, objlen);
+        }
+
+        /* \r\n */
+        replStreamWrite(&s, "\r\n", 2);
     }
 
     replStreamEnd(&s);
