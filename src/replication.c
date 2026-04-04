@@ -490,6 +490,9 @@ static void replStreamBegin(replStream *s) {
 static void replStreamAllocBlock(replStream *s, size_t hint) {
     static long long repl_block_id = 0;
     size_t usable_size;
+    /* Avoid creating nodes smaller than PROTO_REPLY_CHUNK_BYTES, so that we can append more data into them,
+     * and also avoid creating nodes bigger than repl_backlog_size / 16, so that we won't have huge nodes that can't
+     * trim when we only still need to hold a small portion from them. */
     size_t limit = max((size_t)server.repl_backlog_size / 16, (size_t)PROTO_REPLY_CHUNK_BYTES);
     size_t bsize = min(max(hint, (size_t)PROTO_REPLY_CHUNK_BYTES), limit);
     s->tail = zmalloc_usable(bsize + sizeof(replBufBlock), &usable_size);
