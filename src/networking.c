@@ -1793,7 +1793,7 @@ void freeClientArgv(client *c) {
 }
 
 __attribute__((flatten, always_inline))
-inline void freeClientPendingCommands(client *c, int num_pcmds_to_free) {
+static inline void freeClientPendingCommands(client *c, int num_pcmds_to_free) {
     /* (-1) means free all pending commands */
     if (num_pcmds_to_free == -1)
         num_pcmds_to_free = c->pending_cmds.len;

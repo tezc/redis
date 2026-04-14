@@ -653,10 +653,7 @@ void decrRefCount(robj *o) {
             default: serverPanic("Unknown object type"); break;
             }
         }
-        if (!o->iskvobj)
-            zfree_with_size(alloc, sizeof(robj));
-        else
-            zfree(alloc);
+        zfree(alloc);
     }
 }
 
