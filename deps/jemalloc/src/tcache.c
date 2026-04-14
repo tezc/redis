@@ -17,7 +17,7 @@ size_t opt_tcache_max = ((size_t)1) << 15;
 
 /* Reasonable defaults for min and max values. */
 unsigned opt_tcache_nslots_small_min = 20;
-unsigned opt_tcache_nslots_small_max = 200;
+unsigned opt_tcache_nslots_small_max = 1000;
 unsigned opt_tcache_nslots_large = 20;
 
 /*
@@ -28,7 +28,7 @@ unsigned opt_tcache_nslots_large = 20;
  * This is bounded by some other constraints as well, like the fact that it
  * must be even, must be less than opt_tcache_nslots_small_max, etc..
  */
-ssize_t	opt_lg_tcache_nslots_mul = 1;
+ssize_t	opt_lg_tcache_nslots_mul = 3;
 
 /*
  * Number of allocation bytes between tcache incremental GCs.  Again, this

@@ -94,6 +94,9 @@ static redisAtomic size_t num_active_threads = 0;
 static redisAtomic size_t zmalloc_peak = 0;
 static redisAtomic time_t zmalloc_peak_time = 0;
 static __thread long my_thread_index = -1;
+static __thread long long thread_pending_delta = 0;
+
+#define ZMALLOC_STAT_UPDATE_THRESHOLD (1024 * 100) /* 100KB - batch atomic writes */
 
 static inline void init_my_thread_index(void) {
     if (unlikely(my_thread_index == -1)) {
@@ -102,14 +105,16 @@ static inline void init_my_thread_index(void) {
     }
 }
 
-static void update_zmalloc_stat_alloc(long long bytes_delta) {
+static void zmalloc_flush_pending_delta(void) {
+    if (thread_pending_delta == 0) return;
     init_my_thread_index();
 
     /* Per-thread allocation counter and the last counter value at which we ran a
      * global peak check (throttles how often we call zmalloc_used_memory()). */
     long long thread_used, thread_last_peak_check_used;
-    atomicIncrGet(used_memory[my_thread_index].used_memory, thread_used, bytes_delta);
+    atomicIncrGet(used_memory[my_thread_index].used_memory, thread_used, thread_pending_delta);
     atomicGet(used_memory[my_thread_index].last_peak_check, thread_last_peak_check_used);
+    thread_pending_delta = 0;
 
     /* Only run the (expensive) global used/peak check after this thread's
      * allocation counter has advanced enough since the last check. */
@@ -144,10 +149,15 @@ static void update_zmalloc_stat_alloc(long long bytes_delta) {
     }
 }
 
-static void update_zmalloc_stat_free(long long num) {
-    init_my_thread_index();
-    atomicDecr(used_memory[my_thread_index].used_memory, num);
+static void update_zmalloc_stat(long long delta) {
+    thread_pending_delta += delta;
+    if (thread_pending_delta > ZMALLOC_STAT_UPDATE_THRESHOLD ||
+        thread_pending_delta < -ZMALLOC_STAT_UPDATE_THRESHOLD)
+        zmalloc_flush_pending_delta();
 }
+
+#define update_zmalloc_stat_alloc(n) update_zmalloc_stat(n)
+#define update_zmalloc_stat_free(n) update_zmalloc_stat(-(long long)(n))
 
 static void zmalloc_default_oom(size_t size) {
     fprintf(stderr, "zmalloc: Out of memory trying to allocate %zu bytes\n",
@@ -525,6 +535,20 @@ void zfree(void *ptr) {
 #endif
 }
 
+/* Free with a size hint to skip the emap (radix tree) lookup in jemalloc's
+ * free fast path. The minimum valid 'size' is the original requested
+ * allocation size, and the maximum is the usable size as returned by
+ * zmalloc_usable(). */
+void zfree_with_size(void *ptr, size_t size) {
+    if (ptr == NULL) return;
+    update_zmalloc_stat_free(size);
+#ifdef USE_JEMALLOC
+    je_sdallocx(ptr, size, 0);
+#else
+    free(ptr);
+#endif
+}
+
 /* Similar to zfree, '*usable' is set to the usable size being freed. */
 void zfree_usable(void *ptr, size_t *usable) {
     size_t oldsize;
@@ -565,6 +589,9 @@ char *zstrdup(const char *s) {
 }
 
 size_t zmalloc_used_memory(void) {
+    /* Flush the calling thread's pending delta so the result includes it. */
+    zmalloc_flush_pending_delta();
+
     size_t local_num_active_threads;
     long long total_mem = 0;
     atomicGet(num_active_threads,local_num_active_threads);

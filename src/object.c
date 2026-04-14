@@ -342,6 +342,11 @@ robj *createStringObject(const char *ptr, size_t len) {
         return createRawStringObject(ptr,len);
 }
 
+__attribute__((flatten, always_inline)) 
+inline robj *createStringObjectInlined(const char *ptr, size_t len) {
+    return createStringObject(ptr, len);
+}
+
 /* Same as CreateRawStringObject, can return NULL if allocation fails */
 robj *tryCreateRawStringObject(const char *ptr, size_t len) {
     sds str = sdstrynewlen(ptr,len);
@@ -600,6 +605,10 @@ void incrRefCount(robj *o) {
     }
 }
 
+inline __attribute__((always_inline, flatten))
+void decrRefCountInline(robj *o) {
+    decrRefCount(o);
+}
 void decrRefCount(robj *o) {
     if (o->refcount == OBJ_SHARED_REFCOUNT)
         return; /* Nothing to do: this refcount is immutable. */
@@ -610,6 +619,18 @@ void decrRefCount(robj *o) {
     }
 
     if (--(o->refcount) == 0) {
+        /* Fast path for embedded strings: no inner allocation to free,
+         * and we can compute the usable size to skip jemalloc's emap lookup. */
+        if (likely(o->type == OBJ_STRING && o->encoding == OBJ_ENCODING_EMBSTR && !o->iskvobj)) {
+            /* Embstr is always SDS_TYPE_8. Compute alloc size directly
+             * without the sdsAllocSize switch. sdshdr8 layout before buf:
+             * [len(1B)][alloc(1B)][flags(1B)][buf...] so alloc = ptr[-2]. */
+            size_t alloc_size = sizeof(robj) + sizeof(struct sdshdr8)
+                              + ((uint8_t*)o->ptr)[-2] + 1;
+            zfree_with_size(o, alloc_size);
+            return;
+        }
+
         void *alloc = o;
         
         if (o->iskvobj) {
@@ -632,7 +653,10 @@ void decrRefCount(robj *o) {
             default: serverPanic("Unknown object type"); break;
             }
         }
-        zfree(alloc);
+        if (!o->iskvobj)
+            zfree_with_size(alloc, sizeof(robj));
+        else
+            zfree(alloc);
     }
 }
 
