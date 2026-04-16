@@ -129,6 +129,7 @@ sds _sdsnewlen(const void *init, size_t initlen, int trymalloc) {
  * Returns:
  * - A pointer to the SDS inside `buf`. 
  */
+__attribute__((always_inline))
 sds sdsnewplacement(char *buf, size_t bufsize, char type, const char *init, size_t initlen) {
     assert(bufsize >= sdsReqSize(initlen, type));
     int hdrlen = sdsHdrSize(type);
@@ -213,7 +214,7 @@ sds sdsdup(const sds s) {
 /* Free an sds string. No operation is performed if 's' is NULL. */
 void sdsfree(sds s) {
     if (s == NULL) return;
-    s_free((char*)s-sdsHdrSize(s[-1]));
+    s_free_with_size((char*)s-sdsHdrSize(s[-1]), sdsAllocSize(s));
 }
 
 void sdsfreeusable(sds s, size_t *usable) {

@@ -124,7 +124,6 @@ long long kvobjGetExpire(const kvobj *val);
 uint64_t *kvobjMetaRef(kvobj *kv, int metaId);
 
 /* Redis object implementation */
-void decrRefCountInline(robj *o);
 void decrRefCount(robj *o);
 void incrRefCount(robj *o);
 robj *makeObjectShared(robj *o);
@@ -137,7 +136,6 @@ void dismissObject(robj *o, size_t dump_size);
 robj *createObject(int type, void *ptr);
 void initObjectLRUOrLFU(robj *o);
 robj *createStringObject(const char *ptr, size_t len);
-robj *createStringObjectInlined(const char *ptr, size_t len);
 robj *createRawStringObject(const char *ptr, size_t len);
 robj *tryCreateRawStringObject(const char *ptr, size_t len);
 robj *tryCreateStringObject(const char *ptr, size_t len);

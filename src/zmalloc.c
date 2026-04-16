@@ -229,6 +229,7 @@ void *ztrymalloc(size_t size) {
 
 /* Allocate memory or panic.
  * '*usable' is set to the usable size if non NULL. */
+__attribute__((always_inline))
 void *zmalloc_usable(size_t size, size_t *usable) {
     size_t usable_size = 0;
     void *ptr = ztrymalloc_usable_internal(size, &usable_size);
@@ -516,6 +517,7 @@ size_t zmalloc_usable_size(void *ptr) {
 }
 #endif
 
+
 void zfree(void *ptr) {
     if (ptr == NULL) return;
 
@@ -539,6 +541,7 @@ void zfree(void *ptr) {
  * free fast path. The minimum valid 'size' is the original requested
  * allocation size, and the maximum is the usable size as returned by
  * zmalloc_usable(). */
+__attribute__((always_inline))
 void zfree_with_size(void *ptr, size_t size) {
     if (ptr == NULL) return;
     update_zmalloc_stat_free(size);
