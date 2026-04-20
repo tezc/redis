@@ -1427,34 +1427,39 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 flushall
     }
 
-    test "Source write pause timeout" {
-        # set timeout to 0, so the task will fail immediately when checking timeout
-        R 0 config set cluster-slot-migration-write-pause-timeout 0
-        R 1 debug asm-failpoint "import-main-channel" "takeover"
+    foreach state {"takeover" "handoff-prep"} {
+        test "Source write pause timeout on ($state)" {
+            R 0 config set cluster-slot-migration-write-pause-timeout 0
 
-        # start migration from node 0 to 1
-        set task_id [setup_slot_migration_with_delay 0 1 0 100]
+            if {$state eq "takeover"} {
+                # Destination fails to takeover slots before the timeout
+                R 1 debug asm-failpoint "import-main-channel" "takeover"
+            } else {
+                # Source node is stuck at HANDOFF_PREP sate, cannot enter HANDOFF
+                R 0 debug asm-failpoint "migrate-main-channel" "handoff"
+            }
 
-        # start the slot 0 write load on the node 0
-        set slot0_key [slot_key 0 mykey]
-        set load_handle [start_write_load "127.0.0.1" [get_port 0] 100 $slot0_key]
+            set task_id [setup_slot_migration_with_delay 0 1 0 100]
 
-        # node 0 will fail due to write pause timeout
-        wait_for_condition 2000 10 {
-            [string match {*failed*} [migration_status 0 $task_id state]] &&
-            [string match {*Write pause timeout*} \
-                [migration_status 0 $task_id last_error]]
-        } else {
-            fail "ASM task did not fail"
+            set slot0_key [slot_key 0 mykey]
+            set load_handle [start_write_load "127.0.0.1" [get_port 0] 100 $slot0_key]
+
+            wait_for_condition 2000 10 {
+                [string match {*failed*} [migration_status 0 $task_id state]] &&
+                [string match {*Write pause timeout*} \
+                    [migration_status 0 $task_id last_error]]
+            } else {
+                fail "ASM task did not fail"
+            }
+
+            stop_write_load $load_handle
+
+            R 0 config set cluster-slot-migration-write-pause-timeout 10000
+            R 0 cluster migration cancel id $task_id
+            R 1 cluster migration cancel id $task_id
+            R 0 debug asm-failpoint "" ""
+            R 1 debug asm-failpoint "" ""
         }
-
-        stop_write_load $load_handle
-
-        # reset config
-        R 0 config set cluster-slot-migration-write-pause-timeout 10000
-        R 0 cluster migration cancel id $task_id
-        R 1 cluster migration cancel id $task_id
-        R 1 debug asm-failpoint "" ""
     }
 
     test "Sync buffer drain timeout" {

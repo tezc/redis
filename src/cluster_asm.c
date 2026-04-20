@@ -2700,7 +2700,10 @@ void asmCron(void) {
             {
                 asmTaskSetFailed(task, "Sync buffer drain timeout");
             }
-        } else if (task->state == ASM_HANDOFF || task->state == ASM_STREAM_EOF) {
+        } else if (task->state == ASM_HANDOFF_PREP ||
+                   task->state == ASM_HANDOFF || 
+                   task->state == ASM_STREAM_EOF) 
+        {
             /* In these states, writes are still paused while waiting for the 
              * destination to broadcast the slot ownership change. If the 
              * destination fails or becomes unreachable, the source could remain 
@@ -2864,6 +2867,9 @@ int clusterAsmHandoff(const char *task_id, sds *err) {
                             task_id, task ? asmTaskStateToString(task->state) : "null");
         return C_ERR;
     }
+
+    if (unlikely(asmDebugIsFailPointActive(ASM_MIGRATE_MAIN_CHANNEL, ASM_HANDOFF)))
+        return C_OK;
 
     task->state = ASM_HANDOFF;
     task->paused_time = server.mstime;
@@ -3075,6 +3081,35 @@ void asmTriggerBackgroundTrim(asmTrimCtx *trim_ctx, int migration_cleanup) {
     asmUnblockMasterAfterTrim();
 }
 
+/* Create ASM trim context with refcount=1 */
+asmTrimCtx *asmTrimCtxCreate(slotRangeArray *slots, kvstore *target_kvstore) {
+    asmTrimCtx *ctx = zcalloc(sizeof(asmTrimCtx));
+    ctx->refcount = 1;
+    ctx->slots = slots;
+    ctx->target_kvstore = target_kvstore;
+    /* delta histograms are zero-initialized by zcalloc */
+    return ctx;
+}
+
+/* Increment refcount */
+void asmTrimCtxRetain(asmTrimCtx *ctx) {
+    if (!ctx) return;
+    ctx->refcount++;
+}
+
+/* Decrement refcount, free if reaches 0 */
+void asmTrimCtxRelease(asmTrimCtx *ctx) {
+    if (!ctx) return;
+
+    serverAssert(ctx->refcount > 0);
+    ctx->refcount--;
+
+    if (ctx->refcount == 0) {
+        slotRangeArrayFree(ctx->slots);
+        zfree(ctx);
+    }
+}
+
 /* Trimming of slots can be triggered in several cases: 
  *  - After a successful ASM migrate operation: slots are migrated away from
  *    this node and keys that are no longer owned must be removed.
@@ -3119,36 +3154,6 @@ void asmTriggerBackgroundTrim(asmTrimCtx *trim_ctx, int migration_cleanup) {
  * Trim the slots, return the trim method used.
  * If client_id is non-zero, the client will be unblocked when trim completes.
  * If migration_cleanup is true, this is a migration cleanup of slots no longer owned. */
-
-/* Create ASM trim context with refcount=1 */
-asmTrimCtx *asmTrimCtxCreate(slotRangeArray *slots, kvstore *target_kvstore) {
-    asmTrimCtx *ctx = zcalloc(sizeof(asmTrimCtx));
-    ctx->refcount = 1;
-    ctx->slots = slots;
-    ctx->target_kvstore = target_kvstore;
-    /* delta histograms are zero-initialized by zcalloc */
-    return ctx;
-}
-
-/* Increment refcount */
-void asmTrimCtxRetain(asmTrimCtx *ctx) {
-    if (!ctx) return;
-    ctx->refcount++;
-}
-
-/* Decrement refcount, free if reaches 0 */
-void asmTrimCtxRelease(asmTrimCtx *ctx) {
-    if (!ctx) return;
-
-    serverAssert(ctx->refcount > 0);
-    ctx->refcount--;
-
-    if (ctx->refcount == 0) {
-        slotRangeArrayFree(ctx->slots);
-        zfree(ctx);
-    }
-}
-
 int asmTrimSlots(asmTrimCtx *ctx, uint64_t client_id, int migration_cleanup) {
     serverAssert(ctx != NULL);
 
