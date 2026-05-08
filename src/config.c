@@ -3282,7 +3282,7 @@ standardConfig static_configs[] = {
 
     /* Size_t configs */
     createSizeTConfig("hash-max-listpack-entries", "hash-max-ziplist-entries", MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_max_listpack_entries, 512, INTEGER_CONFIG, NULL, NULL),
-    createSizeTConfig("rdb-load-hash-template-threshold-fields", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.rdb_load_hash_template_threshold_fields, 1, INTEGER_CONFIG, NULL, NULL),
+    createSizeTConfig("rdb-load-hash-template-threshold-fields", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.rdb_load_hash_template_threshold_fields, 0, INTEGER_CONFIG, NULL, NULL),
 
     createSizeTConfig("set-max-intset-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.set_max_intset_entries, 512, INTEGER_CONFIG, NULL, NULL),
     createSizeTConfig("set-max-listpack-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.set_max_listpack_entries, 128, INTEGER_CONFIG, NULL, NULL),
