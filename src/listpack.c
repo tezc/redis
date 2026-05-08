@@ -1137,6 +1137,9 @@ unsigned char *lpInsert(unsigned char *lp, unsigned char *elestr, unsigned char 
  * The elements are inserted before or after the element pointed by 'p'
  * depending on the 'where' argument, that can be LP_BEFORE or LP_AFTER.
  *
+ * If 'lp' is NULL, a brand-new listpack is created in a single exact-sized
+ * lp_malloc() (the 'p' and 'where' arguments are ignored in that case).
+ *
  * If 'newp' is not NULL, at the end of a successful call '*newp' will be set
  * to the address of the element just added, so that it will be possible to
  * continue an interaction with lpNext() and lpPrev().
@@ -1149,8 +1152,8 @@ unsigned char *lpBatchInsert(unsigned char *lp, unsigned char *p, int where,
                              listpackEntry *entries, unsigned int len,
                              unsigned char **newp)
 {
-    assert(where == LP_BEFORE || where == LP_AFTER);
     assert(entries != NULL && len > 0);
+    assert(lp == NULL || where == LP_BEFORE || where == LP_AFTER);
 
     struct listpackInsertEntry {
         int enctype;
@@ -1161,24 +1164,16 @@ unsigned char *lpBatchInsert(unsigned char *lp, unsigned char *p, int where,
     };
 
     uint64_t addedlen = 0;       /* The encoded length of the added elements. */
-    struct listpackInsertEntry tmp[3];  /* Encoded entries */
+    struct listpackInsertEntry tmp[64]; /* Encoded entries (stack buffer). */
     struct listpackInsertEntry *enc = tmp;
 
     if (len > sizeof(tmp) / sizeof(struct listpackInsertEntry)) {
         /* If 'len' is larger than local buffer size, allocate on heap. */
-        enc = zmalloc(len * sizeof(struct listpackInsertEntry));
+        enc = lp_malloc(len * sizeof(struct listpackInsertEntry));
+        if (enc == NULL) return NULL;
     }
 
-    /* If we need to insert after the current element, we just jump to the
-     * next element (that could be the EOF one) and handle the case of
-     * inserting before. So the function will actually deal with just one
-     * case: LP_BEFORE. */
-    if (where == LP_AFTER) {
-        p = lpSkip(p);
-        where = LP_BEFORE;
-        ASSERT_INTEGRITY(lp, p);
-    }
-
+    /* Encoding pre-pass: compute per-entry encoding and total added bytes. */
     for (unsigned int i = 0; i < len; i++) {
         listpackEntry *e = &entries[i];
         if (e->sval) {
@@ -1206,32 +1201,63 @@ unsigned char *lpBatchInsert(unsigned char *lp, unsigned char *p, int where,
         addedlen += enc[i].backlen_size;
     }
 
-    uint64_t old_listpack_bytes = lpGetTotalBytes(lp);
-    uint64_t new_listpack_bytes = old_listpack_bytes + addedlen;
-    if (new_listpack_bytes > UINT32_MAX) {
-        if (enc != tmp) lp_free(enc);
-        return NULL;
-    }
+    int new_lp = (lp == NULL);
+    unsigned char *dst;
+    uint64_t new_listpack_bytes;
 
-    /* Store the offset of the element 'p', so that we can obtain its
-     * address again after a reallocation. */
-    unsigned long poff = p-lp;
-    unsigned char *dst = lp + poff; /* May be updated after reallocation. */
-
-    /* Realloc before: we need more room. */
-    if (new_listpack_bytes > old_listpack_bytes &&
-        new_listpack_bytes > lp_malloc_size(lp)) {
-        if ((lp = lp_realloc(lp,new_listpack_bytes)) == NULL) {
+    if (new_lp) {
+        /* new listpack: single exact-size allocation, no memmove. */
+        new_listpack_bytes = LP_HDR_SIZE + addedlen + 1; /* +1 for EOF */
+        if (new_listpack_bytes > UINT32_MAX) {
             if (enc != tmp) lp_free(enc);
             return NULL;
         }
+        lp = lp_malloc(new_listpack_bytes);
+        if (lp == NULL) {
+            if (enc != tmp) lp_free(enc);
+            return NULL;
+        }
+        dst = lp + LP_HDR_SIZE;
+    } else {
+        /* If we need to insert after the current element, we just jump to the
+         * next element (that could be the EOF one) and handle the case of
+         * inserting before. So the function will actually deal with just one
+         * case: LP_BEFORE. */
+        if (where == LP_AFTER) {
+            p = lpSkip(p);
+            ASSERT_INTEGRITY(lp, p);
+        }
+
+        uint64_t old_listpack_bytes = lpGetTotalBytes(lp);
+        new_listpack_bytes = old_listpack_bytes + addedlen;
+        if (new_listpack_bytes > UINT32_MAX) {
+            if (enc != tmp) lp_free(enc);
+            return NULL;
+        }
+
+        /* Store the offset of the element 'p', so that we can obtain its
+         * address again after a reallocation. */
+        unsigned long poff = p - lp;
+
+        /* Realloc before: we need more room. */
+        if (new_listpack_bytes > old_listpack_bytes &&
+            new_listpack_bytes > lp_malloc_size(lp))
+        {
+            unsigned char *newlp = lp_realloc(lp, new_listpack_bytes);
+            if (newlp == NULL) {
+                if (enc != tmp) lp_free(enc);
+                return NULL;
+            }
+            lp = newlp;
+        }
         dst = lp + poff;
+
+        /* Setup the listpack relocating the elements to make the exact room
+         * we need to store the new ones. */
+        memmove(dst + addedlen, dst, old_listpack_bytes - poff);
     }
 
-    /* Setup the listpack relocating the elements to make the exact room
-     * we need to store the new ones. */
-    memmove(dst+addedlen,dst,old_listpack_bytes-poff);
-
+    /* Write entries. */
     for (unsigned int i = 0; i < len; i++) {
         listpackEntry *ent = &entries[i];
 
@@ -1249,14 +1275,12 @@ unsigned char *lpBatchInsert(unsigned char *lp, unsigned char *p, int where,
     }
 
     /* Update header. */
-    uint32_t num_elements = lpGetNumElements(lp);
-    if (num_elements != LP_HDR_NUMELE_UNKNOWN) {
-        if ((int64_t) len > (int64_t) LP_HDR_NUMELE_UNKNOWN - (int64_t) num_elements)
-            lpSetNumElements(lp, LP_HDR_NUMELE_UNKNOWN);
-        else
-            lpSetNumElements(lp,num_elements + len);
-    }
-    lpSetTotalBytes(lp,new_listpack_bytes);
+    if (new_lp) *dst = LP_EOF;
+    uint32_t cur = new_lp ? 0 : lpGetNumElements(lp);
+    uint32_t num_elements = (len >= LP_HDR_NUMELE_UNKNOWN - cur) ? 
+                                LP_HDR_NUMELE_UNKNOWN : cur + len;
+    lpSetNumElements(lp, num_elements);
+    lpSetTotalBytes(lp, new_listpack_bytes);
     if (enc != tmp) lp_free(enc);
 
     return lp;

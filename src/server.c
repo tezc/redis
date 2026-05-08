@@ -1762,6 +1762,11 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         pendingCommandPoolCron();
     }
 
+    /* Free templates whose key_refcount dropped to 0 from bio thread. */
+    run_with_period(1000) {
+        hashTemplateDrainDeferredFree();
+    }
+
     /* Resize tracking keys table if needed. This is also done at every
      * command execution, but we want to be sure that if the last command
      * executed changes the value via CONFIG SET, the server will perform
@@ -2273,6 +2278,7 @@ void createSharedObjects(void) {
     shared.hpersist = createStringObject("HPERSIST",8);
     shared.hdel = createStringObject("HDEL",4);
     shared.hsetex = createStringObject("HSETEX",6);
+    shared.hsetc = createStringObject("HSETC",5);
 
     /* Shared command argument */
     shared.left = createStringObject("left",4);
@@ -2997,6 +3003,7 @@ void initServer(void) {
         exit(1);
     }
 
+    hashTemplatesInit();
     createSharedObjects();
     adjustOpenFilesLimit();
     const char *clk_msg = monotonicInit();
@@ -6723,7 +6730,9 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "avg_pipeline_length:%.2f\r\n", stat_avg_pipeline_length_cnt ? (double)stat_avg_pipeline_length_sum / stat_avg_pipeline_length_cnt : 0,
             "slowlog_commands_count:%lld\r\n", server.stat_slowlog_count,
             "slowlog_commands_time_ms_max:%.2f\r\n", (double)server.stat_slowlog_time_us_max / 1000,
-            "slowlog_commands_time_ms_sum:%.2f\r\n", (double)server.stat_slowlog_time_us_sum / 1000));
+            "slowlog_commands_time_ms_sum:%.2f\r\n", (double)server.stat_slowlog_time_us_sum / 1000,
+            "hash_templates:%zu\r\n", hashTemplateRegistrySize(),
+            "hash_template_keys:%zu\r\n", hashTemplateKeyCount()));
         info = genRedisInfoStringACLStats(info);
         if (!server.cluster_enabled && server.cluster_compatibility_sample_ratio) {
             info = sdscatprintf(info, "cluster_incompatible_ops:%lld\r\n", server.stat_cluster_incompatible_ops);
@@ -8113,6 +8122,10 @@ int main(int argc, char **argv) {
         sdsfree(options);
     }
     if (server.sentinel_mode) sentinelCheckConfigFile();
+
+    /* Reserve dedicated used_memory slots for main + IO threads (single-writer
+     * fast path). See zmalloc_reserve_thread_slots(). */
+    zmalloc_reserve_thread_slots(server.io_threads_num);
 
     /* Do system checks */
 #ifdef __linux__

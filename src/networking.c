@@ -36,7 +36,7 @@ static inline int _clientHasPendingRepliesNonSlave(client *c);
 static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten);
 static inline int _writeToClientSlave(client *c, ssize_t *nwritten);
 static pendingCommand *acquirePendingCommand(void);
-static void reclaimPendingCommand(client *c, pendingCommand *pcmd);
+static inline void reclaimPendingCommand(client *c, pendingCommand *pcmd);
 static size_t getClientOutputBufferLogicalSize(client *c);
 
 int ProcessingEventsWhileBlocked = 0; /* See processEventsWhileBlocked(). */
@@ -256,6 +256,8 @@ client *createClient(connection *conn) {
     c->stat_avg_pipeline_length_cnt = 0;
     c->task = NULL;
     c->node_id = NULL;
+    c->himport_templates = NULL;
+    c->hsetc_cache = NULL;
     atomicSet(c->pending_read, 0);
     return c;
 }
@@ -1813,7 +1815,7 @@ void freeClientArgv(client *c) {
     freeClientArgvInternal(c, 1);
 }
 
-void freeClientPendingCommands(client *c, int num_pcmds_to_free) {
+static inline void freeClientPendingCommands(client *c, int num_pcmds_to_free) {
     /* (-1) means free all pending commands */
     if (num_pcmds_to_free == -1)
         num_pcmds_to_free = c->pending_cmds.len;
@@ -2041,6 +2043,7 @@ void clearClientConnectionState(client *c) {
     clientSetDefaultAuth(c);
     moduleNotifyUserChanged(c);
     discardTransaction(c);
+    himportTemplateFreeList(c);
 
     pubsubUnsubscribeAllChannels(c,0);
     pubsubUnsubscribeShardAllChannels(c, 0);
@@ -2317,6 +2320,8 @@ void freeClient(client *c) {
 
     /* Release other dynamically allocated client structure fields,
      * and finally release the client structure itself. */
+    himportTemplateFreeList(c);
+    hsetcCacheFree(c);
     if (c->name) decrRefCount(c->name);
     if (c->lib_name) decrRefCount(c->lib_name);
     if (c->lib_ver) decrRefCount(c->lib_ver);
@@ -5708,7 +5713,7 @@ static int tryExpandPendingCommandPool(void) {
  * The shared pool is only used when IO threads are inactive to avoid race conditions
  * between multiple clients. Additionally, pool reuse provides minimal benefit in
  * multi-threaded scenarios, so we only use it in single-threaded mode. */
-static void reclaimPendingCommand(client *c, pendingCommand *pcmd) {
+static inline void reclaimPendingCommand(client *c, pendingCommand *pcmd) {
     if (!server.io_threads_active) {
         /* Try to add to shared pool for reuse if argv isn't too large */
         if (likely(pcmd->argv_len < 64)) {

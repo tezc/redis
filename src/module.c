@@ -12149,6 +12149,41 @@ int RM_ScanKey(RedisModuleKey *key, RedisModuleScanCursor *cursor, RedisModuleSc
         cursor->cursor = 1;
         cursor->done = 1;
         ret = 0;
+    } else if (kv->type == OBJ_HASH &&
+               (kv->encoding == OBJ_ENCODING_TMPL_LP ||
+                kv->encoding == OBJ_ENCODING_TMPL_ARRAY)) {
+        /* Template-based hashes: iterate via
+         * hashTypeIterator which handles both
+         * TMPL_LP and TMPL_ARRAY encodings. */
+        hashTypeIterator hi;
+        hashTypeInitIterator(&hi, kv);
+        while (hashTypeNext(&hi, 0) != C_ERR) {
+            unsigned char *vstr = NULL;
+            unsigned int vlen;
+            long long vll;
+
+            sds fieldSds =
+                hashTypeCurrentObjectNewSds(&hi,
+                                            OBJ_HASH_KEY);
+            hashTypeCurrentObject(&hi, OBJ_HASH_VALUE,
+                                  &vstr, &vlen, &vll,
+                                  NULL);
+
+            robj *field = createObject(OBJ_STRING,
+                                       fieldSds);
+            robj *value = (vstr != NULL) ?
+                createStringObject((char *)vstr, vlen) :
+                createStringObjectFromLongLongWithSds(
+                    vll);
+            fn(key, field, value, privdata);
+
+            decrRefCount(field);
+            decrRefCount(value);
+        }
+        hashTypeResetIterator(&hi);
+        cursor->cursor = 1;
+        cursor->done = 1;
+        ret = 0;
     } else if (kv->type == OBJ_ZSET || kv->type == OBJ_HASH) {
         unsigned char *lp, *p;
         /* is hash with expiry on fields, then lp tuples are [field][value][expire] */

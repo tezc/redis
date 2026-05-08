@@ -85,6 +85,8 @@ struct RedisModuleType;
 #define OBJ_ENCODING_STREAM 10 /* Encoded as a radix tree of listpacks */
 #define OBJ_ENCODING_LISTPACK 11 /* Encoded as a listpack */
 #define OBJ_ENCODING_LISTPACK_EX 12 /* Encoded as listpack, extended with metadata */
+#define OBJ_ENCODING_TMPL_LP 13 /* Hash with shared template, values in listpack */
+#define OBJ_ENCODING_TMPL_ARRAY 14 /* Hash with shared template, values in array */
 
 #define LRU_BITS 24
 #define LRU_CLOCK_MAX ((1<<LRU_BITS)-1) /* Max value of obj->lru */

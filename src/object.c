@@ -218,7 +218,7 @@ static kvobj *kvobjCreateEmbedString(const char *val_ptr, size_t val_len,
  *    | robj (16) | key-hdr-size (1) | sdshdr8 "myvalue" \0  (11) | 
  *    +-----------+------------------+----------------------------+
  */
-robj *createEmbeddedStringObject(const char *val_ptr, size_t val_len) {
+static inline robj *createEmbeddedStringObject(const char *val_ptr, size_t val_len) {
     /* Calculate size for embedded value (always SDS_TYPE_8) */
     size_t val_sds_size = sdsReqSize(val_len, SDS_TYPE_8);
     
@@ -635,6 +635,14 @@ void decrRefCount(robj *o) {
     }
 
     if (--(o->refcount) == 0) {
+        /* Fast path for embedded strings: no inner allocation to free, and we
+         * can compute the alloc size to hint jemalloc for a faster deallocation. */
+        if (o->type == OBJ_STRING && o->encoding == OBJ_ENCODING_EMBSTR && !o->iskvobj) {
+            serverAssert(sdsType(o->ptr) == SDS_TYPE_8); /* embstr always type_8 */
+            zfree_with_size(o, sizeof(robj) + sdsAllocSize(o->ptr));
+            return;
+        }
+
         void *alloc = o;
         
         if (o->iskvobj) {
@@ -777,6 +785,11 @@ void dismissHashObject(robj *o, size_t size_hint) {
     } else if (o->encoding == OBJ_ENCODING_LISTPACK_EX) {
         listpackEx *lpt = o->ptr;
         dismissMemory(lpt->lp, lpBytes((unsigned char*)lpt->lp));
+    } else if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+        unsigned char *lp = o->ptr;
+        dismissMemory(lp, lpBytes(lp));
+    } else if (o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        /* hashTemplateArray uses sds array, no large contiguous memory to dismiss. */
     } else {
         serverPanic("Unknown hash encoding type");
     }
@@ -1257,6 +1270,8 @@ char *strEncoding(int encoding) {
     case OBJ_ENCODING_SKIPLIST: return "skiplist";
     case OBJ_ENCODING_EMBSTR: return "embstr";
     case OBJ_ENCODING_STREAM: return "stream";
+    case OBJ_ENCODING_TMPL_LP: return "hashtmpl-lp";
+    case OBJ_ENCODING_TMPL_ARRAY: return "hashtmpl-ar";
     default: return "unknown";
     }
 }
@@ -1676,7 +1691,11 @@ NULL
     } else if (!strcasecmp(c->argv[1]->ptr,"encoding") && c->argc == 3) {
         if ((kv = kvobjCommandLookupOrReply(c, c->argv[2], shared.null[c->resp]))
                 == NULL) return;
-        addReplyBulkCString(c,strEncoding(kv->encoding));
+        if (kv->encoding == OBJ_ENCODING_TMPL_LP ||
+            kv->encoding == OBJ_ENCODING_TMPL_ARRAY)
+            addReplyBulkCString(c, hashTmplEquivalentEncoding(kv));
+        else
+            addReplyBulkCString(c, strEncoding(kv->encoding));
     } else if (!strcasecmp(c->argv[1]->ptr,"idletime") && c->argc == 3) {
         if ((kv = kvobjCommandLookupOrReply(c, c->argv[2], shared.null[c->resp]))
                 == NULL) return;

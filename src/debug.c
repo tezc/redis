@@ -664,7 +664,11 @@ NULL
             return;
         }
 
-        strenc = strEncoding(kv->encoding);
+        if (kv->encoding == OBJ_ENCODING_TMPL_LP ||
+            kv->encoding == OBJ_ENCODING_TMPL_ARRAY)
+            strenc = hashTmplEquivalentEncoding(kv);
+        else
+            strenc = strEncoding(kv->encoding);
 
         char extra[138] = {0};
         if (kv->encoding == OBJ_ENCODING_QUICKLIST) {
@@ -706,6 +710,15 @@ NULL
             (void*)kv, kv->refcount,
             strenc, rdbSavedObjectLen(kv, c->argv[2], c->db->id),
             kv->lru, estimateObjectIdleTime(kv)/1000, extra);
+    } else if (!strcasecmp(c->argv[1]->ptr,"encoding") &&
+               c->argc == 3)
+    {
+        kvobj *kv;
+        if ((kv = dbFind(c->db, c->argv[2]->ptr)) == NULL) {
+            addReplyErrorObject(c, shared.nokeyerr);
+            return;
+        }
+        addReplyBulkCString(c, strEncoding(kv->encoding));
     } else if (!strcasecmp(c->argv[1]->ptr,"sdslen") && c->argc == 3) {
         robj *val;
         sds key;

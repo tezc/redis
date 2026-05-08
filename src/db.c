@@ -2085,6 +2085,84 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
         }
         setDeferredArrayLen(c,replylen,cur_length);
         return;
+    } else if (o->type == OBJ_HASH &&
+               (o->encoding == OBJ_ENCODING_TMPL_LP ||
+                o->encoding == OBJ_ENCODING_TMPL_ARRAY)) {
+        /* Schema-based hash. Field names live in the shared template; values
+         * live in the per-key listpack/array. Walk them directly without going
+         * through the generic hashType iterator, which would re-resolve the
+         * template per field for TMPL_LP. */
+        hashTemplate *tmpl;
+        unsigned char *lp = NULL, *vp = NULL;
+        sds *values_arr = NULL;
+
+        if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+            lp = o->ptr;
+            tmpl = hashTemplateLpGetTemplate(lp);
+            /* Skip template ID entry to reach first value. */
+            vp = lpNext(lp, lpFirst(lp));
+        } else {
+            hashTemplateArray *hta = o->ptr;
+            tmpl = hta->tmpl;
+            values_arr = hta->values;
+        }
+        sds *fields = tmpl->fields;
+        unsigned long long n = tmpl->field_count;
+
+        vecRelease(&keys);
+
+        addReplyArrayLen(c, 2);
+        /* Cursor is always 0 given we iterate over all hash fields. */
+        addReplyBulkLongLong(c, 0);
+
+        void *replylen = NULL;
+        unsigned long cur_length = 0;
+        if (use_pattern)
+            replylen = addReplyDeferredLen(c);
+        else
+            addReplyArrayLen(c, no_values ? n : n * 2);
+
+        if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+            for (unsigned long long i = 0; i < n; i++) {
+                sds field = fields[i];
+                size_t flen = sdslen(field);
+                if (use_pattern && !stringmatchlen(pat, patlen, field, flen, 0)) {
+                    vp = lpNext(lp, vp);
+                    continue;
+                }
+                addReplyBulkCBuffer(c, field, flen);
+                cur_length++;
+                if (!no_values) {
+                    unsigned int vlen;
+                    long long vll;
+                    unsigned char *vstr = lpGetValue(vp, &vlen, &vll);
+                    if (vstr)
+                        addReplyBulkCBuffer(c, vstr, vlen);
+                    else
+                        addReplyBulkLongLong(c, vll);
+                    cur_length++;
+                }
+                vp = lpNext(lp, vp);
+            }
+        } else {
+            for (unsigned long long i = 0; i < n; i++) {
+                sds field = fields[i];
+                size_t flen = sdslen(field);
+                if (use_pattern && !stringmatchlen(pat, patlen, field, flen, 0))
+                    continue;
+                addReplyBulkCBuffer(c, field, flen);
+                cur_length++;
+                if (!no_values) {
+                    sds val = values_arr[i];
+                    addReplyBulkCBuffer(c, val, sdslen(val));
+                    cur_length++;
+                }
+            }
+        }
+
+        if (use_pattern)
+            setDeferredArrayLen(c, replylen, cur_length);
+        return;
     } else {
         serverPanic("Not handled encoding in SCAN.");
     }

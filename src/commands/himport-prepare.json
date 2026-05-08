@@ -1,0 +1,32 @@
+{
+    "PREPARE": {
+        "summary": "Defines a session-local template that maps a name to a sorted set of field names.",
+        "complexity": "O(N) where N is the number of fields.",
+        "group": "hash",
+        "since": "9.0.0",
+        "arity": -4,
+        "container": "HIMPORT",
+        "function": "himportPrepareCommand",
+        "command_flags": [
+            "DENYOOM",
+            "FAST"
+        ],
+        "acl_categories": [
+            "HASH"
+        ],
+        "reply_schema": {
+            "const": "OK"
+        },
+        "arguments": [
+            {
+                "name": "template-name",
+                "type": "string"
+            },
+            {
+                "name": "field",
+                "type": "string",
+                "multiple": true
+            }
+        ]
+    }
+}

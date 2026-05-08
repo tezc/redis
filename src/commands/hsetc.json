@@ -1,0 +1,67 @@
+{
+    "HSETC": {
+        "summary": "Creates a schema-based hash, replacing any existing key. Internal command propagated by HIMPORT SET.",
+        "complexity": "O(N) where N is the number of field/value pairs.",
+        "group": "hash",
+        "since": "8.0.0",
+        "arity": -4,
+        "function": "hsetcCommand",
+        "command_flags": [
+            "WRITE",
+            "DENYOOM",
+            "FAST",
+            "INTERNAL"
+        ],
+        "acl_categories": [
+            "HASH"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RW",
+                    "OW",
+                    "UPDATE"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 0,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            }
+        ],
+        "reply_schema": {
+            "description": "The number of fields set",
+            "type": "integer"
+        },
+        "arguments": [
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "data",
+                "type": "block",
+                "multiple": true,
+                "arguments": [
+                    {
+                        "name": "field",
+                        "type": "string"
+                    },
+                    {
+                        "name": "value",
+                        "type": "string"
+                    }
+                ]
+            }
+        ]
+    }
+}
+

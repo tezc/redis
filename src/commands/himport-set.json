@@ -1,0 +1,60 @@
+{
+    "SET": {
+        "summary": "Creates a template-based hash from values supplied in the order matching a previously prepared template.",
+        "complexity": "O(N) where N is the number of fields in the template.",
+        "group": "hash",
+        "since": "9.0.0",
+        "arity": -5,
+        "container": "HIMPORT",
+        "function": "himportSetCommand",
+        "command_flags": [
+            "WRITE",
+            "DENYOOM",
+            "FAST"
+        ],
+        "acl_categories": [
+            "HASH"
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "RW",
+                    "INSERT",
+                    "UPDATE"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 2
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": 0,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            }
+        ],
+        "reply_schema": {
+            "type": "integer",
+            "description": "The number of fields written."
+        },
+        "arguments": [
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "template-name",
+                "type": "string"
+            },
+            {
+                "name": "value",
+                "type": "string",
+                "multiple": true
+            }
+        ]
+    }
+}

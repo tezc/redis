@@ -709,6 +709,15 @@ int rdbSaveObjectType(rio *rdb, robj *o) {
                 return rdbSaveType(rdb,RDB_TYPE_HASH);
             else
                 return rdbSaveType(rdb,RDB_TYPE_HASH_METADATA);
+        } else if (o->encoding == OBJ_ENCODING_TMPL_LP ||
+                   o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+            /* Template encodings: use compact ref if RDB save,
+             * inline format for DUMP command. */
+            if (server.htemplates->rdb_saving) {
+                return rdbSaveType(rdb, RDB_TYPE_HASH_TEMPLATE_REF);
+            } else {
+                return rdbSaveType(rdb, RDB_TYPE_HASH_TEMPLATE);
+            }
         } else
             serverPanic("Unknown hash encoding");
     case OBJ_STREAM:
@@ -1158,7 +1167,93 @@ ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key, int dbid) {
         }
     } else if (o->type == OBJ_HASH) {
         /* Save a hash value */
-        if ((o->encoding == OBJ_ENCODING_LISTPACK) ||
+        if (o->encoding == OBJ_ENCODING_TMPL_LP ||
+            o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+            /* Template encodings: use compact or full format. */
+            hashTemplate *tmpl;
+            unsigned long long field_count;
+            if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+                unsigned char *lp = o->ptr;
+                tmpl = hashTemplateLpGetTemplate(lp);
+                field_count = tmpl->field_count;
+            } else {
+                hashTemplateArray *hta = o->ptr;
+                tmpl = hta->tmpl;
+                field_count = tmpl->field_count;
+            }
+
+            if (server.htemplates->rdb_saving) {
+                /* Compact format: [template_id][value1][value2]... */
+                if ((n = rdbSaveLen(rdb, tmpl->id)) == -1) return -1;
+                nwritten += n;
+
+                /* Save only values (no field names). */
+                for (unsigned long long i = 0; i < field_count; i++) {
+                    if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+                        unsigned char *lp = o->ptr;
+                        /* +1 to skip template ID entry */
+                        unsigned char *p = lpSeek(lp, i + 1);
+                        unsigned char *vstr;
+                        unsigned int vlen;
+                        long long vll;
+                        vstr = lpGetValue(p, &vlen, &vll);
+                        if (vstr) {
+                            if ((n = rdbSaveRawString(rdb, vstr, vlen)) == -1)
+                                return -1;
+                        } else {
+                            if ((n = rdbSaveLongLongAsStringObject(rdb, vll)) == -1)
+                                return -1;
+                        }
+                    } else {
+                        hashTemplateArray *hta = o->ptr;
+                        sds value = hta->values[i];
+                        if ((n = rdbSaveRawString(rdb, (unsigned char *)value,
+                                                  sdslen(value))) == -1)
+                            return -1;
+                    }
+                    nwritten += n;
+                }
+            } else {
+                /* Full format: [field_count][field1][value1][field2][value2]...
+                 * Used for DUMP command when template registry not available. */
+                if ((n = rdbSaveLen(rdb, field_count)) == -1) return -1;
+                nwritten += n;
+
+                for (unsigned long long i = 0; i < field_count; i++) {
+                    /* Save field name from template. */
+                    sds field = tmpl->fields[i];
+                    if ((n = rdbSaveRawString(rdb, (unsigned char *)field,
+                                              sdslen(field))) == -1)
+                        return -1;
+                    nwritten += n;
+
+                    /* Save value. */
+                    if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+                        unsigned char *lp = o->ptr;
+                        /* +1 to skip template ID entry */
+                        unsigned char *p = lpSeek(lp, i + 1);
+                        unsigned char *vstr;
+                        unsigned int vlen;
+                        long long vll;
+                        vstr = lpGetValue(p, &vlen, &vll);
+                        if (vstr) {
+                            if ((n = rdbSaveRawString(rdb, vstr, vlen)) == -1)
+                                return -1;
+                        } else {
+                            if ((n = rdbSaveLongLongAsStringObject(rdb, vll)) == -1)
+                                return -1;
+                        }
+                    } else {
+                        hashTemplateArray *hta = o->ptr;
+                        sds value = hta->values[i];
+                        if ((n = rdbSaveRawString(rdb, (unsigned char *)value,
+                                                  sdslen(value))) == -1)
+                            return -1;
+                    }
+                    nwritten += n;
+                }
+            }
+        } else if ((o->encoding == OBJ_ENCODING_LISTPACK) ||
             (o->encoding == OBJ_ENCODING_LISTPACK_EX))
         {
             /* Save min/next HFE expiration time if needed */
@@ -1644,6 +1739,161 @@ werr:
     return -1;
 }
 
+/* Callback context for rdbSaveHashTemplates. */
+struct rdbSaveHashTemplatesCtx {
+    rio *rdb;
+    ssize_t written;
+    int error;
+};
+
+/* Callback to save a single template. */
+static void rdbSaveHashTemplateCallback(hashTemplate *tmpl, void *privdata) {
+    struct rdbSaveHashTemplatesCtx *ctx = privdata;
+    ssize_t ret;
+
+    if (ctx->error) return;
+
+    /* Save template runtime ID. */
+    if ((ret = rdbSaveLen(ctx->rdb, tmpl->id)) < 0) {
+        ctx->error = 1;
+        return;
+    }
+    ctx->written += ret;
+
+    /* Save field count. */
+    if ((ret = rdbSaveLen(ctx->rdb, tmpl->field_count)) < 0) {
+        ctx->error = 1;
+        return;
+    }
+    ctx->written += ret;
+
+    /* Save each field name. */
+    for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+        sds field = tmpl->fields[i];
+        if ((ret = rdbSaveRawString(ctx->rdb, (unsigned char *)field,
+                                    sdslen(field))) < 0) {
+            ctx->error = 1;
+            return;
+        }
+        ctx->written += ret;
+    }
+}
+
+/* Save hash template registry for efficient HashV2 storage.
+ * Format: [OPCODE][num_tmpls][tpl1][tpl2]...
+ * Each template: [id][field_count][field1][field2]... */
+ssize_t rdbSaveHashTemplates(rio *rdb) {
+    ssize_t written = 0;
+    ssize_t ret;
+
+    uint64_t num_tmpls = hashTemplateCountActive();
+    if (num_tmpls == 0) return 0; /* Nothing to save */
+
+    /* Write opcode. */
+    if ((ret = rdbSaveType(rdb, RDB_OPCODE_HASH_TEMPLATES)) < 0) return -1;
+    written += ret;
+
+    /* Write number of templates. */
+    if ((ret = rdbSaveLen(rdb, num_tmpls)) < 0) return -1;
+    written += ret;
+
+    /* Mark that templates have been saved (for compact key refs). */
+    server.htemplates->rdb_saving = 1;
+
+    /* Iterate and save each template using callback. */
+    struct rdbSaveHashTemplatesCtx ctx = {rdb, 0, 0};
+    hashTemplateRegistryIterate(rdbSaveHashTemplateCallback, &ctx);
+
+    if (ctx.error) return -1;
+    written += ctx.written;
+
+    serverLog(LL_DEBUG, "Saved %lu hash templates to RDB", (unsigned long)num_tmpls);
+    return written;
+}
+
+/* Load hash template registry from RDB.
+ * Format: [num_tmpls][tpl1][tpl2]...
+ * Each template: [id][field_count][field1][field2]...
+ * Builds rdb_tmpls mapping from saved ID to loaded template. */
+static hashTemplate **rdb_tmpls = NULL;
+static uint64_t rdb_tmpls_cap = 0;
+
+int rdbLoadHashTemplates(rio *rdb) {
+    uint64_t num_tmpls;
+
+    /* Read number of templates. */
+    if ((num_tmpls = rdbLoadLen(rdb, NULL)) == RDB_LENERR) return C_ERR;
+
+    if (num_tmpls == 0) return C_OK;
+
+    for (uint64_t i = 0; i < num_tmpls; i++) {
+        uint64_t id, field_count;
+
+        /* Read template ID. */
+        if ((id = rdbLoadLen(rdb, NULL)) == RDB_LENERR) goto err;
+
+        /* Read field count. */
+        if ((field_count = rdbLoadLen(rdb, NULL)) == RDB_LENERR)
+            goto err;
+
+        /* Allocate fields array. */
+        sds *fields = zmalloc(sizeof(sds) * field_count);
+
+        /* Read each field name. */
+        for (uint64_t j = 0; j < field_count; j++) {
+            fields[j] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
+            if (fields[j] == NULL) {
+                for (uint64_t k = 0; k < j; k++) sdsfree(fields[k]);
+                zfree(fields);
+                goto err;
+            }
+        }
+
+        /* Get or create template. */
+        hashTemplate *tmpl = hashTemplateGetOrCreate(fields, field_count);
+
+        /* Grow rdb_tmpls if needed to fit saved ID. */
+        if (id >= rdb_tmpls_cap) {
+            size_t newcap = rdb_tmpls_cap ? rdb_tmpls_cap * 2 : 16;
+            while (newcap <= id) newcap *= 2;
+            rdb_tmpls = zrealloc(rdb_tmpls,
+                                 sizeof(hashTemplate *) * newcap);
+            memset(rdb_tmpls + rdb_tmpls_cap, 0,
+                   sizeof(hashTemplate *) * (newcap - rdb_tmpls_cap));
+            rdb_tmpls_cap = newcap;
+        }
+        rdb_tmpls[id] = tmpl;
+
+        /* Free fields array (template made copies). */
+        for (uint64_t j = 0; j < field_count; j++) sdsfree(fields[j]);
+        zfree(fields);
+    }
+
+    serverLog(LL_DEBUG, "Loaded %lu hash templates from RDB", (unsigned long)num_tmpls);
+    return C_OK;
+
+err:
+    zfree(rdb_tmpls);
+    rdb_tmpls = NULL;
+    rdb_tmpls_cap = 0;
+    return C_ERR;
+}
+
+/* Get template by saved ID (for loading keys). */
+hashTemplate *rdbGetHashTemplateById(uint64_t id) {
+    if (id >= rdb_tmpls_cap) return NULL;
+    return rdb_tmpls[id];
+}
+
+/* Clear RDB template array after load. */
+void rdbClearHashTemplates(void) {
+    if (rdb_tmpls) {
+        zfree(rdb_tmpls);
+        rdb_tmpls = NULL;
+        rdb_tmpls_cap = 0;
+    }
+}
+
 ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter, unsigned long long *skipped) {
     dictEntry *de;
     ssize_t written = 0;
@@ -1766,6 +2016,9 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     /* save functions */
     if (!(req & SLAVE_REQ_RDB_EXCLUDE_FUNCTIONS) && rdbSaveFunctions(rdb) == -1) goto werr;
 
+    /* save hash template registry for efficient HashV2 storage */
+    if (!(req & SLAVE_REQ_RDB_EXCLUDE_DATA) && rdbSaveHashTemplates(rdb) == -1) goto werr;
+
     /* save all databases, skip this if we're in functions-only mode */
     if (!(req & SLAVE_REQ_RDB_EXCLUDE_DATA)) {
         for (j = 0; j < server.dbnum; j++) {
@@ -1776,6 +2029,9 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
                 dismissKvstoreBucketsMemory(server.db[j].keys);
         }
     }
+
+    /* Clear RDB saving flag. */
+    server.htemplates->rdb_saving = 0;
 
     if (!(req & SLAVE_REQ_RDB_EXCLUDE_DATA) && rdbSaveModulesAux(rdb, REDISMODULE_AUX_AFTER_RDB) == -1) goto werr;
 
@@ -2625,6 +2881,97 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
 
         /* All pairs should be read by now */
         serverAssert(len == 0);
+
+        /* Try to convert to template-based hash if threshold met. */
+        hashTypeTryConvertToTemplate(o);
+    } else if (rdbtype == RDB_TYPE_HASH_TEMPLATE) {
+        /* Hash with shared template (HashV2).
+         * Format is same as RDB_TYPE_HASH: len + field-value pairs.
+         * Reconstruct as template-based hash. */
+        uint64_t len;
+        sds *fields = NULL;
+        sds *values = NULL;
+
+        len = rdbLoadLen(rdb, NULL);
+        if (len == RDB_LENERR) return NULL;
+        if (len == 0) goto emptykey;
+
+        /* Allocate arrays for fields and values. */
+        fields = zmalloc(sizeof(sds) * len);
+        values = zmalloc(sizeof(sds) * len);
+
+        /* Load all field-value pairs. */
+        for (uint64_t i = 0; i < len; i++) {
+            fields[i] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
+            if (fields[i] == NULL) {
+                for (uint64_t j = 0; j < i; j++) {
+                    sdsfree(fields[j]);
+                    sdsfree(values[j]);
+                }
+                zfree(fields);
+                zfree(values);
+                return NULL;
+            }
+            values[i] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
+            if (values[i] == NULL) {
+                sdsfree(fields[i]);
+                for (uint64_t j = 0; j < i; j++) {
+                    sdsfree(fields[j]);
+                    sdsfree(values[j]);
+                }
+                zfree(fields);
+                zfree(values);
+                return NULL;
+            }
+        }
+
+        /* Get or create template. */
+        hashTemplate *tmpl = hashTemplateGetOrCreate(fields, len);
+        o = createTmplHashObject(tmpl, values);
+
+        /* Free fields and values arrays. */
+        for (uint64_t i = 0; i < len; i++) {
+            sdsfree(fields[i]);
+            sdsfree(values[i]);
+        }
+        zfree(fields);
+        zfree(values);
+    } else if (rdbtype == RDB_TYPE_HASH_TEMPLATE_REF) {
+        /* Hash with template reference (compact format).
+         * Format: [template_id][value1][value2]... */
+        uint64_t template_id;
+        sds *values = NULL;
+
+        /* Read template ID. */
+        if ((template_id = rdbLoadLen(rdb, NULL)) == RDB_LENERR) return NULL;
+
+        /* Get template from RDB template array. */
+        hashTemplate *tmpl = rdbGetHashTemplateById(template_id);
+        if (tmpl == NULL) {
+            rdbReportCorruptRDB("Invalid hash template ID %lu", (unsigned long)template_id);
+            return NULL;
+        }
+
+        unsigned long long field_count = tmpl->field_count;
+
+        /* Allocate values array. */
+        values = zmalloc(sizeof(sds) * field_count);
+
+        /* Load all values. */
+        for (unsigned long long i = 0; i < field_count; i++) {
+            values[i] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
+            if (values[i] == NULL) {
+                for (unsigned long long j = 0; j < i; j++) sdsfree(values[j]);
+                zfree(values);
+                return NULL;
+            }
+        }
+
+        o = createTmplHashObject(tmpl, values);
+
+        /* Free values array. */
+        for (unsigned long long i = 0; i < field_count; i++) sdsfree(values[i]);
+        zfree(values);
     } else if (rdbtype == RDB_TYPE_HASH_METADATA || rdbtype == RDB_TYPE_HASH_METADATA_PRE_GA) {
         sds value;
         Entry *entry;
@@ -3136,10 +3483,19 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                     goto emptykey;
                 }
 
-                /* Convert listpack to hash table without registering in global HFE DS,
-                 * if has HFEs, since the listpack is not connected yet to the DB */
+                /* Convert listpack to hash table without registering in global
+                 * HFE DS, if has HFEs, since the listpack is not connected
+                 * yet to the DB. */
                 if (hashTypeLength(o, 0) > server.hash_max_listpack_entries)
                     hashTypeConvert(NULL /*db*/, o, OBJ_ENCODING_HT);
+
+                /* Try to convert to template-based hash if threshold
+                 * met. Only for LISTPACK (no HFE). Skip when
+                 * integrity was not deeply validated to avoid
+                 * iterating over a corrupt listpack. */
+                if (rdbtype == RDB_TYPE_HASH_LISTPACK &&
+                    deep_integrity_validation)
+                    hashTypeTryConvertToTemplate(o);
 
                 break;
             default:
@@ -4060,6 +4416,13 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
                 goto eoferr;
             }
             continue;
+        } else if (type == RDB_OPCODE_HASH_TEMPLATES) {
+            /* Load hash template registry. */
+            if (rdbLoadHashTemplates(rdb) != C_OK) {
+                serverLog(LL_WARNING, "Failed loading hash templates");
+                goto eoferr;
+            }
+            continue;
         }
 
         /* If there is no slot info, it means that it's either not cluster mode or we are trying to load legacy RDB file.
@@ -4271,6 +4634,9 @@ int rdbLoadWithEmptyFunc(char *filename, rdbSaveInfo *rsi, int rdbflags, void (*
     fclose(fp);
     if (retval != C_OK && emptyDbFunc)
         emptyDbFunc(); /* Clean up partial db. */
+
+    /* Clear RDB template array after load. */
+    rdbClearHashTemplates();
 
     stopLoading(retval==C_OK);
     /* Reclaim the cache backed by rdb */

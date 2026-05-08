@@ -1,0 +1,26 @@
+{
+    "DISCARD": {
+        "summary": "Removes a single session-local template by name.",
+        "complexity": "O(1)",
+        "group": "hash",
+        "since": "9.0.0",
+        "arity": 3,
+        "container": "HIMPORT",
+        "function": "himportDiscardCommand",
+        "command_flags": [
+            "FAST"
+        ],
+        "acl_categories": [
+            "HASH"
+        ],
+        "reply_schema": {
+            "const": "OK"
+        },
+        "arguments": [
+            {
+                "name": "template-name",
+                "type": "string"
+            }
+        ]
+    }
+}

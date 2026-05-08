@@ -1158,6 +1158,19 @@ void defragKey(defragKeysCtx *ctx, dictEntry *de, dictEntryLink link) {
                 lpt->lp = newzl;
         } else if (ob->encoding == OBJ_ENCODING_HT) {
             defragHash(ctx, ob);
+        } else if (ob->encoding == OBJ_ENCODING_TMPL_LP) {
+            if ((newzl = activeDefragAlloc(ob->ptr)))
+                ob->ptr = newzl;
+        } else if (ob->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+            hashTemplateArray *hta = ob->ptr;
+            hashTemplateArray *newhta = activeDefragAlloc(hta);
+            if (newhta) ob->ptr = hta = newhta;
+            for (unsigned long long i = 0;
+                 i < hta->tmpl->field_count; i++)
+            {
+                sds newsds = activeDefragSds(hta->values[i]);
+                if (newsds) hta->values[i] = newsds;
+            }
         } else {
             serverPanic("Unknown hash encoding");
         }

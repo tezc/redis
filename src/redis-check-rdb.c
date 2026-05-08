@@ -89,6 +89,8 @@ char *rdb_type_string[] = {
     "stream-v4",
     "stream-v5",
     "gcra",
+    "hash-template",
+    "hash-template-ref",
 };
 
 /* Show a few stats collected into 'rdbstate' */

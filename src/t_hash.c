@@ -71,6 +71,13 @@ static size_t hashDictMetadataBytes(dict *d);
 static size_t hashDictWithExpireMetadataBytes(dict *d);
 static void hashDictWithExpireOnRelease(dict *d);
 static kvobj* hashTypeLookupWriteOrCreate(client *c, robj *key);
+void delGenericCommand(client *c, int lazy);
+static void hashTypeConvertTmplLpToListpack(robj *o);
+static void hashTypeConvertTmplLpToHT(robj *o);
+static int hashTypeCanConvertTmplLpToListpack(robj *o);
+void hashTypeConvertTmplArrayToListpack(robj *o);
+static void hashTypeConvertTmplArrayToHT(robj *o);
+static int hashTypeCanConvertTmplArrayToListpack(robj *o);
 
 /*-----------------------------------------------------------------------------
  * Define dictType of hash
@@ -223,6 +230,8 @@ SetExRes hashTypeSetEx(robj *o, sds field, uint64_t expireAt, HashTypeSetEx *exI
 
 void hashTypeSetExDone(HashTypeSetEx *e);
 
+void hashTypeConvertTmplToListpackEx(robj *o);
+
 /*-----------------------------------------------------------------------------
  * Accessor functions for dictType of hash
  *----------------------------------------------------------------------------*/
@@ -294,6 +303,424 @@ struct listpackEx *listpackExCreate(void) {
 static void listpackExFree(listpackEx *lpt) {
     lpFree(lpt->lp);
     zfree(lpt);
+}
+
+/*-----------------------------------------------------------------------------
+ * Hash Template functions (for OBJ_ENCODING_TMPL_LP and OBJ_ENCODING_TMPL_ARRAY)
+ *----------------------------------------------------------------------------*/
+
+#define HASH_TMPL_STACK_ENTRIES 128
+
+/* Global template registry - also accessible via htemplates */
+static hash_templates *htemplates = NULL;
+
+/* Allocate the smallest available template ID and register in by_id. */
+static uint64_t allocateTemplateId(hashTemplate *tmpl) {
+    /* Scan for first free slot. */
+    for (size_t i = 0; i < htemplates->by_id_cap; i++) {
+        if (htemplates->by_id[i] == NULL) {
+            htemplates->by_id[i] = tmpl;
+            return i;
+        }
+    }
+    /* All slots full - grow array. */
+    uint64_t id = htemplates->by_id_cap;
+    htemplates->by_id_cap = htemplates->by_id_cap ? htemplates->by_id_cap * 2 : 16;
+    htemplates->by_id = zrealloc(htemplates->by_id, sizeof(*htemplates->by_id) * htemplates->by_id_cap);
+    memset(htemplates->by_id + id, 0, sizeof(hashTemplate *) * (htemplates->by_id_cap - id));
+    htemplates->by_id[id] = tmpl;
+    return id;
+}
+
+/* Recycle a template ID when template is freed. */
+static void recycleTemplateId(uint64_t id) {
+    htemplates->by_id[id] = NULL;
+
+    if (dictSize(htemplates->registry) == 0) {
+        zfree(htemplates->by_id);
+        htemplates->by_id = NULL;
+        htemplates->by_id_cap = 0;
+    }
+}
+
+/* Lookup template by ID. Returns NULL if invalid. */
+hashTemplate *hashTemplateGetById(uint64_t id) {
+    if (id >= htemplates->by_id_cap) return NULL;
+    return htemplates->by_id[id];
+}
+
+/* Compute SipHash for a single field. */
+static uint64_t computeFieldHash(sds field) {
+    return dictGenHashFunction(field, sdslen(field));
+}
+
+/* Compute commutative hash for a set of fields.
+ * Uses sum of per-field SipHashes so fields can be
+ * incrementally added/removed:
+ *   add:    hash += computeFieldHash(new_field)
+ *   remove: hash -= computeFieldHash(removed_field) */
+static uint64_t computeFieldsHash(sds *fields, unsigned long long field_count) {
+    uint64_t hash = 0;
+    for (unsigned long long i = 0; i < field_count; i++) {
+        hash += computeFieldHash(fields[i]);
+    }
+    return hash;
+}
+
+/* Template registry dict callbacks. Key is hashTemplate*, value is same. */
+static uint64_t templateRegistryHashFunc(const void *key) {
+    const hashTemplate *tmpl = key;
+    return tmpl->hash;
+}
+
+static int templateRegistryKeyCompare(dictCmpCache *cache, const void *k1,
+                                       const void *k2) {
+    UNUSED(cache);
+    const hashTemplate *t1 = k1;
+    const hashTemplate *t2 = k2;
+
+    if (t1->hash != t2->hash) return 0;
+    if (t1->field_count != t2->field_count) return 0;
+
+    for (unsigned long long i = 0; i < t1->field_count; i++) {
+        if (sdscmplen(t1->fields[i], t2->fields[i]) != 0)
+            return 0;
+    }
+    return 1;
+}
+
+static void templateRegistryKeyDestructor(dict *d, void *key) {
+    UNUSED(d);
+    hashTemplate *tmpl = key;
+    /* Recycle the ID for reuse. */
+    recycleTemplateId(tmpl->id);
+    if (tmpl->propargv) {
+        /* propargv[2+2*i]->ptr == fields[i], so decrRefCount frees the sds. */
+        for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+            decrRefCount(tmpl->propargv[2 + 2 * i]);
+        }
+        zfree(tmpl->propargv);
+        zfree(tmpl->fields);
+    } else {
+        for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+            sdsfree(tmpl->fields[i]);
+        }
+        zfree(tmpl->fields);
+    }
+    zfree(tmpl);
+}
+
+static dictType templateRegistryDictType = {
+    templateRegistryHashFunc,      /* hash function */
+    NULL,                          /* key dup */
+    NULL,                          /* val dup */
+    templateRegistryKeyCompare,    /* key compare */
+    templateRegistryKeyDestructor, /* key destructor (key=tmpl) */
+    NULL,                          /* val destructor (val=same as key) */
+    NULL                           /* allow to expand */
+};
+
+/* Initialize hash templates registry. Called from initServer(). */
+void hashTemplatesInit(void) {
+    if (htemplates) return;
+    htemplates = zcalloc(sizeof(hash_templates));
+    htemplates->registry = dictCreate(&templateRegistryDictType);
+    htemplates->deferred_free = NULL;
+    pthread_mutex_init(&htemplates->deferred_lock, NULL);
+    server.htemplates = htemplates;
+}
+
+/* Create a new hash tmpl (internal, not from registry).
+ * fields must be pre-sorted. */
+static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsigned long long field_count) {
+    hashTemplate *tmpl = zmalloc(sizeof(*tmpl));
+    tmpl->hash = hash;
+    tmpl->client_refcount = 0;
+    atomicSet(tmpl->key_refcount, 0);
+    tmpl->field_count = field_count;
+    tmpl->next_deferred = NULL;
+    tmpl->deferred = 0;
+    tmpl->fields = zmalloc(sizeof(sds) * field_count);
+    tmpl->propargv = NULL; /* Lazy: allocated on first propagation. */
+    for (unsigned long long i = 0; i < field_count; i++) {
+        tmpl->fields[i] = sdsdup(fields[i]);
+    }
+    tmpl->id = allocateTemplateId(tmpl);
+    return tmpl;
+}
+
+/* Free tmpl and remove from registry if both refcounts are zero.
+ * Only called from hashTemplateDrainDeferredFree (main thread,
+ * deferred_lock held). */
+static void hashTemplateTryFree(hashTemplate *tmpl) {
+    unsigned long long key_ref;
+    atomicGet(tmpl->key_refcount, key_ref);
+    if (tmpl->client_refcount == 0 && key_ref == 0) {
+        dictDelete(htemplates->registry, tmpl);
+    }
+}
+
+/* Get or create a tmpl for a client template (HIMPORT PREPARE).
+ * Increments client_refcount. fields must be pre-sorted. */
+hashTemplate *hashTemplateGetForClient(sds *fields, unsigned long long field_count) {
+    /* Stack-allocated query template for lookup. */
+    hashTemplate query = {
+        .hash = computeFieldsHash(fields, field_count),
+        .field_count = field_count,
+        .fields = fields
+    };
+
+    dictEntry *de = dictFind(htemplates->registry, &query);
+    if (de) {
+        hashTemplate *tmpl = dictGetKey(de);
+        tmpl->client_refcount++;
+        return tmpl;
+    }
+
+    /* Create new tmpl and add to registry. Key = tmpl itself. */
+    hashTemplate *tmpl = hashTemplateCreateInternal(query.hash, fields, field_count);
+    dictAdd(htemplates->registry, tmpl, NULL);
+    tmpl->client_refcount++;
+    return tmpl;
+}
+
+/* Get or create a tmpl. fields must be pre-sorted.
+ * If hash is 0, it will be computed from fields. */
+hashTemplate *hashTemplateGetOrCreate(sds *fields, unsigned long long field_count) {
+    return hashTemplateGetOrCreateWithHash(
+        computeFieldsHash(fields, field_count), fields, field_count);
+}
+
+/* Get or create a tmpl with pre-computed hash.
+ * Used for incremental hash updates (HDEL/HSET). */
+hashTemplate *hashTemplateGetOrCreateWithHash(uint64_t hash, sds *fields,
+                                              unsigned long long field_count) {
+    hashTemplate query = {
+        .hash = hash,
+        .field_count = field_count,
+        .fields = fields
+    };
+
+    dictEntry *de = dictFind(htemplates->registry, &query);
+    if (de) {
+        return dictGetKey(de);
+    }
+
+    hashTemplate *tmpl = hashTemplateCreateInternal(hash, fields, field_count);
+    dictAdd(htemplates->registry, tmpl, NULL);
+    return tmpl;
+}
+
+/* Increment key_refcount (called when creating a hash key). */
+void hashTemplateRetainForKey(hashTemplate *tmpl) {
+    atomicIncr(tmpl->key_refcount, 1);
+}
+
+/* Push template to deferred free list if not already there.
+ * Called when a refcount drops and template may be freeable. */
+static void hashTemplateDeferFree(hashTemplate *tmpl) {
+    pthread_mutex_lock(&htemplates->deferred_lock);
+    if (!tmpl->deferred) {
+        tmpl->deferred = 1;
+        tmpl->next_deferred = htemplates->deferred_free;
+        htemplates->deferred_free = tmpl;
+    }
+    pthread_mutex_unlock(&htemplates->deferred_lock);
+}
+
+/* Decrement client_refcount. If both refcounts drop to 0,
+ * push to deferred free list for cleanup by serverCron. */
+void hashTemplateReleaseFromClient(hashTemplate *tmpl) {
+    serverAssert(tmpl->client_refcount > 0);
+    tmpl->client_refcount--;
+    unsigned long long key_ref;
+    atomicGet(tmpl->key_refcount, key_ref);
+    if (tmpl->client_refcount == 0 && key_ref == 0) {
+        hashTemplateDeferFree(tmpl);
+    }
+}
+
+/* Decrement key_refcount (called when hash key is deleted).
+ * Thread-safe: uses atomic decrement and deferred free. */
+void hashTemplateReleaseFromKey(hashTemplate *tmpl) {
+    unsigned long long new_val;
+    atomicIncrGet(tmpl->key_refcount, new_val, -1);
+    if (new_val == 0) {
+        hashTemplateDeferFree(tmpl);
+    }
+}
+
+/* Drain deferred free list. Called from serverCron (main thread). */
+void hashTemplateDrainDeferredFree(void) {
+    pthread_mutex_lock(&htemplates->deferred_lock);
+    hashTemplate *head = htemplates->deferred_free;
+    htemplates->deferred_free = NULL;
+    while (head) {
+        hashTemplate *next = head->next_deferred;
+        head->next_deferred = NULL;
+        head->deferred = 0;
+        hashTemplateTryFree(head);
+        head = next;
+    }
+    pthread_mutex_unlock(&htemplates->deferred_lock);
+}
+
+/* Find field index in tmpl using binary search (fields are sorted).
+ * Returns -1 if not found. */
+int hashTemplateFieldIndex(hashTemplate *tmpl, sds field) {
+    int lo = 0, hi = tmpl->field_count - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        int cmp = sdscmplen(field, tmpl->fields[mid]);
+        if (cmp == 0) return mid;
+        if (cmp < 0) hi = mid - 1;
+        else lo = mid + 1;
+    }
+    return -1;
+}
+
+/* Return the equivalent non-template encoding name for OBJECT ENCODING.
+ * Checks field/value sizes and count against listpack limits. */
+char *hashTmplEquivalentEncoding(robj *o) {
+    hashTemplate *tmpl = (o->encoding == OBJ_ENCODING_TMPL_LP) ?
+        hashTemplateLpGetTemplate(o->ptr) :
+        ((hashTemplateArray *)o->ptr)->tmpl;
+
+    if (tmpl->field_count > server.hash_max_listpack_entries)
+        return "hashtable";
+
+    for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+        if (sdslen(tmpl->fields[i]) > server.hash_max_listpack_value)
+            return "hashtable";
+    }
+
+    if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+        unsigned char *lp = o->ptr;
+        unsigned char *p = lpFirst(lp);
+        p = lpNext(lp, p); /* skip template ID */
+        for (unsigned long long i = 0; i < tmpl->field_count && p; i++) {
+            unsigned int vlen;
+            long long vll;
+            unsigned char *vstr = lpGetValue(p, &vlen, &vll);
+            if (vstr && vlen > server.hash_max_listpack_value)
+                return "hashtable";
+            p = lpNext(lp, p);
+        }
+    } else {
+        hashTemplateArray *hta = o->ptr;
+        for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+            if (hta->values[i] && sdslen(hta->values[i]) > server.hash_max_listpack_value)
+                return "hashtable";
+        }
+    }
+
+    return "listpack";
+}
+
+
+/*-----------------------------------------------------------------------------
+ * HashTemplateLp functions (OBJ_ENCODING_TMPL_LP)
+ *
+ * Listpack format: [template_id (varint)][value1][value2]...
+ * o->ptr points directly to the listpack - no struct wrapper.
+ *----------------------------------------------------------------------------*/
+
+/* Get template from listpack (first entry is template ID). */
+hashTemplate *hashTemplateLpGetTemplate(unsigned char *lp) {
+    unsigned char *p = lpFirst(lp);
+    long long id;
+    unsigned char *vstr = lpGetValue(p, NULL, &id);
+    /* Template ID is always stored as integer, vstr should be NULL. */
+    serverAssert(vstr == NULL);
+    return hashTemplateGetById((uint64_t)id);
+}
+
+/* Replace template ID in listpack. Does NOT update refcounts. */
+unsigned char *hashTemplateLpSetTemplate(unsigned char *lp, hashTemplate *tmpl) {
+    unsigned char *p = lpFirst(lp);
+    return lpReplaceInteger(lp, &p, (long long)tmpl->id);
+}
+
+/* Get pointer to first value entry (skip template ID). */
+static unsigned char *hashTemplateLpFirstValue(unsigned char *lp) {
+    unsigned char *p = lpFirst(lp);  /* template ID entry */
+    return lpNext(lp, p);            /* first value */
+}
+
+/* Create listpack with template ID and values. Increments key_refcount. */
+unsigned char *hashTemplateLpCreate(hashTemplate *tmpl, sds *values) {
+    hashTemplateRetainForKey(tmpl);
+
+    unsigned long long n = tmpl->field_count;
+    /* +1 for template ID entry */
+    listpackEntry stack_entries[HASH_TMPL_STACK_ENTRIES + 1];
+    listpackEntry *entries = (n + 1 <= HASH_TMPL_STACK_ENTRIES + 1) ?
+                             stack_entries :
+                             zmalloc(sizeof(listpackEntry) * (n + 1));
+
+    /* First entry: template ID */
+    entries[0].lval = (long long)tmpl->id;
+    entries[0].sval = NULL;
+
+    /* Remaining entries: values */
+    for (unsigned long long i = 0; i < n; i++) {
+        entries[i + 1].sval = (unsigned char *)values[i];
+        entries[i + 1].slen = sdslen(values[i]);
+    }
+
+    unsigned char *lp = lpBatchInsert(NULL, NULL, LP_BEFORE, entries, n + 1, NULL);
+    if (entries != stack_entries) zfree(entries);
+
+    return lp;
+}
+
+/* Free a template listpack (release template ref and free lp). */
+void hashTemplateLpFree(unsigned char *lp) {
+    hashTemplate *tmpl = hashTemplateLpGetTemplate(lp);
+    hashTemplateReleaseFromKey(tmpl);
+    lpFree(lp);
+}
+
+/*-----------------------------------------------------------------------------
+ * hashTemplateArray functions (OBJ_ENCODING_TMPL_ARRAY)
+ *----------------------------------------------------------------------------*/
+
+/* Create a new hashTemplateArray. Increments key_refcount.
+ * If values is NULL, creates empty array. If take is set,
+ * takes ownership of the SDS strings in values array.
+ * Otherwise copies them with sdsdup. */
+hashTemplateArray *hashTemplateArrayCreate(hashTemplate *tmpl,
+                                           sds *values,
+                                           int take) {
+    hashTemplateRetainForKey(tmpl);
+    unsigned long long n = tmpl->field_count;
+    hashTemplateArray *hta =
+        zmalloc(sizeof(*hta) + sizeof(sds) * n);
+    hta->tmpl = tmpl;
+    if (values) {
+        for (unsigned long long i = 0; i < n; i++) {
+            hta->values[i] = take ?
+                values[i] : sdsdup(values[i]);
+        }
+    } else {
+        memset(hta->values, 0, sizeof(sds) * n);
+    }
+    return hta;
+}
+
+/* Free a hashTemplateArray (release template ref and free data). */
+void hashTemplateArrayFree(hashTemplateArray *hta) {
+    for (unsigned long long i = 0; i < hta->tmpl->field_count; i++) {
+        if (hta->values[i]) sdsfree(hta->values[i]);
+    }
+    hashTemplateReleaseFromKey(hta->tmpl);
+    zfree(hta);
+}
+
+/* Get value at field index from hashTemplateArray. Returns NULL if not set. */
+sds hashTemplateArrayGet(hashTemplateArray *hta, int field_idx) {
+    if (field_idx < 0 || (unsigned long long)field_idx >= hta->tmpl->field_count) return NULL;
+    return hta->values[field_idx];
 }
 
 struct lpFingArgs {
@@ -591,7 +1018,7 @@ int hashTypeIsExpired(const robj *o, uint64_t expireAt) {
 
 /* Returns listpack pointer of the object. */
 unsigned char *hashTypeListpackGetLp(robj *o) {
-    if (o->encoding == OBJ_ENCODING_LISTPACK)
+    if (o->encoding == OBJ_ENCODING_LISTPACK || o->encoding == OBJ_ENCODING_TMPL_LP)
         return o->ptr;
     else if (o->encoding == OBJ_ENCODING_LISTPACK_EX)
         return ((listpackEx*)o->ptr)->lp;
@@ -603,39 +1030,75 @@ unsigned char *hashTypeListpackGetLp(robj *o) {
  * Hash type API
  *----------------------------------------------------------------------------*/
 
+int hashFitsInTmplLp(unsigned long long count, sds *values) {
+    if ((size_t)count > server.hash_max_listpack_entries)
+        return 0;
+
+    size_t sum = 0;
+    for (unsigned long long i = 0; i < count; i++) {
+        size_t len = sdslen(values[i]);
+        if (len > server.hash_max_listpack_value)
+            return 0;
+        sum += len;
+    }
+
+    return lpSafeToAdd(NULL, sum);
+}
+
+robj *createTmplHashObject(hashTemplate *tmpl, sds *values) {
+    robj *o;
+    if (hashFitsInTmplLp(tmpl->field_count, values)) {
+        o = createObject(OBJ_HASH, hashTemplateLpCreate(tmpl, values));
+        o->encoding = OBJ_ENCODING_TMPL_LP;
+    } else {
+        o = createObject(OBJ_HASH, hashTemplateArrayCreate(tmpl, values, 0));
+        o->encoding = OBJ_ENCODING_TMPL_ARRAY;
+    }
+    return o;
+}
+
 /* Check the length of a number of objects to see if we need to convert a
  * listpack to a real hash. Note that we only check string encoded objects
  * as their string length can be queried in constant time. */
 void hashTypeTryConversion(redisDb *db, kvobj *o, robj **argv, int start, int end) {
-    int i;
-    size_t sum = 0;
+    int tmpl_lp = (o->encoding == OBJ_ENCODING_TMPL_LP);
+    int target_enc = tmpl_lp ? OBJ_ENCODING_TMPL_ARRAY : OBJ_ENCODING_HT;
 
-    if (o->encoding != OBJ_ENCODING_LISTPACK && o->encoding != OBJ_ENCODING_LISTPACK_EX)
-        return;
-
-    /* We guess that most of the values in the input are unique, so
-     * if there are enough arguments we create a pre-sized hash, which
-     * might over allocate memory if there are duplicates. */
-    size_t new_fields = (end - start + 1) / 2;
-    if (new_fields > server.hash_max_listpack_entries) {
-        hashTypeConvert(db, o, OBJ_ENCODING_HT);
-        dictExpand(o->ptr, new_fields);
+    /* TMPL_ARRAY and HT don't need conversion checks. */
+    if (o->encoding != OBJ_ENCODING_LISTPACK &&
+        o->encoding != OBJ_ENCODING_LISTPACK_EX &&
+        o->encoding != OBJ_ENCODING_TMPL_LP)
+    {
         return;
     }
 
-    for (i = start; i <= end; i++) {
-        if (!sdsEncodedObject(argv[i]))
-            continue;
+    /* Determine target encoding for conversion. */
+    if (!tmpl_lp) {
+        /* Check field count limit for regular listpack. */
+        size_t new_fields = (end - start + 1) / 2;
+        if (new_fields > server.hash_max_listpack_entries) {
+            hashTypeConvert(db, o, OBJ_ENCODING_HT);
+            dictExpand(o->ptr, new_fields);
+            return;
+        }
+    }
+
+    /* Check value sizes (and field sizes for non-TMPL_LP). */
+    size_t sum = 0;
+    for (int i = start; i <= end; i++) {
+        if (tmpl_lp && ((i - start) % 2 == 0)) continue;
+        if (!sdsEncodedObject(argv[i])) continue;
+
         size_t len = sdslen(argv[i]->ptr);
         if (len > server.hash_max_listpack_value) {
-            hashTypeConvert(db, o, OBJ_ENCODING_HT);
+            hashTypeConvert(db, o, target_enc);
             return;
         }
         sum += len;
     }
-    if (!lpSafeToAdd(hashTypeListpackGetLp(o), sum)) {
-        hashTypeConvert(db, o, OBJ_ENCODING_HT);
-    }
+
+    if (!lpSafeToAdd(hashTypeListpackGetLp(o), sum))
+        hashTypeConvert(db, o, target_enc);
 }
 
 /* Get the value from a listpack encoded hash, identified by field. */
@@ -756,6 +1219,29 @@ GetFieldRes hashTypeGetValue(redisDb *db, kvobj *o, sds field, unsigned char **v
 
         *vstr = (unsigned char*) value;
         *vlen = sdslen(value);
+    } else if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+        unsigned char *lp = o->ptr;
+        hashTemplate *tmpl = hashTemplateLpGetTemplate(lp);
+        int idx = hashTemplateFieldIndex(tmpl, field);
+        if (idx < 0) return GETF_NOT_FOUND;
+
+        /* Get value at index (idx+1 to skip template ID entry). */
+        unsigned char *p = lpSeek(lp, idx + 1);
+        if (!p) return GETF_NOT_FOUND;
+
+        *vstr = lpGetValue(p, vlen, vll);
+        *expiredAt = EB_EXPIRE_TIME_INVALID;
+        res = GETF_OK;
+    } else if (o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        hashTemplateArray *hta = o->ptr;
+        int idx = hashTemplateFieldIndex(hta->tmpl, field);
+        if (idx < 0) return GETF_NOT_FOUND;
+
+        sds value = hta->values[idx];
+        *vstr = (unsigned char*) value;
+        *vlen = sdslen(value);
+        *expiredAt = EB_EXPIRE_TIME_INVALID;
+        res = GETF_OK;
     } else {
         serverPanic("Unknown hash encoding");
     }
@@ -916,13 +1402,89 @@ static_assert(HASH_SET_TAKE_VALUE == ENTRY_TAKE_VALUE, "ENTRY_TAKE_VALUE must ma
 int hashTypeSet(redisDb *db, kvobj *o, sds field, sds value, int flags) {
     int update = 0;
 
-    /* Check if the field is too long for listpack, and convert before adding the item.
-     * This is needed for HINCRBY* case since in other commands this is handled early by
-     * hashTypeTryConversion, so this check will be a NOP. */
-    if (o->encoding == OBJ_ENCODING_LISTPACK  ||
-        o->encoding == OBJ_ENCODING_LISTPACK_EX) {
-        if (sdslen(field) > server.hash_max_listpack_value || sdslen(value) > server.hash_max_listpack_value)
-            hashTypeConvert(db, o, OBJ_ENCODING_HT);
+    /* Handle template encodings. */
+    if (o->encoding == OBJ_ENCODING_TMPL_LP ||
+        o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        hashTemplate *tmpl = (o->encoding == OBJ_ENCODING_TMPL_LP) ?
+                             hashTemplateLpGetTemplate(o->ptr) :
+                             ((hashTemplateArray *)o->ptr)->tmpl;
+
+        /* Check if field exists in tmpl. */
+        int field_idx = hashTemplateFieldIndex(tmpl, field);
+        if (field_idx >= 0) {
+            /* Field exists - update value in place. */
+            if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+                unsigned char *lp = o->ptr;
+                /* +1 to skip template ID entry */
+                unsigned char *p = lpSeek(lp, field_idx + 1);
+                o->ptr = lpReplace(lp, &p,
+                                   (unsigned char *)value, sdslen(value));
+            } else {
+                hashTemplateArray *hta = o->ptr;
+                if (hta->values[field_idx]) sdsfree(hta->values[field_idx]);
+                hta->values[field_idx] = sdsdup(value);
+            }
+            update = 1;
+            goto cleanup;
+        }
+
+        /* Field not in tmpl - need new tmpl with additional field.
+         * Build sorted new_fields array and find insert position. */
+        unsigned long long new_field_count = tmpl->field_count + 1;
+        sds *new_fields = zmalloc(sizeof(sds) * new_field_count);
+        long long insert_pos = -1;
+
+        long long j = 0;
+        for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+            if (insert_pos < 0 && sdscmplen(field, tmpl->fields[i]) < 0) {
+                new_fields[j++] = field;
+                insert_pos = i;
+            }
+            new_fields[j++] = tmpl->fields[i];
+        }
+        if (insert_pos < 0) {
+            new_fields[j] = field;
+            insert_pos = tmpl->field_count;
+        }
+
+        /* Incremental hash: add new field's hash. */
+        uint64_t new_hash = tmpl->hash + computeFieldHash(field);
+        hashTemplate *new_tmpl =
+            hashTemplateGetOrCreateWithHash(new_hash, new_fields, new_field_count);
+        hashTemplateRetainForKey(new_tmpl);
+        zfree(new_fields);
+
+        /* Insert value at insert_pos in existing structure. */
+        if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+            unsigned char *lp = o->ptr;
+            /* Update template ID. */
+            lp = hashTemplateLpSetTemplate(lp, new_tmpl);
+            /* Insert value at position (offset +1 for template ID). */
+            if ((unsigned long long)insert_pos == tmpl->field_count) {
+                lp = lpAppend(lp, (unsigned char *)value, sdslen(value));
+            } else {
+                unsigned char *p = lpSeek(lp, insert_pos + 1);
+                lp = lpInsertString(lp, (unsigned char *)value,
+                                    sdslen(value), p, LP_BEFORE, NULL);
+            }
+            hashTemplateReleaseFromKey(tmpl);
+            o->ptr = lp;
+        } else {
+            hashTemplateArray *hta = o->ptr;
+            /* Expand struct and shift elements to make room. */
+            hta = zrealloc(hta, sizeof(*hta) + sizeof(sds) * new_field_count);
+            if ((unsigned long long)insert_pos < tmpl->field_count) {
+                memmove(&hta->values[insert_pos + 1], &hta->values[insert_pos],
+                        sizeof(sds) * (tmpl->field_count - insert_pos));
+            }
+            hta->values[insert_pos] = sdsdup(value);
+            hashTemplateReleaseFromKey(tmpl);
+            hta->tmpl = new_tmpl;
+            o->ptr = hta;
+        }
+
+        /* update = 0 since we added a new field */
+        goto cleanup;
     }
 
     if (o->encoding == OBJ_ENCODING_LISTPACK) {
@@ -1057,10 +1619,19 @@ int hashTypeSet(redisDb *db, kvobj *o, sds field, sds value, int flags) {
         serverPanic("Unknown hash encoding");
     }
 
+cleanup:
     /* Free SDS strings we did not referenced elsewhere if the flags
      * want this function to be responsible. */
     if (flags & HASH_SET_TAKE_FIELD && field) sdsfree(field);
     if (flags & HASH_SET_TAKE_VALUE && value) sdsfree(value);
+
+    /* Auto-convert to template if threshold met and not already template. */
+    if (!update && server.rdb_load_hash_template_threshold_fields > 0 &&
+        (o->encoding == OBJ_ENCODING_LISTPACK || o->encoding == OBJ_ENCODING_HT))
+    {
+        hashTypeTryConvertToTemplate(o);
+    }
+
     return update;
 }
 
@@ -1215,6 +1786,16 @@ int hashTypeSetExInit(robj *key, kvobj *o, client *c, redisDb *db,
     /* Take care that HASH support expiration */
     if (o->encoding == OBJ_ENCODING_LISTPACK) {
         hashTypeConvert(c->db, o, OBJ_ENCODING_LISTPACK_EX);
+    } else if (o->encoding == OBJ_ENCODING_TMPL_LP ||
+               o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        /* Convert tmpl hash to listpackex, then promote
+         * to HT if field count exceeds listpack limit. */
+        hashTypeConvertTmplToListpackEx(o);
+        if (hashTypeLength(o, 0) >
+            server.hash_max_listpack_entries)
+        {
+            hashTypeConvert(c->db, o, OBJ_ENCODING_HT);
+        }
     } else if (o->encoding == OBJ_ENCODING_HT) {
         /* Take care dict has HFE metadata */
         if (!isDictWithMetaHFE(ht)) {
@@ -1319,9 +1900,128 @@ int hashTypeDelete(robj *o, void *field) {
         if (dictDelete((dict*)o->ptr, field) == C_OK) {
             deleted = 1;
         }
+    } else if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+        unsigned char *lp = o->ptr;
+        hashTemplate *tmpl = hashTemplateLpGetTemplate(lp);
+        int idx = hashTemplateFieldIndex(tmpl, field);
+        if (idx >= 0) {
+            int old_count = tmpl->field_count;
+            int new_count = old_count - 1;
+
+            if (new_count == 0) {
+                /* Last field deleted - convert to empty listpack. */
+                hashTemplateLpFree(lp);
+                o->ptr = lpNew(0);
+                o->encoding = OBJ_ENCODING_LISTPACK;
+            } else {
+                /* Incremental hash: subtract removed field's hash. */
+                uint64_t new_hash = tmpl->hash -
+                    computeFieldHash(tmpl->fields[idx]);
+
+                /* Build fields array without deleted field (already sorted). */
+                sds stack_fields[HASH_TMPL_STACK_ENTRIES];
+                sds *new_fields = (new_count <= HASH_TMPL_STACK_ENTRIES) ?
+                    stack_fields : zmalloc(sizeof(sds) * new_count);
+                int j = 0;
+                for (int i = 0; i < old_count; i++) {
+                    if (i != idx) new_fields[j++] = tmpl->fields[i];
+                }
+
+                /* Lookup/create template by incremental hash. */
+                hashTemplate *new_tmpl =
+                    hashTemplateGetOrCreateWithHash(new_hash, new_fields,
+                                                   new_count);
+
+                /* Delete value at idx position in listpack.
+                 * Index 0 is template ID, values start at 1. */
+                unsigned char *p = lpSeek(lp, idx + 1);
+                lp = lpDeleteRangeWithEntry(lp, &p, 1);
+
+                /* Update template ID in listpack. */
+                lp = hashTemplateLpSetTemplate(lp, new_tmpl);
+                hashTemplateRetainForKey(new_tmpl);
+                hashTemplateReleaseFromKey(tmpl);
+                o->ptr = lp;
+
+                if (new_fields != stack_fields) zfree(new_fields);
+            }
+            deleted = 1;
+        }
+    } else if (o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        hashTemplateArray *hta = o->ptr;
+        hashTemplate *tmpl = hta->tmpl;
+        int idx = hashTemplateFieldIndex(tmpl, field);
+        if (idx >= 0) {
+            int old_count = tmpl->field_count;
+            int new_count = old_count - 1;
+
+            if (new_count == 0) {
+                /* Last field deleted - convert to empty listpack. */
+                hashTemplateArrayFree(hta);
+                o->ptr = lpNew(0);
+                o->encoding = OBJ_ENCODING_LISTPACK;
+            } else {
+                /* Incremental hash: subtract removed field's hash. */
+                uint64_t new_hash = tmpl->hash -
+                    computeFieldHash(tmpl->fields[idx]);
+
+                /* Build fields array without deleted field (already sorted). */
+                sds stack_fields[HASH_TMPL_STACK_ENTRIES];
+                sds *new_fields = (new_count <= HASH_TMPL_STACK_ENTRIES) ?
+                    stack_fields : zmalloc(sizeof(sds) * new_count);
+                int j = 0;
+                for (int i = 0; i < old_count; i++) {
+                    if (i != idx) new_fields[j++] = tmpl->fields[i];
+                }
+
+                /* Lookup/create template by incremental hash. */
+                hashTemplate *new_tmpl =
+                    hashTemplateGetOrCreateWithHash(new_hash, new_fields,
+                                                   new_count);
+                hashTemplateRetainForKey(new_tmpl);
+
+                /* Remove value at idx, shift remaining down. */
+                sdsfree(hta->values[idx]);
+                memmove(&hta->values[idx], &hta->values[idx + 1],
+                        sizeof(sds) * (old_count - idx - 1));
+
+                /* Update template and shrink allocation. */
+                hta->tmpl = new_tmpl;
+                hashTemplateReleaseFromKey(tmpl);
+                hta = zrealloc(hta, sizeof(*hta) + sizeof(sds) * new_count);
+                o->ptr = hta;
+
+                if (new_fields != stack_fields) zfree(new_fields);
+            }
+            deleted = 1;
+        }
     } else {
         serverPanic("Unknown hash encoding");
     }
+
+    /* Auto-convert from template to regular if below threshold. */
+    if (deleted && server.rdb_load_hash_template_threshold_fields > 0 &&
+        (o->encoding == OBJ_ENCODING_TMPL_LP ||
+         o->encoding == OBJ_ENCODING_TMPL_ARRAY))
+    {
+        unsigned long fc = hashTypeLength(o, 0);
+        if (fc < (unsigned long)
+            server.rdb_load_hash_template_threshold_fields)
+        {
+            if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+                if (hashTypeCanConvertTmplLpToListpack(o))
+                    hashTypeConvertTmplLpToListpack(o);
+                else
+                    hashTypeConvertTmplLpToHT(o);
+            } else {
+                if (hashTypeCanConvertTmplArrayToListpack(o))
+                    hashTypeConvertTmplArrayToListpack(o);
+                else
+                    hashTypeConvertTmplArrayToHT(o);
+            }
+        }
+    }
+
     return deleted;
 }
 
@@ -1355,6 +2055,12 @@ unsigned long hashTypeLength(const robj *o, int subtractExpiredFields) {
                                               commandTimeSnapshot());
         }
         length = dictSize(d) - expiredItems;
+    } else if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+        /* lpLength - 1: first entry is template ID, rest are values */
+        length = lpLength(o->ptr) - 1;
+    } else if (o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        hashTemplateArray *hta = o->ptr;
+        length = hta->tmpl->field_count;
     } else {
         serverPanic("Unknown hash encoding");
     }
@@ -1372,6 +2078,15 @@ size_t hashTypeAllocSize(const robj *o) {
     } else if (o->encoding == OBJ_ENCODING_HT) {
         dict *d = o->ptr;
         size += sizeof(dict) + dictMemUsage(d) + *htGetMetadataSize(d);
+    } else if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+        unsigned char *lp = o->ptr;
+        size = lpBytes(lp);
+    } else if (o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        hashTemplateArray *hta = o->ptr;
+        size = sizeof(hashTemplateArray) + sizeof(sds) * hta->tmpl->field_count;
+        for (unsigned long long i = 0; i < hta->tmpl->field_count; i++) {
+            if (hta->values[i]) size += sdsAllocSize(hta->values[i]);
+        }
     } else {
         serverPanic("Unknown hash encoding");
     }
@@ -1391,6 +2106,16 @@ void hashTypeInitIterator(hashTypeIterator *hi, robj *subject) {
         hi->expire_time = EB_EXPIRE_TIME_INVALID;
     } else if (hi->encoding == OBJ_ENCODING_HT) {
         dictInitIterator(&hi->di, subject->ptr);
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_LP) {
+        hi->tmpl_index = -1;  /* Not started yet. */
+        hi->vptr = NULL;
+        hi->expire_time = EB_EXPIRE_TIME_INVALID;
+        hi->tmpl = hashTemplateLpGetTemplate(subject->ptr);
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        hi->tmpl_index = -1;  /* Not started yet. */
+        hi->vptr = NULL;
+        hi->expire_time = EB_EXPIRE_TIME_INVALID;
+        hi->tmpl = ((hashTemplateArray *)subject->ptr)->tmpl;
     } else {
         serverPanic("Unknown hash encoding");
     }
@@ -1486,6 +2211,19 @@ int hashTypeNext(hashTypeIterator *hi, int skipExpiredFields) {
             return C_OK;
         }
         return C_ERR;
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_LP) {
+        unsigned char *lp = hi->subject->ptr;
+
+        /* Advance to next field. lpNext returning NULL signals end. */
+        hi->tmpl_index++;
+        hi->vptr = (hi->tmpl_index == 0) ?
+                   hashTemplateLpFirstValue(lp) : lpNext(lp, hi->vptr);
+        if (!hi->vptr) return C_ERR;
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        /* Advance to next field. */
+        hi->tmpl_index++;
+        if ((unsigned long long)hi->tmpl_index >= hi->tmpl->field_count)
+            return C_ERR;
     } else {
         serverPanic("Unknown hash encoding");
     }
@@ -1566,6 +2304,31 @@ void hashTypeCurrentObject(hashTypeIterator *hi,
         hashTypeCurrentFromHashTable(hi, what, &ele, &eleLen, expireTime);
         *vstr = (unsigned char*) ele;
         *vlen = eleLen;
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_LP) {
+        if (what & OBJ_HASH_KEY) {
+            /* Return field name from tmpl. */
+            sds field = hi->tmpl->fields[hi->tmpl_index];
+            *vstr = (unsigned char*) field;
+            *vlen = sdslen(field);
+        } else {
+            /* Return value from listpack. */
+            *vstr = lpGetValue(hi->vptr, vlen, vll);
+        }
+        if (expireTime) *expireTime = EB_EXPIRE_TIME_INVALID;
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        hashTemplateArray *hta = hi->subject->ptr;
+        if (what & OBJ_HASH_KEY) {
+            /* Return field name from tmpl. */
+            sds field = hi->tmpl->fields[hi->tmpl_index];
+            *vstr = (unsigned char*) field;
+            *vlen = sdslen(field);
+        } else {
+            /* Return value from array. */
+            sds val = hta->values[hi->tmpl_index];
+            *vstr = (unsigned char*) val;
+            *vlen = sdslen(val);
+        }
+        if (expireTime) *expireTime = EB_EXPIRE_TIME_INVALID;
     } else {
         serverPanic("Unknown hash encoding");
     }
@@ -1628,6 +2391,258 @@ static kvobj *hashTypeLookupWriteOrCreate(client *c, robj *key) {
     return kv;
 }
 
+/* Convert tmpl-based hash to LISTPACK_EX for field expiration support.
+ * Called when expiration is about to be set on a TMPL_LP or TMPL_ARRAY. */
+void hashTypeConvertTmplToListpackEx(robj *o) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP ||
+                 o->encoding == OBJ_ENCODING_TMPL_ARRAY);
+
+    /* Build field-value-ttl listpack from tmpl-based hash. */
+    unsigned char *new_lp = lpNew(0);
+
+    if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+        unsigned char *old_lp = o->ptr;
+        hashTemplate *tmpl = hashTemplateLpGetTemplate(old_lp);
+        unsigned char *p = hashTemplateLpFirstValue(old_lp);
+
+        for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+            /* Append field name from tmpl. */
+            sds field = tmpl->fields[i];
+            new_lp = lpAppend(new_lp, (unsigned char *)field, sdslen(field));
+
+            /* Append value from listpack. */
+            unsigned int vlen;
+            long long vll;
+            unsigned char *vstr = lpGetValue(p, &vlen, &vll);
+            if (vstr)
+                new_lp = lpAppend(new_lp, vstr, vlen);
+            else
+                new_lp = lpAppendInteger(new_lp, vll);
+
+            /* Append TTL (no expiration). */
+            new_lp = lpAppendInteger(new_lp, HASH_LP_NO_TTL);
+
+            p = lpNext(old_lp, p);
+        }
+        hashTemplateLpFree(old_lp);
+    } else {
+        hashTemplateArray *hta = o->ptr;
+
+        for (unsigned long long i = 0; i < hta->tmpl->field_count; i++) {
+            /* Append field name from tmpl. */
+            sds field = hta->tmpl->fields[i];
+            new_lp = lpAppend(new_lp, (unsigned char *)field, sdslen(field));
+
+            /* Append value from array. */
+            sds val = hta->values[i];
+            new_lp = lpAppend(new_lp, (unsigned char *)val, sdslen(val));
+
+            /* Append TTL (no expiration). */
+            new_lp = lpAppendInteger(new_lp, HASH_LP_NO_TTL);
+        }
+        hashTemplateArrayFree(hta);
+    }
+
+    listpackEx *lpt = listpackExCreate();
+    lpt->lp = new_lp;
+    o->encoding = OBJ_ENCODING_LISTPACK_EX;
+    o->ptr = lpt;
+}
+
+/* Forward declaration. */
+void hashTypeConvertListpack(robj *o, int enc);
+
+/* Check if TMPL_LP can be converted to LISTPACK.
+ * Returns 1 if it fits, 0 otherwise. */
+static int hashTypeCanConvertTmplLpToListpack(robj *o) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
+
+    unsigned char *lp = o->ptr;
+    hashTemplate *tmpl = hashTemplateLpGetTemplate(lp);
+
+    /* Check field count. */
+    if (tmpl->field_count > server.hash_max_listpack_entries)
+        return 0;
+
+    /* Check field name sizes and calculate total. */
+    size_t field_names_size = 0;
+    for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+        size_t flen = sdslen(tmpl->fields[i]);
+        if (flen > server.hash_max_listpack_value)
+            return 0;
+        field_names_size += flen;
+    }
+
+    /* Check total size: current lp (has values) + field names. */
+    if (!lpSafeToAdd(NULL, lpBytes(lp) + field_names_size))
+        return 0;
+
+    return 1;
+}
+
+/* TMPL_LP -> LISTPACK */
+static void hashTypeConvertTmplLpToListpack(robj *o) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
+
+    unsigned char *old_lp = o->ptr;
+    hashTemplate *tmpl = hashTemplateLpGetTemplate(old_lp);
+    unsigned char *p = hashTemplateLpFirstValue(old_lp);
+
+    unsigned char *new_lp = lpNew(0);
+    for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+        sds field = tmpl->fields[i];
+        new_lp = lpAppend(new_lp, (unsigned char *)field, sdslen(field));
+
+        unsigned int vlen;
+        long long vll;
+        unsigned char *vstr = lpGetValue(p, &vlen, &vll);
+        if (vstr)
+            new_lp = lpAppend(new_lp, vstr, vlen);
+        else
+            new_lp = lpAppendInteger(new_lp, vll);
+        p = lpNext(old_lp, p);
+    }
+
+    hashTemplateLpFree(old_lp);
+    o->encoding = OBJ_ENCODING_LISTPACK;
+    o->ptr = new_lp;
+}
+
+/* TMPL_LP -> LISTPACK_EX */
+static void hashTypeConvertTmplLpToListpackEx(robj *o) {
+    hashTypeConvertTmplLpToListpack(o);
+    hashTypeConvertListpack(o, OBJ_ENCODING_LISTPACK_EX);
+}
+
+/* TMPL_LP -> TMPL_ARRAY */
+static void hashTypeConvertTmplLpToArray(robj *o) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
+
+    unsigned char *lp = o->ptr;
+    hashTemplate *tmpl = hashTemplateLpGetTemplate(lp);
+    unsigned long long field_count = tmpl->field_count;
+
+    sds *values = zmalloc(sizeof(sds) * field_count);
+    unsigned char *p = hashTemplateLpFirstValue(lp);
+    for (unsigned long long i = 0; i < field_count; i++) {
+        unsigned int vlen;
+        long long vll;
+        unsigned char *vstr = lpGetValue(p, &vlen, &vll);
+        if (vstr)
+            values[i] = sdsnewlen(vstr, vlen);
+        else
+            values[i] = sdsfromlonglong(vll);
+        p = lpNext(lp, p);
+    }
+
+    hashTemplateArray *hta =
+        hashTemplateArrayCreate(tmpl, values, 1);
+    zfree(values);
+    hashTemplateLpFree(lp);
+
+    o->encoding = OBJ_ENCODING_TMPL_ARRAY;
+    o->ptr = hta;
+}
+
+/* TMPL_LP -> HT */
+static void hashTypeConvertTmplLpToHT(robj *o) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
+
+    hashTypeIterator hi;
+    hashTypeInitIterator(&hi, o);
+
+    dict *d = dictCreate(&entryHashDictType);
+    dictExpand(d, hashTypeLength(o, 0));
+
+    size_t usable, *alloc_size = htGetMetadataSize(d);
+    while (hashTypeNext(&hi, 0) != C_ERR) {
+        Entry *entry = hashTypeCurrentObjectNewEntry(&hi, &usable);
+        int ret = dictAdd(d, entry, NULL);
+        serverAssert(ret == DICT_OK);
+        *alloc_size += usable;
+    }
+    hashTypeResetIterator(&hi);
+
+    hashTemplateLpFree(o->ptr);
+    o->encoding = OBJ_ENCODING_HT;
+    o->ptr = d;
+}
+
+/* Check if TMPL_ARRAY can be converted to LISTPACK.
+ * Returns 1 if it fits, 0 otherwise. */
+static int hashTypeCanConvertTmplArrayToListpack(robj *o) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_ARRAY);
+
+    hashTemplateArray *hta = o->ptr;
+    hashTemplate *tmpl = hta->tmpl;
+
+    /* Check field count. */
+    if (tmpl->field_count > server.hash_max_listpack_entries)
+        return 0;
+
+    /* Check field name and value sizes. */
+    size_t total_size = 0;
+    for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+        size_t flen = sdslen(tmpl->fields[i]);
+        if (flen > server.hash_max_listpack_value)
+            return 0;
+        total_size += flen;
+
+        size_t vlen = sdslen(hta->values[i]);
+        if (vlen > server.hash_max_listpack_value)
+            return 0;
+        total_size += vlen;
+    }
+
+    if (!lpSafeToAdd(NULL, total_size))
+        return 0;
+
+    return 1;
+}
+
+/* TMPL_ARRAY -> LISTPACK */
+void hashTypeConvertTmplArrayToListpack(robj *o) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_ARRAY);
+
+    hashTemplateArray *hta = o->ptr;
+    unsigned char *new_lp = lpNew(0);
+
+    for (unsigned long long i = 0; i < hta->tmpl->field_count; i++) {
+        sds field = hta->tmpl->fields[i];
+        new_lp = lpAppend(new_lp, (unsigned char *)field, sdslen(field));
+
+        sds val = hta->values[i];
+        new_lp = lpAppend(new_lp, (unsigned char *)val, sdslen(val));
+    }
+
+    hashTemplateArrayFree(hta);
+    o->encoding = OBJ_ENCODING_LISTPACK;
+    o->ptr = new_lp;
+}
+
+/* TMPL_ARRAY -> HT */
+static void hashTypeConvertTmplArrayToHT(robj *o) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_ARRAY);
+
+    hashTypeIterator hi;
+    hashTypeInitIterator(&hi, o);
+
+    dict *d = dictCreate(&entryHashDictType);
+    dictExpand(d, hashTypeLength(o, 0));
+
+    size_t usable, *alloc_size = htGetMetadataSize(d);
+    while (hashTypeNext(&hi, 0) != C_ERR) {
+        Entry *entry = hashTypeCurrentObjectNewEntry(&hi, &usable);
+        int ret = dictAdd(d, entry, NULL);
+        serverAssert(ret == DICT_OK);
+        *alloc_size += usable;
+    }
+    hashTypeResetIterator(&hi);
+
+    hashTemplateArrayFree(o->ptr);
+    o->encoding = OBJ_ENCODING_HT;
+    o->ptr = d;
+}
 
 void hashTypeConvertListpack(robj *o, int enc) {
     serverAssert(o->encoding == OBJ_ENCODING_LISTPACK);
@@ -1745,17 +2760,143 @@ void hashTypeConvertListpackEx(redisDb *db, robj *o, int enc) {
     }
 }
 
-/* NOTE: db can be NULL (Won't register in global HFE DS) */
+/* Convert TMPL_LP to target encoding. */
+void hashTypeConvertTplLp(robj *o, int enc) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
+
+    if (enc == OBJ_ENCODING_TMPL_LP) {
+        /* Nothing to do. */
+    } else if (enc == OBJ_ENCODING_LISTPACK) {
+        if (hashTypeCanConvertTmplLpToListpack(o))
+            hashTypeConvertTmplLpToListpack(o);
+        else
+            hashTypeConvertTmplLpToHT(o);
+    } else if (enc == OBJ_ENCODING_LISTPACK_EX) {
+        if (hashTypeCanConvertTmplLpToListpack(o))
+            hashTypeConvertTmplLpToListpackEx(o);
+        else
+            hashTypeConvertTmplLpToHT(o);
+    } else if (enc == OBJ_ENCODING_TMPL_ARRAY) {
+        hashTypeConvertTmplLpToArray(o);
+    } else if (enc == OBJ_ENCODING_HT) {
+        hashTypeConvertTmplLpToHT(o);
+    } else {
+        serverPanic("Unknown target encoding: %d", enc);
+    }
+}
+
+/* Convert TMPL_ARRAY to target encoding. */
+void hashTypeConvertTplArray(robj *o, int enc) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_ARRAY);
+
+    if (enc == OBJ_ENCODING_TMPL_ARRAY) {
+        /* Nothing to do. */
+    } else if (enc == OBJ_ENCODING_HT) {
+        hashTypeConvertTmplArrayToHT(o);
+    } else {
+        /* TMPL_ARRAY can only go to HT. */
+        serverPanic("Invalid conversion from TMPL_ARRAY to %d", enc);
+    }
+}
+
 void hashTypeConvert(redisDb *db, robj *o, int enc) {
     if (o->encoding == OBJ_ENCODING_LISTPACK) {
         hashTypeConvertListpack(o, enc);
     } else if (o->encoding == OBJ_ENCODING_LISTPACK_EX) {
         hashTypeConvertListpackEx(db, o, enc);
+    } else if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+        hashTypeConvertTplLp(o, enc);
+    } else if (o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        hashTypeConvertTplArray(o, enc);
     } else if (o->encoding == OBJ_ENCODING_HT) {
         serverPanic("Not implemented");
     } else {
         serverPanic("Unknown hash encoding");
     }
+}
+
+/* Try to convert a hash to template-based encoding.
+ * LP → TMPL_LP
+ * HT (no HFE) → TMPL_ARRAY
+ * Returns 1 if converted, 0 otherwise.
+ * Does not convert if:
+ * - encoding is LP_EX (has HFE)
+ * - encoding is HT with HFE
+ * - field count < min_fields
+ * - template threshold not met */
+int hashTypeTryConvertToTemplate(robj *o) {
+    int min_fields = server.rdb_load_hash_template_threshold_fields;
+
+    /* Only LP and HT (without HFE) can be converted. */
+    if (o->encoding == OBJ_ENCODING_LISTPACK_EX) return 0;
+    if (o->encoding == OBJ_ENCODING_TMPL_LP) return 0;
+    if (o->encoding == OBJ_ENCODING_TMPL_ARRAY) return 0;
+    if (o->encoding == OBJ_ENCODING_HT && isDictWithMetaHFE(o->ptr)) return 0;
+
+    /* Check field count threshold. */
+    unsigned long num_fields = hashTypeLength(o, 0);
+    if ((int)num_fields < min_fields) return 0;
+
+    /* Extract fields and values. */
+    sds *fields = zmalloc(sizeof(sds) * num_fields);
+    sds *values = zmalloc(sizeof(sds) * num_fields);
+
+    hashTypeIterator hi;
+    hashTypeInitIterator(&hi, o);
+    int i = 0;
+    while (hashTypeNext(&hi, 0) != C_ERR) {
+        fields[i] = hashTypeCurrentObjectNewSds(&hi, OBJ_HASH_KEY);
+        values[i] = hashTypeCurrentObjectNewSds(&hi, OBJ_HASH_VALUE);
+        i++;
+    }
+    hashTypeResetIterator(&hi);
+
+    /* Sort fields (and values in parallel) so that
+     * hashTemplateGetOrCreate receives pre-sorted fields. */
+    for (unsigned long a = 0; a < num_fields; a++) {
+        for (unsigned long b = a + 1; b < num_fields; b++) {
+            if (sdscmplen(fields[a], fields[b]) > 0) {
+                sds tmp = fields[a];
+                fields[a] = fields[b];
+                fields[b] = tmp;
+                tmp = values[a];
+                values[a] = values[b];
+                values[b] = tmp;
+            }
+        }
+    }
+
+    /* Get or create template. */
+    hashTemplate *tmpl = hashTemplateGetOrCreate(fields, num_fields);
+
+    if (o->encoding == OBJ_ENCODING_LISTPACK) {
+        /* LP → TMPL_LP */
+        unsigned char *new_lp = hashTemplateLpCreate(tmpl, values);
+        zfree(o->ptr);
+        o->ptr = new_lp;
+        o->encoding = OBJ_ENCODING_TMPL_LP;
+    } else {
+        /* HT → TMPL_ARRAY */
+        hashTemplateArray *hta =
+            hashTemplateArrayCreate(tmpl, values, 1);
+        dictRelease(o->ptr);
+        o->ptr = hta;
+        o->encoding = OBJ_ENCODING_TMPL_ARRAY;
+    }
+
+    /* Free temporary arrays (values taken by TMPL_ARRAY,
+     * but fields always need freeing). */
+    for (unsigned long j = 0; j < num_fields; j++)
+        sdsfree(fields[j]);
+    if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+        /* LP path didn't take values. */
+        for (unsigned long j = 0; j < num_fields; j++)
+            sdsfree(values[j]);
+    }
+    zfree(fields);
+    zfree(values);
+
+    return 1;
 }
 
 /* This is a helper function for the COPY command.
@@ -1845,6 +2986,34 @@ robj *hashTypeDup(kvobj *o, uint64_t *minHashExpire) {
 
         hobj = createObject(OBJ_HASH, d);
         hobj->encoding = OBJ_ENCODING_HT;
+    } else if (o->encoding == OBJ_ENCODING_TMPL_LP) {
+        unsigned char *old_lp = o->ptr;
+        hashTemplate *tmpl = hashTemplateLpGetTemplate(old_lp);
+
+        /* Create new listpack copy. */
+        size_t sz = lpBytes(old_lp);
+        unsigned char *new_lp = zmalloc(sz);
+        memcpy(new_lp, old_lp, sz);
+
+        /* Increment refcount for new key. */
+        hashTemplateRetainForKey(tmpl);
+
+        hobj = createObject(OBJ_HASH, new_lp);
+        hobj->encoding = OBJ_ENCODING_TMPL_LP;
+    } else if (o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        hashTemplateArray *hta = o->ptr;
+        unsigned long long n = hta->tmpl->field_count;
+
+        /* Create new array structure with duplicated values. */
+        hashTemplateArray *new_hta = zmalloc(sizeof(*new_hta) + sizeof(sds) * n);
+        new_hta->tmpl = hta->tmpl;
+        hashTemplateRetainForKey(new_hta->tmpl);
+        for (unsigned long long i = 0; i < n; i++) {
+            new_hta->values[i] = sdsdup(hta->values[i]);
+        }
+
+        hobj = createObject(OBJ_HASH, new_hta);
+        hobj->encoding = OBJ_ENCODING_TMPL_ARRAY;
     } else {
         serverPanic("Unknown hash encoding");
     }
@@ -1885,6 +3054,43 @@ void hashTypeRandomElement(robj *hashobj, unsigned long hashsize, CommonEntry *k
     } else if (hashobj->encoding == OBJ_ENCODING_LISTPACK_EX) {
         lpRandomPair(hashTypeListpackGetLp(hashobj), hashsize, (listpackEntry *) key,
                      (listpackEntry *) val, 3);
+    } else if (hashobj->encoding == OBJ_ENCODING_TMPL_LP) {
+        unsigned char *lp = hashobj->ptr;
+        hashTemplate *tmpl = hashTemplateLpGetTemplate(lp);
+        int idx = rand() % tmpl->field_count;
+
+        /* Get field from tmpl. */
+        sds field = tmpl->fields[idx];
+        key->sval = (unsigned char *)field;
+        key->slen = sdslen(field);
+
+        if (val) {
+            /* Get value at index (idx+1 to skip template ID entry). */
+            unsigned char *p = lpSeek(lp, idx + 1);
+            unsigned int vlen;
+            long long vll;
+            val->sval = lpGetValue(p, &vlen, &vll);
+            if (val->sval) {
+                val->slen = vlen;
+            } else {
+                val->lval = vll;
+            }
+        }
+    } else if (hashobj->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        hashTemplateArray *hta = hashobj->ptr;
+        int idx = rand() % hta->tmpl->field_count;
+
+        /* Get field from tmpl. */
+        sds field = hta->tmpl->fields[idx];
+        key->sval = (unsigned char *)field;
+        key->slen = sdslen(field);
+
+        if (val) {
+            /* Get value from array at index. */
+            sds v = hta->values[idx];
+            val->sval = (unsigned char *)v;
+            val->slen = sdslen(v);
+        }
     } else {
         serverPanic("Unknown hash encoding");
     }
@@ -2018,6 +3224,12 @@ static int hashTypeExpireIfNeeded(redisDb *db, kvobj *o) {
 uint64_t hashTypeGetMinExpire(robj *o, int accurate) {
     ExpireMeta *expireMeta = NULL;
 
+    /* TMPL_* encodings don't support field expiration. */
+    if (o->encoding == OBJ_ENCODING_TMPL_LP ||
+        o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        return EB_EXPIRE_TIME_INVALID;
+    }
+
     if (!accurate) {
         if (o->encoding == OBJ_ENCODING_LISTPACK) {
             return EB_EXPIRE_TIME_INVALID;
@@ -2095,6 +3307,12 @@ void hashTypeFree(robj *o) {
             /* Verify hash is not registered in global HFE ds */
             serverAssert(((listpackEx *) o->ptr)->meta.trash == 1);
             listpackExFree(o->ptr);
+            break;
+        case OBJ_ENCODING_TMPL_LP:
+            hashTemplateLpFree(o->ptr);
+            break;
+        case OBJ_ENCODING_TMPL_ARRAY:
+            hashTemplateArrayFree(o->ptr);
             break;
         default:
             serverPanic("Unknown hash encoding type");
@@ -2189,6 +3407,341 @@ void hsetCommand(client *c) {
     vecRelease(vset);
     KSN_INVALIDATE_KVOBJ(kv);
     server.dirty += (c->argc - 2)/2;
+}
+
+/* Per-client template reference (holds client_refcount on hashTemplate). */
+typedef struct himportTemplateRef {
+    sds name;           /* Template name. */
+    hashTemplate *tmpl;  /* Shared tmpl (client_refcount held, sorted fields). */
+    int *value_order;   /* Maps tmpl index -> user argv index (pre-computed). */
+} himportTemplateRef;
+
+#define HIMPORT_TEMPLATES_INIT_CAP 4
+
+/* Container for client's HIMPORT templates (sorted by name). */
+typedef struct himportTemplateList {
+    int count;
+    int cap;
+    himportTemplateRef *arr;
+} himportTemplateList;
+
+static void himportTemplateRefFree(himportTemplateRef *ref) {
+    if (!ref) return;
+    if (ref->name) sdsfree(ref->name);
+    if (ref->tmpl) hashTemplateReleaseFromClient(ref->tmpl);
+    if (ref->value_order) zfree(ref->value_order);
+}
+
+/* Binary search for template by name. Returns index if found,
+ * or -(insertion_point + 1) if not found. */
+static int himportTemplateListSearch(himportTemplateRef *arr,
+                                     int count, sds name) {
+    int lo = 0, hi = count - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        int cmp = sdscmplen(arr[mid].name, name);
+        if (cmp == 0) return mid;
+        if (cmp < 0) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return -(lo + 1);
+}
+
+/* Get template by name from client's template list. */
+static himportTemplateRef *himportTemplateGet(client *c, sds name) {
+    himportTemplateList *list = c->himport_templates;
+    if (!list) return NULL;
+
+    int idx = himportTemplateListSearch(list->arr, list->count, name);
+    return (idx >= 0) ? &list->arr[idx] : NULL;
+}
+
+/* Add or replace a template in client's template list. */
+static void himportTemplateHoldRef(client *c, sds name,
+                                   hashTemplate *tmpl,
+                                   int *value_order) {
+    himportTemplateList *list = c->himport_templates;
+    himportTemplateRef newref = {name, tmpl, value_order};
+
+    if (!list) {
+        list = zmalloc(sizeof(himportTemplateList));
+        list->cap = HIMPORT_TEMPLATES_INIT_CAP;
+        list->arr = zmalloc(sizeof(himportTemplateRef) * list->cap);
+        list->arr[0] = newref;
+        list->count = 1;
+        c->himport_templates = list;
+        return;
+    }
+
+    int idx = himportTemplateListSearch(list->arr, list->count, name);
+    if (idx >= 0) {
+        /* Overwrite existing. */
+        himportTemplateRefFree(&list->arr[idx]);
+        list->arr[idx] = newref;
+        return;
+    }
+
+    /* Insert at sorted position. */
+    int pos = -(idx + 1);
+    if (list->count >= list->cap) {
+        list->cap *= 2;
+        list->arr = zrealloc(list->arr, sizeof(himportTemplateRef) * list->cap);
+    }
+    if (pos < list->count) {
+        memmove(&list->arr[pos + 1], &list->arr[pos],
+                sizeof(himportTemplateRef) * (list->count - pos));
+    }
+    list->arr[pos] = newref;
+    list->count++;
+}
+
+/* Remove a template by name. Returns 1 if found. */
+static int himportTemplateRemove(client *c, sds name) {
+    himportTemplateList *list = c->himport_templates;
+    if (!list) return 0;
+
+    int idx = himportTemplateListSearch(list->arr, list->count, name);
+    if (idx < 0) return 0;
+
+    himportTemplateRefFree(&list->arr[idx]);
+    if (idx < list->count - 1) {
+        memmove(&list->arr[idx], &list->arr[idx + 1],
+                sizeof(himportTemplateRef) * (list->count - 1 - idx));
+    }
+    list->count--;
+    if (list->count == 0) {
+        zfree(list->arr);
+        zfree(list);
+        c->himport_templates = NULL;
+    }
+    return 1;
+}
+
+/* Free client's template list. Called from freeClient(). */
+void himportTemplateFreeList(client *c) {
+    himportTemplateList *list = c->himport_templates;
+    if (!list) return;
+
+    for (int i = 0; i < list->count; i++)
+        himportTemplateRefFree(&list->arr[i]);
+
+    zfree(list->arr);
+    zfree(list);
+    c->himport_templates = NULL;
+}
+
+/* Context for himportCmpFieldIdx, set before qsort call. */
+static robj **himport_cmp_argv = NULL;
+
+/* Compare function for sorting field indexes by field name. */
+static int himportCmpFieldIdx(const void *a, const void *b) {
+    int ia = *(const int *)a;
+    int ib = *(const int *)b;
+    return sdscmplen(himport_cmp_argv[ia]->ptr,
+                     himport_cmp_argv[ib]->ptr);
+}
+
+/* HIMPORT PREPARE <template_name> <field1> [field2 ...] */
+void himportPrepareCommand(client *c) {
+    sds template_name = c->argv[2]->ptr;
+    int field_count = c->argc - 3;
+    robj **field_argv = &c->argv[3];  /* Fields start at argv[3]. */
+
+    /* Create field_order: maps 'field index in template' -> 'user argv index'.
+     * Template fields are sorted alphabetically, so we sort indexes by
+     * field name and store the mapping. */
+    int *field_order = zmalloc(sizeof(int) * field_count);
+    for (int i = 0; i < field_count; i++)
+        field_order[i] = i;
+
+    himport_cmp_argv = field_argv;
+    qsort(field_order, field_count, sizeof(int), himportCmpFieldIdx);
+
+    /* Build sorted fields array for tmpl lookup. */
+    sds *sorted_fields = zmalloc(sizeof(sds) * field_count);
+    for (int i = 0; i < field_count; i++)
+        sorted_fields[i] = field_argv[field_order[i]]->ptr;
+
+    /* Reject duplicate field names. After sort duplicates are adjacent. */
+    for (int i = 1; i < field_count; i++) {
+        if (sdscmplen(sorted_fields[i - 1], sorted_fields[i]) == 0) {
+            zfree(sorted_fields);
+            zfree(field_order);
+            addReplyError(c, "ERR duplicate field name in template");
+            return;
+        }
+    }
+
+    /* Get or create tmpl with sorted fields (increments client_refcount). */
+    hashTemplate *tmpl = hashTemplateGetForClient(sorted_fields, field_count);
+    zfree(sorted_fields);
+
+    himportTemplateHoldRef(c, sdsdup(template_name), tmpl, field_order);
+    addReply(c, shared.ok);
+}
+
+/* HIMPORT SET <key> <template> <value1> [value2 ...] */
+void himportSetCommand(client *c) {
+    /* Lookup template. */
+    sds template_name = c->argv[3]->ptr;
+    himportTemplateRef *ref = himportTemplateGet(c, template_name);
+    if (!ref) {
+        addReplyError(c, "ERR no such template");
+        return;
+    }
+
+    hashTemplate *tmpl = ref->tmpl;
+    unsigned long long field_count = tmpl->field_count;
+    int valuec = c->argc - 4;
+
+    /* Number of values must match template field count. */
+    if ((unsigned long long)valuec != field_count) {
+        addReplyError(c, "ERR value count does not match template field count");
+        return;
+    }
+
+    /* Build values array using a stack buffer for small templates.
+     * value_order[i] maps template index i to user's argv index. */
+    int *value_order = ref->value_order;
+    sds stack_values[HASH_TMPL_STACK_ENTRIES];
+    sds *values = (field_count <= HASH_TMPL_STACK_ENTRIES) ?
+                  stack_values : zmalloc(sizeof(sds) * field_count);
+
+    /* Lazy-init template's propargv on first propagation.
+     * Even slots (fields) are fixed for the template's lifetime;
+     * odd slots (key/values) are filled per call below. */
+    if (!tmpl->propargv) {
+        tmpl->propargv = zmalloc(sizeof(robj *) * (2 + field_count * 2));
+        tmpl->propargv[0] = shared.hsetc;
+        for (unsigned long long i = 0; i < field_count; i++) {
+            tmpl->propargv[2 + i * 2] = createObject(OBJ_STRING, tmpl->fields[i]);
+        }
+    }
+    robj **propargv = tmpl->propargv;
+    propargv[1] = c->argv[2]; /* key */
+
+    for (unsigned long long i = 0; i < field_count; i++) {
+        robj *valobj = c->argv[4 + value_order[i]];
+        values[i] = valobj->ptr;
+        propargv[3 + i * 2] = valobj;
+    }
+
+    robj *o = createTmplHashObject(tmpl, values);
+
+    /* Set key (overwrites existing key of any type). */
+    setKey(c, c->db, c->argv[2], &o, 0);
+    notifyKeyspaceEvent(NOTIFY_HASH, "hset", c->argv[2], c->db->id);
+    server.dirty++;
+
+    /* Propagate as HSETC. */
+    alsoPropagate(c->db->id, propargv, 2 + field_count * 2, PROPAGATE_AOF | PROPAGATE_REPL);
+
+    /* Free heap-allocated values buffer if used. */
+    if (values != stack_values) zfree(values);
+
+    /* Prevent HIMPORT SET from being propagated - we propagated HSETC instead. */
+    preventCommandPropagation(c);
+
+    /* Return number of fields set. */
+    addReplyLongLong(c, field_count);
+}
+
+/* HIMPORT DISCARD <template> */
+void himportDiscardCommand(client *c) {
+    himportTemplateRemove(c, c->argv[2]->ptr);
+    addReply(c, shared.ok);
+}
+
+/* HIMPORT DISCARDALL */
+void himportDiscardallCommand(client *c) {
+    himportTemplateFreeList(c);
+    addReply(c, shared.ok);
+}
+
+/* HSETC key field1 value1 [field2 value2 ...]
+ * Creates a tmpl-based hash. If key exists, it is deleted first.
+ * Internal command (CMD_INTERNAL): only accepted from master/AOF/ASM-import
+ * clients. The originating master always propagates fields pre-sorted, so we
+ * skip sorting and use the argv layout directly. */
+
+/* Per-client cache of the last HSETC template — when consecutive calls share
+ * the same field schema (the common case during replication/AOF replay) we
+ * skip computeFieldsHash + dictFind. */
+typedef struct hsetcCache {
+    unsigned long long field_count;
+    sds *fields;                  /* sdsdup'd snapshot of last-seen fields */
+    hashTemplate *tmpl;
+} hsetcCache;
+
+void hsetcCacheFree(client *c) {
+    hsetcCache *cache = c->hsetc_cache;
+    if (!cache) return;
+    for (unsigned long long i = 0; i < cache->field_count; i++) {
+        sdsfree(cache->fields[i]);
+    }
+    zfree(cache->fields);
+    if (cache->tmpl) hashTemplateReleaseFromClient(cache->tmpl);
+    zfree(cache);
+    c->hsetc_cache = NULL;
+}
+
+static int hsetcCacheMatch(hsetcCache *cache, client *c, unsigned long long field_count) {
+    if (!cache || cache->field_count != field_count) return 0;
+    for (unsigned long long i = 0; i < field_count; i++) {
+        if (sdscmplen(cache->fields[i], c->argv[2 + i * 2]->ptr) != 0) return 0;
+    }
+    return 1;
+}
+
+void hsetcCommand(client *c) {
+    if (c->argc < 4 || (c->argc % 2) != 0) {
+        addReplyErrorArity(c);
+        return;
+    }
+
+    unsigned long long field_count = (c->argc - 2) / 2;
+    hsetcCache *cache = c->hsetc_cache;
+    hashTemplate *tmpl;
+    sds stack_values[HASH_TMPL_STACK_ENTRIES];
+    sds *values = (field_count <= HASH_TMPL_STACK_ENTRIES) ?
+                  stack_values : zmalloc(sizeof(sds) * field_count);
+
+    for (unsigned long long i = 0; i < field_count; i++) {
+        values[i] = c->argv[3 + i * 2]->ptr;
+    }
+
+    if (hsetcCacheMatch(cache, c, field_count)) {
+        tmpl = cache->tmpl;
+    } else {
+        sds stack_fields[HASH_TMPL_STACK_ENTRIES];
+        sds *fields = (field_count <= HASH_TMPL_STACK_ENTRIES) ?
+                      stack_fields : zmalloc(sizeof(sds) * field_count);
+        for (unsigned long long i = 0; i < field_count; i++) {
+            fields[i] = c->argv[2 + i * 2]->ptr;
+        }
+        tmpl = hashTemplateGetOrCreate(fields, field_count);
+        if (fields != stack_fields) zfree(fields);
+
+        hsetcCacheFree(c);
+        cache = zmalloc(sizeof(hsetcCache));
+        cache->field_count = field_count;
+        cache->fields = zmalloc(sizeof(sds) * field_count);
+        for (unsigned long long i = 0; i < field_count; i++) {
+            cache->fields[i] = sdsdup(c->argv[2 + i * 2]->ptr);
+        }
+        cache->tmpl = tmpl;
+        tmpl->client_refcount++;
+        c->hsetc_cache = cache;
+    }
+
+    robj *o = createTmplHashObject(tmpl, values);
+    if (values != stack_values) zfree(values);
+
+    setKey(c, c->db, c->argv[1], &o, 0);
+    notifyKeyspaceEvent(NOTIFY_HASH, "hset", c->argv[1], c->db->id);
+    server.dirty++;
+
+    addReplyLongLong(c, field_count);
 }
 
 /* Parse expire time from argument and do boundary checks. */
@@ -2607,6 +4160,11 @@ void hincrbyCommand(client *c) {
     new = sdsfromlonglong(value);
     if (server.memory_tracking_enabled)
         oldsize = kvobjAllocSize(o);
+
+    robj obj, *argv[2] = {c->argv[2], &obj};
+    initStaticStringObject(obj, new);
+    hashTypeTryConversion(c->db, o, argv, 0, 1);
+
     hashTypeSet(c->db, o,c->argv[2]->ptr,new,HASH_SET_TAKE_VALUE | HASH_SET_KEEP_TTL);
     if (server.memory_tracking_enabled)
         updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), o, oldsize, kvobjAllocSize(o));
@@ -2666,6 +4224,11 @@ void hincrbyfloatCommand(client *c) {
     new = sdsnewlen(buf,len);
     if (server.memory_tracking_enabled)
         oldsize = kvobjAllocSize(o);
+
+    robj obj, *argv[2] = {c->argv[2], &obj};
+    initStaticStringObject(obj, new);
+    hashTypeTryConversion(c->db, o, argv, 0, 1);
+
     hashTypeSet(c->db, o,c->argv[2]->ptr,new,HASH_SET_TAKE_VALUE | HASH_SET_KEEP_TTL);
     if (server.memory_tracking_enabled)
         updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), o, oldsize, kvobjAllocSize(o));
@@ -3156,6 +4719,17 @@ static void addHashIteratorCursorToReply(client *c, hashTypeIterator *hi, int wh
         size_t len;
         hashTypeCurrentFromHashTable(hi, what, &value, &len, NULL);
         addReplyBulkCBuffer(c, value, len);
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_LP ||
+               hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        unsigned char *vstr = NULL;
+        unsigned int vlen = UINT_MAX;
+        long long vll = LLONG_MAX;
+
+        hashTypeCurrentObject(hi, what, &vstr, &vlen, &vll, NULL);
+        if (vstr)
+            addReplyBulkCBuffer(c, vstr, vlen);
+        else
+            addReplyBulkLongLong(c, vll);
     } else {
         serverPanic("Unknown hash encoding");
     }
@@ -3423,6 +4997,27 @@ void hrandfieldWithCountCommand(client *c, long l, int withvalues) {
             }
             zfree(keys);
             zfree(vals);
+        } else if (hash->encoding == OBJ_ENCODING_TMPL_LP ||
+                   hash->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+            /* For tmpl-based hashes, use hashTypeRandomElement. */
+            while (count--) {
+                listpackEntry key, val;
+                hashTypeRandomElement(hash, size, &key, withvalues ? &val : NULL);
+                if (withvalues && c->resp > 2)
+                    addReplyArrayLen(c, 2);
+                if (key.sval)
+                    addReplyBulkCBuffer(c, key.sval, key.slen);
+                else
+                    addReplyBulkLongLong(c, key.lval);
+                if (withvalues) {
+                    if (val.sval)
+                        addReplyBulkCBuffer(c, val.sval, val.slen);
+                    else
+                        addReplyBulkLongLong(c, val.lval);
+                }
+                if (c->flags & CLIENT_CLOSE_ASAP)
+                    break;
+            }
         }
         goto out;
     }
@@ -3472,6 +5067,51 @@ void hrandfieldWithCountCommand(client *c, long l, int withvalues) {
         hrandfieldReplyWithListpack(c, count, keys, vals);
         zfree(keys);
         zfree(vals);
+        goto out;
+    }
+
+    /* CASE 2.5b Template-based hashes. Pick unique random indexes. */
+    if (hash->encoding == OBJ_ENCODING_TMPL_LP ||
+        hash->encoding == OBJ_ENCODING_TMPL_ARRAY)
+    {
+        hashTemplate *tmpl = (hash->encoding == OBJ_ENCODING_TMPL_LP) ?
+            hashTemplateLpGetTemplate(hash->ptr) :
+            ((hashTemplateArray *)hash->ptr)->tmpl;
+        int fc = (int)tmpl->field_count;
+        if (count > (unsigned long)fc) count = fc;
+
+        /* Pick unique random indexes using Fisher-Yates partial shuffle. */
+        int stack_idx[HASH_TMPL_STACK_ENTRIES];
+        int *idx = (fc <= HASH_TMPL_STACK_ENTRIES) ?
+                   stack_idx : zmalloc(sizeof(int) * fc);
+        for (int i = 0; i < fc; i++) idx[i] = i;
+        for (unsigned long i = 0; i < count; i++) {
+            int j = i + (rand() % (fc - i));
+            int tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
+        }
+
+        for (unsigned long i = 0; i < count; i++) {
+            int fi = idx[i];
+            if (withvalues && c->resp > 2)
+                addReplyArrayLen(c, 2);
+            addReplyBulkCBuffer(c, tmpl->fields[fi], sdslen(tmpl->fields[fi]));
+            if (withvalues) {
+                if (hash->encoding == OBJ_ENCODING_TMPL_LP) {
+                    unsigned char *p = lpSeek(hash->ptr, fi + 1);
+                    unsigned int vlen;
+                    long long vll;
+                    unsigned char *vstr = lpGetValue(p, &vlen, &vll);
+                    if (vstr)
+                        addReplyBulkCBuffer(c, vstr, vlen);
+                    else
+                        addReplyBulkLongLong(c, vll);
+                } else {
+                    hashTemplateArray *hta = hash->ptr;
+                    addReplyBulkCBuffer(c, hta->values[fi], sdslen(hta->values[fi]));
+                }
+            }
+        }
+        if (idx != stack_idx) zfree(idx);
         goto out;
     }
 
@@ -3883,6 +5523,25 @@ static void httlGenericCommand(client *c, const char *cmd, long long basetime, i
         return;
     }
 
+    /* Template encodings don't support HFE. Report field presence
+     * with no TTL, or missing field. */
+    if (hashObj->encoding == OBJ_ENCODING_TMPL_LP ||
+        hashObj->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        hashTemplate *tmpl = (hashObj->encoding == OBJ_ENCODING_TMPL_LP) ?
+            hashTemplateLpGetTemplate(hashObj->ptr) :
+            ((hashTemplateArray *)hashObj->ptr)->tmpl;
+
+        addReplyArrayLen(c, numFields);
+        for (int i = 0; i < numFields; i++) {
+            sds field = c->argv[numFieldsAt+1+i]->ptr;
+            if (hashTemplateFieldIndex(tmpl, field) >= 0)
+                addReplyLongLong(c, HFE_GET_NO_TTL);
+            else
+                addReplyLongLong(c, HFE_GET_NO_FIELD);
+        }
+        return;
+    }
+
     if (hashObj->encoding == OBJ_ENCODING_LISTPACK) {
         void *lp = hashObj->ptr;
 
@@ -4211,6 +5870,24 @@ void hpersistCommand(client *c) {
         return;
     }
 
+    /* Template encodings don't support HFE. */
+    if (hashObj->encoding == OBJ_ENCODING_TMPL_LP ||
+        hashObj->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        hashTemplate *tmpl = (hashObj->encoding == OBJ_ENCODING_TMPL_LP) ?
+            hashTemplateLpGetTemplate(hashObj->ptr) :
+            ((hashTemplateArray *)hashObj->ptr)->tmpl;
+
+        addReplyArrayLen(c, numFields);
+        for (int i = 0; i < numFields; i++) {
+            sds field = c->argv[numFieldsAt+1+i]->ptr;
+            if (hashTemplateFieldIndex(tmpl, field) >= 0)
+                addReplyLongLong(c, HFE_PERSIST_NO_TTL);
+            else
+                addReplyLongLong(c, HFE_PERSIST_NO_FIELD);
+        }
+        return;
+    }
+
     /* Track which fields were successfully persisted for subkey notification. */
     fieldvec fvpersisted;
     vec *vpersisted = fieldvecInit(&fvpersisted, numFields);
@@ -4322,3 +5999,73 @@ void hpersistCommand(client *c) {
     }
     vecRelease(vpersisted);
 }
+
+/*-----------------------------------------------------------------------------
+ * Template disassembly after RDB load
+ *----------------------------------------------------------------------------*/
+
+/* Disassemble templates with key_refcount below threshold after RDB load.
+ * Converts template-based hashes back to regular listpack hashes. */
+/*-----------------------------------------------------------------------------
+ * Template registry RDB save/load support
+ *----------------------------------------------------------------------------*/
+
+/* Get number of templates in the registry. */
+size_t hashTemplateRegistrySize(void) {
+    if (!htemplates->registry) return 0;
+    return dictSize(htemplates->registry);
+}
+
+/* Get total number of template-based keys (sum of all key_refcounts). */
+size_t hashTemplateKeyCount(void) {
+    if (!htemplates->registry) return 0;
+
+    size_t count = 0;
+    dictIterator *di = dictGetIterator(htemplates->registry);
+    dictEntry *de;
+    while ((de = dictNext(di)) != NULL) {
+        hashTemplate *tmpl = dictGetKey(de);
+        unsigned long long key_ref;
+        atomicGet(tmpl->key_refcount, key_ref);
+        count += key_ref;
+    }
+    dictReleaseIterator(di);
+    return count;
+}
+
+/* Count templates with key_refcount > 0 (for RDB save). */
+size_t hashTemplateCountActive(void) {
+    if (!htemplates->registry) return 0;
+
+    size_t count = 0;
+    dictIterator *di = dictGetIterator(htemplates->registry);
+    dictEntry *de;
+    while ((de = dictNext(di)) != NULL) {
+        hashTemplate *tmpl = dictGetKey(de);
+        unsigned long long key_ref;
+        atomicGet(tmpl->key_refcount, key_ref);
+        if (key_ref > 0) count++;
+    }
+    dictReleaseIterator(di);
+    return count;
+}
+
+/* Iterate over templates with key_refcount > 0 for RDB save. */
+void hashTemplateRegistryIterate(void (*callback)(hashTemplate *tmpl,
+                                                 void *privdata),
+                                void *privdata) {
+    if (!htemplates->registry) return;
+
+    dictIterator *di = dictGetIterator(htemplates->registry);
+    dictEntry *de;
+    while ((de = dictNext(di)) != NULL) {
+        hashTemplate *tmpl = dictGetKey(de);
+        unsigned long long key_ref;
+        atomicGet(tmpl->key_refcount, key_ref);
+        if (key_ref > 0) {
+            callback(tmpl, privdata);
+        }
+    }
+    dictReleaseIterator(di);
+}
+
