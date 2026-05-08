@@ -3669,17 +3669,13 @@ void himportDiscardallCommand(client *c) {
  * skip computeFieldsHash + dictFind. */
 typedef struct hsetcCache {
     unsigned long long field_count;
-    sds *fields;                  /* sdsdup'd snapshot of last-seen fields */
+    sds *fields;                  /* Borrowed pointer to tmpl->fields. */
     hashTemplate *tmpl;
 } hsetcCache;
 
 void hsetcCacheFree(client *c) {
     hsetcCache *cache = c->hsetc_cache;
     if (!cache) return;
-    for (unsigned long long i = 0; i < cache->field_count; i++) {
-        sdsfree(cache->fields[i]);
-    }
-    zfree(cache->fields);
     if (cache->tmpl) hashTemplateReleaseFromClient(cache->tmpl);
     zfree(cache);
     c->hsetc_cache = NULL;
@@ -3725,10 +3721,7 @@ void hsetcCommand(client *c) {
         hsetcCacheFree(c);
         cache = zmalloc(sizeof(hsetcCache));
         cache->field_count = field_count;
-        cache->fields = zmalloc(sizeof(sds) * field_count);
-        for (unsigned long long i = 0; i < field_count; i++) {
-            cache->fields[i] = sdsdup(c->argv[2 + i * 2]->ptr);
-        }
+        cache->fields = tmpl->fields;       /* Borrow: pinned by client_refcount */
         cache->tmpl = tmpl;
         tmpl->client_refcount++;
         c->hsetc_cache = cache;
