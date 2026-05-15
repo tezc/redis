@@ -256,6 +256,8 @@ client *createClient(connection *conn) {
     c->stat_avg_pipeline_length_cnt = 0;
     c->task = NULL;
     c->node_id = NULL;
+    c->himport_fieldsets = NULL;
+    c->hsetc_cache = NULL;
     atomicSet(c->pending_read, 0);
     return c;
 }
@@ -2058,6 +2060,7 @@ void clearClientConnectionState(client *c) {
     clientSetDefaultAuth(c);
     moduleNotifyUserChanged(c);
     discardTransaction(c);
+    himportFieldsetFreeList(c);
 
     pubsubUnsubscribeAllChannels(c,0);
     pubsubUnsubscribeShardAllChannels(c, 0);
@@ -2334,6 +2337,8 @@ void freeClient(client *c) {
 
     /* Release other dynamically allocated client structure fields,
      * and finally release the client structure itself. */
+    himportFieldsetFreeList(c);
+    hsetcCacheFree(c);
     if (c->name) decrRefCount(c->name);
     if (c->lib_name) decrRefCount(c->lib_name);
     if (c->lib_ver) decrRefCount(c->lib_ver);

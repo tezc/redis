@@ -1663,6 +1663,8 @@ typedef struct client {
     size_t stat_total_read_events; /* Number of times readQueryFromClient() was called */
     size_t stat_avg_pipeline_length_sum; /* Sum of pipeline lengths for computing average */
     size_t stat_avg_pipeline_length_cnt; /* Count of pipeline length samples */
+    void *himport_fieldsets;      /* Session-local HIMPORT fieldsets (himportFieldsetList*) */
+    void *hsetc_cache;            /* hashTemplate* - last HSETC template (skips dictFind on repeat) */
 } client;
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
@@ -1738,7 +1740,7 @@ struct sharedObjectsStruct {
     *rpop, *lpop, *lpush, *rpoplpush, *lmove, *blmove, *zpopmin, *zpopmax,
     *emptyscan, *multi, *exec, *left, *right, *hset, *srem, *xgroup, *xclaim, *xack,
     *script, *replconf, *eval, *persist, *set, *pexpireat, *pexpire,
-    *hdel, *hpexpireat, *hpersist, *hsetex,
+    *hdel, *hpexpireat, *hpersist, *hsetex, *hsetc,
     *time, *pxat, *absttl, *retrycount, *force, *justid, *entriesread,
     *lastid, *ping, *setid, *keepttl, *load, *createconsumer, *fields,
     *getack, *special_asterick, *special_equals, *default_username, *redacted,
@@ -2485,6 +2487,15 @@ struct redisServer {
     /* Zip structure config, see redis.conf for more information  */
     size_t hash_max_listpack_entries;
     size_t hash_max_listpack_value;
+    /* Hash template config */
+    size_t hash_min_template_entries; /* Auto-convert regular hashes (HSET, RDB
+                                       * load) to template encoding at this
+                                       * field count. 0 disables auto-convert;
+                                       * templates are created only via HIMPORT
+                                       * SET. Falling below the threshold via
+                                       * HDEL converts back to listpack/ht. */
+
+    struct hashTemplates *htemplates;               /* Global template registry */
     size_t set_max_intset_entries;
     size_t set_max_listpack_entries;
     size_t set_max_listpack_value;
@@ -3080,6 +3091,10 @@ typedef struct {
 
     dictIterator di;
     dictEntry *de;
+
+    /* For TMPL_LP and TMPL_ARRAY encodings. */
+    int tmpl_index;  /* Current field index in template (-1 = not started). */
+    struct hashTemplate *tmpl;  /* Cached template pointer. */
 } hashTypeIterator;
 
 #include "stream.h"  /* Stream data type header file. */
@@ -3835,6 +3850,58 @@ typedef struct listpackEx {
                          are ordered by ttl. */
 } listpackEx;
 
+/*-----------------------------------------------------------------------------
+ * Hash with shared template (Hinted Hash Templates) - OBJ_ENCODING_TMPL_LP/AR
+ *
+ * These encodings store hash values without repeating field names. Instead,
+ * field names are stored once in a shared template structure, and multiple
+ * hash keys can reference the same template.
+ *----------------------------------------------------------------------------*/
+
+/* Shared template for hash fields. Multiple hashes can reference the same
+ * template to save memory when they have identical field layouts. */
+typedef struct hashTemplate {
+    uint64_t id;         /* Runtime registry ID. Stored as the first listpack
+                          * entry in TMPL_LP (varint, ~1-2 bytes) instead of an
+                          * 8-byte template pointer, and written by RDB save
+                          * to identify the template. */
+    uint64_t hash;       /* Pre-computed hash of sorted field names. */
+    redisAtomic unsigned long long key_refcount; /* Number of hash keys. */
+    unsigned long long client_refcount; /* Number of clients referring to this 
+                                         * template (due to HIMPORT PREPARE). */
+    unsigned long long field_count; /* Number of fields in the template. */
+    sds *fields;         /* Ordered array of field names (sorted, owned). */
+    robj **propargv;     /* Lazy-built propagation array, layout:
+                            [hsetc, NULL_key, f0, f1, ..., fN-1,
+                                              NULL_v0, NULL_v1, ..., NULL_vN-1].
+                            Field slots own field robjs; key and value slots
+                            are filled per HIMPORT SET / HSETC call.  */
+    struct hashTemplate *next_pending_free; /* Pending free list link. */
+    int pending_free;    /* 1 if in pending free list (lock-protected). */
+} hashTemplate;
+
+/* Global registry for hash templates. */
+typedef struct hashTemplates {
+    dict *registry;             /* field set -> template lookup */
+    hashTemplate **by_id;       /* ID -> template lookup */
+    size_t by_id_cap;           /* Allocated slots in by_id array. */
+    hashTemplate *pending_free_list;        /* Pending free list head. */
+    pthread_mutex_t pending_free_list_lock; /* Protects pending_free_list. */
+    int rdb_saving;              /* 1 during RDB save (compact refs). */
+    redisAtomic size_t total_key_refs; /* Sum of key_refcount across all templates. */
+} hashTemplates;
+
+/* OBJ_ENCODING_TMPL_LP: o->ptr points directly to a listpack.
+ * Format: [template_id (varint)][value1][value2]...
+ * Template is looked up via hashTemplateGetById(). */
+
+/* Hash with template, values stored in array (OBJ_ENCODING_TMPL_ARRAY).
+ * Values are stored as sds array in template field order. */
+typedef struct hashTemplateArray {
+    hashTemplate *tmpl;  /* Shared template reference. */
+    sds values[];       /* Flexible array: values in template field order. */
+} hashTemplateArray;
+
 /* Each dict of hash object that has fields with time-Expiration will have the
  * following metadata attached to dict header.
  * Note that alloc_size field must be first because hash objects without expre
@@ -3876,6 +3943,7 @@ static inline size_t *htGetMetadataSize(dict *d) {
 #define HFE_LAZY_NO_UPDATE_ALLOCSIZES (1<<6) /* If field lazy deleted, avoid updating slot allocation sizes */
 
 void hashTypeConvert(redisDb *db, robj *o, int enc);
+int hashTypeTryConvertToTemplate(robj *o);
 void hashTypeTryConversion(redisDb *db, kvobj *kv, robj **argv, int start, int end);
 int hashTypeExists(redisDb *db, kvobj *kv, sds field, int hfeFlags, int *isHashDeleted);
 int hashTypeDelete(robj *o, void *key);
@@ -3901,7 +3969,29 @@ int hashTypeSet(redisDb *db, kvobj *kv, sds field, sds value, int flags);
 robj *hashTypeDup(kvobj *kv, uint64_t *minHashExpire);
 uint64_t hashTypeExpire(redisDb *db, kvobj *o, uint32_t *quota, int updateSubexpires, int activeEx);
 void hashTypeFree(robj *o);
+int himportFieldsetFreeList(client *c);
+void hsetcCacheFree(client *c);
 int hashTypeIsExpired(const robj *o, uint64_t expireAt);
+
+/* Hinted Hash Templates functions */
+hashTemplate *hashTemplateGetOrCreate(sds *fields, unsigned long long field_count);
+hashTemplate *hashTemplateGetOrCreateWithHash(uint64_t hash, sds *fields, unsigned long long field_count);
+void hashTemplateIncrKeyRef(hashTemplate *tmpl);
+void hashTemplateDecrKeyRef(hashTemplate *tmpl);
+void hashTemplateIncrClientRef(hashTemplate *tmpl);
+void hashTemplateDecrClientRef(hashTemplate *tmpl);
+
+void hashTemplateDrainPendingFree(void);
+hashTemplate *hashTemplateGetById(uint64_t id);
+void hashTemplatesInit(void);
+hashTemplate *hashTemplateLpGetTemplate(unsigned char *lp);
+char *hashTemplateEquivalentEncoding(robj *o);
+unsigned char *hashTemplateLpCreate(hashTemplate *tmpl, sds *values);
+hashTemplateArray *hashTemplateArrayCreate(hashTemplate *tmpl, sds *values, int take);
+robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values);
+size_t hashTemplateRegistrySize(void);
+size_t hashTemplateCountActive(void);
+size_t hashTemplateKeyCount(void);
 unsigned char *hashTypeListpackGetLp(robj *o);
 uint64_t hashTypeGetMinExpire(robj *o, int accurate);
 ebuckets *hashTypeGetDictMetaHFE(dict *d);
@@ -4446,6 +4536,11 @@ void zrankCommand(client *c);
 void zrevrankCommand(client *c);
 void hsetCommand(client *c);
 void hsetexCommand(client *c);
+void hsetcCommand(client *c);
+void himportPrepareCommand(client *c);
+void himportSetCommand(client *c);
+void himportDiscardCommand(client *c);
+void himportDiscardallCommand(client *c);
 void hpexpireCommand(client *c);
 void hexpireCommand(client *c);
 void hpexpireatCommand(client *c);

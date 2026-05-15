@@ -92,6 +92,10 @@ char *rdb_type_string[] = {
 #ifdef ENABLE_GCRA
     "gcra",
 #endif
+    "hash-tmpl-lp",
+    "hash-tmpl-ref-lp",
+    "hash-tmpl-array",
+    "hash-tmpl-ref-array",
 };
 
 /* Show a few stats collected into 'rdbstate' */

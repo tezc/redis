@@ -1,0 +1,27 @@
+{
+    "DISCARD": {
+        "summary": "Removes a single session-local fieldset by name.",
+        "complexity": "O(1)",
+        "group": "hash",
+        "since": "9.0.0",
+        "arity": 3,
+        "container": "HIMPORT",
+        "function": "himportDiscardCommand",
+        "command_flags": [
+            "FAST"
+        ],
+        "acl_categories": [
+            "HASH"
+        ],
+        "reply_schema": {
+            "type": "integer",
+            "description": "1 if the fieldset was removed, 0 if it did not exist."
+        },
+        "arguments": [
+            {
+                "name": "fieldset-name",
+                "type": "string"
+            }
+        ]
+    }
+}

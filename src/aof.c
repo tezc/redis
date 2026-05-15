@@ -2103,6 +2103,17 @@ static int rioWriteHashIteratorCursor(rio *r, hashTypeIterator *hi, int what) {
         size_t len;
         hashTypeCurrentFromHashTable(hi, what, &str, &len, NULL);
         return rioWriteBulkString(r, str, len);
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_LP ||
+               hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        unsigned char *vstr = NULL;
+        unsigned int vlen = UINT_MAX;
+        long long vll = LLONG_MAX;
+
+        hashTypeCurrentObject(hi, what, &vstr, &vlen, &vll, NULL);
+        if (vstr)
+            return rioWriteBulkString(r, (char *)vstr, vlen);
+        else
+            return rioWriteBulkLongLong(r, vll);
     }
 
     serverPanic("Unknown hash encoding");
@@ -2120,7 +2131,29 @@ int rewriteHashObject(rio *r, robj *key, robj *o) {
     int isHFE = hashTypeGetMinExpire(o, 0) != EB_EXPIRE_TIME_INVALID;
     hashTypeInitIterator(&hi, o);
 
-    if (!isHFE) {
+    int isTmpl = (o->encoding == OBJ_ENCODING_TMPL_LP ||
+                  o->encoding == OBJ_ENCODING_TMPL_ARRAY);
+
+    if (isTmpl) {
+        /* Emit a single HSETC so replay restores the template encoding
+         * Layout: HSETC key f0 f1 ... fN-1 v0 v1 ... vN-1 */
+        if (!rioWriteBulkCount(r, '*', 2 + items * 2) ||
+            !rioWriteBulkString(r, "HSETC", 5) ||
+            !rioWriteBulkObject(r, key))
+            goto reHashEnd;
+        /* Pass 1: all fields. */
+        while (hashTypeNext(&hi, 0) != C_ERR) {
+            if (!rioWriteHashIteratorCursor(r, &hi, OBJ_HASH_KEY))
+                goto reHashEnd;
+        }
+        /* Pass 2: all values. */
+        hashTypeResetIterator(&hi);
+        hashTypeInitIterator(&hi, o);
+        while (hashTypeNext(&hi, 0) != C_ERR) {
+            if (!rioWriteHashIteratorCursor(r, &hi, OBJ_HASH_VALUE))
+                goto reHashEnd;
+        }
+    } else if (!isHFE) {
         while (hashTypeNext(&hi, 0) != C_ERR) {
             if (count == 0) {
                 int cmd_items = (items > AOF_REWRITE_ITEMS_PER_CMD) ?
