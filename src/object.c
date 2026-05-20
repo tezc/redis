@@ -218,7 +218,7 @@ static kvobj *kvobjCreateEmbedString(const char *val_ptr, size_t val_len,
  *    | robj (16) | key-hdr-size (1) | sdshdr8 "myvalue" \0  (11) | 
  *    +-----------+------------------+----------------------------+
  */
-robj *createEmbeddedStringObject(const char *val_ptr, size_t val_len) {
+static inline robj *createEmbeddedStringObject(const char *val_ptr, size_t val_len) {
     /* Calculate size for embedded value (always SDS_TYPE_8) */
     size_t val_sds_size = sdsReqSize(val_len, SDS_TYPE_8);
     
@@ -335,6 +335,7 @@ kvobj *kvobjSet(sds key, robj *val, uint32_t keyMetaBits) {
  * The current limit of 44 is chosen so that the biggest string object
  * we allocate as EMBSTR will still fit into the 64 byte arena of jemalloc. */
 #define OBJ_ENCODING_EMBSTR_SIZE_LIMIT 44
+__attribute__((always_inline))
 robj *createStringObject(const char *ptr, size_t len) {
     if (len <= OBJ_ENCODING_EMBSTR_SIZE_LIMIT)
         return createEmbeddedStringObject(ptr,len);
@@ -624,7 +625,7 @@ void incrRefCount(robj *o) {
         }
     }
 }
-
+__attribute__((always_inline))
 void decrRefCount(robj *o) {
     if (o->refcount == OBJ_SHARED_REFCOUNT)
         return; /* Nothing to do: this refcount is immutable. */
@@ -635,6 +636,18 @@ void decrRefCount(robj *o) {
     }
 
     if (--(o->refcount) == 0) {
+        /* Fast path for embedded strings: no inner allocation to free,
+         * and we can compute the usable size to skip jemalloc's emap lookup. */
+        if (likely(o->type == OBJ_STRING && o->encoding == OBJ_ENCODING_EMBSTR && !o->iskvobj)) {
+            /* Embstr is always SDS_TYPE_8. Compute alloc size directly
+             * without the sdsAllocSize switch. sdshdr8 layout before buf:
+             * [len(1B)][alloc(1B)][flags(1B)][buf...] so alloc = ptr[-2]. */
+            size_t alloc_size = sizeof(robj) + sizeof(struct sdshdr8)
+                              + ((uint8_t*)o->ptr)[-2] + 1;
+            zfree_with_size(o, alloc_size);
+            return;
+        }
+
         void *alloc = o;
         
         if (o->iskvobj) {
@@ -658,7 +671,14 @@ void decrRefCount(robj *o) {
             default: serverPanic("Unknown object type"); break;
             }
         }
-        zfree(alloc);
+        if (o->iskvobj) {
+            zfree(alloc);
+        } else {
+            if (zmalloc_usable_size(alloc) != 16)
+                printf("free object: usable=%zu type=%d encoding=%d refcount=%d\n",
+                    zmalloc_usable_size(alloc), o->type, o->encoding, o->refcount);
+            zfree_with_size(alloc, zmalloc_usable_size(alloc));
+        }
     }
 }
 
