@@ -3347,7 +3347,7 @@ standardConfig static_configs[] = {
 
     /* Size_t configs */
     createSizeTConfig("hash-max-listpack-entries", "hash-max-ziplist-entries", MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_max_listpack_entries, 512, INTEGER_CONFIG, NULL, NULL),
-    createSizeTConfig("hash-min-template-entries", NULL, MODIFIABLE_CONFIG, 1, LONG_MAX, server.hash_min_template_entries, 1, INTEGER_CONFIG, NULL, NULL),
+    createSizeTConfig("hash-min-template-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_min_template_entries, 0, INTEGER_CONFIG, NULL, NULL),
 
     createSizeTConfig("set-max-intset-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.set_max_intset_entries, 512, INTEGER_CONFIG, NULL, NULL),
     createSizeTConfig("set-max-listpack-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.set_max_listpack_entries, 128, INTEGER_CONFIG, NULL, NULL),
