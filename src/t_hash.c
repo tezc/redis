@@ -3593,6 +3593,25 @@ int himportFieldsetFreeList(client *c) {
     return removed;
 }
 
+/* Per-client memory overhead of this client's HIMPORT fieldset bindings.
+ * Accounts only client-owned allocations: the list, its reserved array, and
+ * each fieldset's name and value_order map. The templates referenced via
+ * hold-ref are shared state in the global registry and are not attributed
+ * here (mirrors multiStateMemOverhead's treatment of watched keys). */
+size_t himportFieldsetMemOverhead(client *c) {
+    himportFieldsetList *list = c->himport_fieldsets;
+    if (!list) return 0;
+
+    size_t mem = sizeof(himportFieldsetList);
+    mem += (size_t)list->cap * sizeof(himportFieldset);
+    for (int i = 0; i < list->count; i++) {
+        himportFieldset *fs = &list->arr[i];
+        if (fs->name) mem += sdsZmallocSize(fs->name);
+        if (fs->tmpl) mem += fs->tmpl->field_count * sizeof(int);
+    }
+    return mem;
+}
+
 /* Context for himportCmpFieldIdx, set before qsort call. */
 static robj **himport_cmp_argv = NULL;
 

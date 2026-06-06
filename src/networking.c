@@ -5225,6 +5225,11 @@ size_t getClientMemoryUsage(client *c) {
     mem += c->all_argv_len_sum + sizeof(robj*)*c->argc;
     mem += multiStateMemOverhead(c);
 
+    /* Add memory overhead of this client's HIMPORT fieldset bindings. Like the
+     * above, this accounts client-owned state only; shared templates referenced
+     * via hold-ref live in the global registry and aren't attributed here. */
+    mem += himportFieldsetMemOverhead(c);
+
     /* Add memory overhead of pubsub channels and patterns. Note: this is just the overhead of the robj pointers
      * to the strings themselves because they aren't stored per client. */
     mem += pubsubMemOverhead(c);

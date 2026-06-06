@@ -122,6 +122,76 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         assert_match "*no such fieldset*" $err
     }
 
+    test {HIMPORT PREPARE state is accounted in client memory} {
+        # tot-mem from CLIENT INFO for the current connection.
+        proc cur_tot_mem {} {
+            regexp {tot-mem=(\d+)} [r client info] -> m
+            return $m
+        }
+
+        r himport discardall
+        set before [cur_tot_mem]
+
+        # Prepare many large fieldsets; each pins a template and owns a
+        # value_order map plus the fieldset name.
+        for {set i 0} {$i < 100} {incr i} {
+            set fields {}
+            for {set f 0} {$f < 64} {incr f} {
+                lappend fields "field_${i}_${f}"
+            }
+            r himport prepare fs$i {*}$fields
+        }
+        set after [cur_tot_mem]
+
+        # Client-owned fieldset state must be visible in tot-mem.
+        assert {$after > $before}
+
+        # Releasing the fieldsets returns the accounted memory.
+        r himport discardall
+        set discarded [cur_tot_mem]
+        assert {$discarded < $after}
+    }
+
+    test {HIMPORT PREPARE state can trigger maxmemory-clients eviction} {
+        # Returns the CLIENT LIST entry for $name, or "" if not connected.
+        proc himport_client_line {name} {
+            set clients [split [string trim [r client list]] "\r\n"]
+            return [lsearch -inline $clients *name=$name*]
+        }
+
+        set saved_limit [lindex [r config get maxmemory-clients] 1]
+        r config set maxmemory-clients 2mb
+        r client no-evict on ;# protect the main test connection
+
+        # A separate connection that accumulates HIMPORT fieldset state. A
+        # single PREPARE's query buffer (~tens of KB) stays far below the 2mb
+        # limit, so eviction can only fire once the accounted fieldset memory
+        # (value_order maps) adds up past it.
+        set rr [redis_client]
+        $rr client setname himport_abuser
+        assert {[himport_client_line himport_abuser] ne ""}
+
+        set evicted 0
+        for {set i 0} {$i < 4000} {incr i} {
+            set fields {}
+            for {set f 0} {$f < 2000} {incr f} {
+                lappend fields "field_${i}_${f}"
+            }
+            if {[catch {$rr himport prepare fs$i {*}$fields}]} {
+                set evicted 1 ;# server closed the connection on eviction
+                break
+            }
+            if {[himport_client_line himport_abuser] eq ""} {
+                set evicted 1 ;# evicted asynchronously in beforeSleep
+                break
+            }
+        }
+        assert {$evicted}
+
+        catch {$rr close}
+        r config set maxmemory-clients $saved_limit
+    }
+
     test {HIMPORT PREPARE replaces existing fieldset with same name} {
         # Create template with 2 fields
         r himport prepare reuse a b
