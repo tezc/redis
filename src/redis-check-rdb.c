@@ -89,13 +89,13 @@ char *rdb_type_string[] = {
     "stream-v4",
     "stream-v5",
     "array",
-#ifdef ENABLE_GCRA
-    "gcra",
-#endif
     "hash-tmpl-lp",
     "hash-tmpl-ref-lp",
     "hash-tmpl-array",
     "hash-tmpl-ref-array",
+#ifdef ENABLE_GCRA
+    "gcra",
+#endif
 };
 
 /* Show a few stats collected into 'rdbstate' */
@@ -348,6 +348,14 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
                 goto err;
             }
             continue;
+        } else if (type == RDB_OPCODE_HASH_TEMPLATES) {
+            /* Hash template registry. Must be loaded so that later
+             * template-referencing keys can resolve their template. */
+            if (rdbLoadHashTemplates(&rdb) != C_OK) {
+                rdbCheckError("Failed loading hash templates");
+                goto err;
+            }
+            continue; /* Read type again. */
         } else {
             if (!rdbIsObjectType(type)) {
                 rdbCheckError("Invalid object type: %d", type);
@@ -397,6 +405,7 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
     }
 
     if (closefile) fclose(fp);
+    rdbClearHashTemplates();
     stopLoading(1);
     return 0;
 
@@ -408,6 +417,7 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
     }
 err:
     if (closefile) fclose(fp);
+    rdbClearHashTemplates();
     stopLoading(0);
     return 1;
 }
@@ -445,6 +455,9 @@ int redis_check_rdb_main(int argc, char **argv, FILE *fp) {
      * an already initialized Redis instance, check if we really need to. */
     if (shared.integers[0] == NULL)
         createSharedObjects();
+    /* The hash template registry must exist so that template-referencing
+     * keys can be loaded. Idempotent if already initialized. */
+    hashTemplatesInit();
     server.loading_process_events_interval_bytes = 0;
     server.sanitize_dump_payload = SANITIZE_DUMP_YES;
     rdbCheckMode = 1;

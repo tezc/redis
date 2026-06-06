@@ -81,16 +81,18 @@
 #define RDB_TYPE_STREAM_LISTPACKS_4 26        /* Stream with IDMP support */
 #define RDB_TYPE_STREAM_LISTPACKS_5 27        /* Stream with XNACK support (NACKed entries) */
 #define RDB_TYPE_ARRAY 28                     /* Array data type */
+#define RDB_TYPE_HASH_TMPL_LP 29              /* TMPL_LP, self-contained (DUMP): [count][f0]...[fN-1][lp_blob] */
+#define RDB_TYPE_HASH_TMPL_REF_LP 30          /* TMPL_LP, with template ref (RDB save): raw lp blob, first entry is tid */
+#define RDB_TYPE_HASH_TMPL_ARRAY 31           /* TMPL_ARRAY, self-contained (DUMP): [count][f0][v0]...[fN-1][vN-1] */
+#define RDB_TYPE_HASH_TMPL_REF_ARRAY 32       /* TMPL_ARRAY, with template ref (RDB save): [tid][v0]...[vN-1] */
 #ifdef ENABLE_GCRA
-#define RDB_TYPE_GCRA 29                      /* GCRA object */
+#define RDB_TYPE_GCRA 33                      /* GCRA object (experimental: kept last so the
+                                                always-present types stay contiguous) */
 #endif
-#define RDB_TYPE_HASH_TMPL_LP 30              /* TMPL_LP, self-contained (DUMP): [count][f0]...[fN-1][lp_blob] */
-#define RDB_TYPE_HASH_TMPL_REF_LP 31          /* TMPL_LP, with template ref (RDB save): raw lp blob, first entry is tid */
-#define RDB_TYPE_HASH_TMPL_ARRAY 32           /* TMPL_ARRAY, self-contained (DUMP): [count][f0][v0]...[fN-1][vN-1] */
-#define RDB_TYPE_HASH_TMPL_REF_ARRAY 33       /* TMPL_ARRAY, with template ref (RDB save): [tid][v0]...[vN-1] */
 /* NOTE: WHEN ADDING NEW RDB TYPE, UPDATE rdbIsObjectType(), and rdb_type_string[] */
 
-/* Test if a type is an object type. */
+/* Test if a type is an object type. The always-present types are contiguous
+ * (0-7, 9-32); type 33 (GCRA) only exists when ENABLE_GCRA is defined. */
 #ifdef ENABLE_GCRA
 #define rdbIsObjectType(t) (((t) >= 0 && (t) <= 7) || ((t) >= 9 && (t) <= 33))
 #else

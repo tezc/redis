@@ -3311,7 +3311,11 @@ uint64_t hashTypeGetMinExpire(robj *o, int accurate) {
 }
 
 int hashTypeIsFieldsWithExpire(robj *o) {
-    if (o->encoding == OBJ_ENCODING_LISTPACK) {
+    /* TMPL_* and plain LISTPACK encodings never carry field expiration (HFE
+     * forces a conversion away from these before any TTL is set). */
+    if (o->encoding == OBJ_ENCODING_TMPL_LP ||
+        o->encoding == OBJ_ENCODING_TMPL_ARRAY ||
+        o->encoding == OBJ_ENCODING_LISTPACK) {
         return 0;
     } else if (o->encoding == OBJ_ENCODING_LISTPACK_EX) {
         return EB_EXPIRE_TIME_INVALID != listpackExGetMinExpire(o);
