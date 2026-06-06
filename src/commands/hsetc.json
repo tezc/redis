@@ -9,7 +9,6 @@
         "command_flags": [
             "WRITE",
             "DENYOOM",
-            "FAST",
             "INTERNAL"
         ],
         "acl_categories": [

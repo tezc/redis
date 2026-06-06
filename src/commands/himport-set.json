@@ -9,8 +9,7 @@
         "function": "himportSetCommand",
         "command_flags": [
             "WRITE",
-            "DENYOOM",
-            "FAST"
+            "DENYOOM"
         ],
         "acl_categories": [
             "HASH"
