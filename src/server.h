@@ -3867,8 +3867,7 @@ typedef struct hashTemplate {
                           * to identify the template. */
     uint64_t hash;       /* Pre-computed hash of sorted field names. */
     redisAtomic unsigned long long key_refcount; /* Number of hash keys. */
-    unsigned long long client_refcount; /* Number of clients referring to this 
-                                         * template (due to HIMPORT PREPARE). */
+    unsigned long long hold_refcount; /* Non-key holders: clients and RDB load. */
     unsigned long long field_count; /* Number of fields in the template. */
     sds *fields;         /* Ordered array of field names (sorted, owned). */
     robj **propargv;     /* Lazy-built propagation array, layout:
@@ -3978,8 +3977,8 @@ hashTemplate *hashTemplateGetOrCreate(sds *fields, unsigned long long field_coun
 hashTemplate *hashTemplateGetOrCreateWithHash(uint64_t hash, sds *fields, unsigned long long field_count);
 void hashTemplateIncrKeyRef(hashTemplate *tmpl);
 void hashTemplateDecrKeyRef(hashTemplate *tmpl);
-void hashTemplateIncrClientRef(hashTemplate *tmpl);
-void hashTemplateDecrClientRef(hashTemplate *tmpl);
+void hashTemplateIncrHoldRef(hashTemplate *tmpl);
+void hashTemplateDecrHoldRef(hashTemplate *tmpl);
 
 void hashTemplateDrainPendingFree(void);
 hashTemplate *hashTemplateGetById(uint64_t id);

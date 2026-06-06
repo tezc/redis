@@ -1912,7 +1912,36 @@ werr:
  * Each template: [id][field_count][field1][field2]...
  * Builds rdb_tmpls mapping from saved ID to loaded template. */
 static hashTemplate **rdb_tmpls = NULL;
-static uint64_t rdb_tmpls_cap = 0;
+static size_t rdb_tmpls_cap = 0;
+
+static int rdbEnsureHashTemplatesCap(uint64_t id) {
+    size_t maxcap = SIZE_MAX / sizeof(*rdb_tmpls);
+    if (id >= maxcap) {
+        rdbReportCorruptRDB("Hash template ID %llu exceeds loader capacity",
+            (unsigned long long)id);
+        return C_ERR;
+    }
+    if (id < rdb_tmpls_cap)
+        return C_OK;
+
+    size_t needed = (size_t)id + 1;
+    size_t newcap = rdb_tmpls_cap ? rdb_tmpls_cap : 16;
+    if (newcap > maxcap)
+        newcap = maxcap;
+    while (newcap < needed) {
+        if (newcap > maxcap / 2) {
+            newcap = maxcap;
+            break;
+        }
+        newcap *= 2;
+    }
+
+    rdb_tmpls = zrealloc(rdb_tmpls, sizeof(*rdb_tmpls) * newcap);
+    memset(rdb_tmpls + rdb_tmpls_cap, 0,
+        sizeof(*rdb_tmpls) * (newcap - rdb_tmpls_cap));
+    rdb_tmpls_cap = newcap;
+    return C_OK;
+}
 
 int rdbLoadHashTemplates(rio *rdb) {
     uint64_t num_tmpls;
@@ -1935,6 +1964,13 @@ int rdbLoadHashTemplates(rio *rdb) {
         if ((field_count = rdbLoadLen(rdb, NULL)) == RDB_LENERR)
             goto err;
 
+        if (rdbEnsureHashTemplatesCap(id) != C_OK)
+            goto err;
+        if (rdb_tmpls[id] != NULL) {
+            rdbReportCorruptRDB("Duplicate hash template ID %llu", (unsigned long long)id);
+            goto err;
+        }
+
         /* Allocate fields array. */
         sds *fields = zmalloc(sizeof(sds) * field_count);
 
@@ -1950,15 +1986,7 @@ int rdbLoadHashTemplates(rio *rdb) {
 
         /* Get or create template. */
         hashTemplate *tmpl = hashTemplateGetOrCreate(fields, field_count);
-
-        /* Grow rdb_tmpls if needed to fit saved ID. */
-        if (id >= rdb_tmpls_cap) {
-            size_t newcap = rdb_tmpls_cap ? rdb_tmpls_cap * 2 : 16;
-            while (newcap <= id) newcap *= 2;
-            rdb_tmpls = zrealloc(rdb_tmpls, sizeof(hashTemplate *) * newcap);
-            memset(rdb_tmpls + rdb_tmpls_cap, 0, sizeof(hashTemplate *) * (newcap - rdb_tmpls_cap));
-            rdb_tmpls_cap = newcap;
-        }
+        hashTemplateIncrHoldRef(tmpl);
         rdb_tmpls[id] = tmpl;
 
         /* Free fields array (template made copies). */
@@ -1971,9 +1999,7 @@ int rdbLoadHashTemplates(rio *rdb) {
     return C_OK;
 
 err:
-    zfree(rdb_tmpls);
-    rdb_tmpls = NULL;
-    rdb_tmpls_cap = 0;
+    rdbClearHashTemplates();
     return C_ERR;
 }
 
@@ -1986,6 +2012,10 @@ hashTemplate *rdbGetHashTemplateById(uint64_t id) {
 /* Clear RDB template array after load. */
 void rdbClearHashTemplates(void) {
     if (rdb_tmpls) {
+        for (size_t i = 0; i < rdb_tmpls_cap; i++) {
+            if (rdb_tmpls[i] != NULL)
+                hashTemplateDecrHoldRef(rdb_tmpls[i]);
+        }
         zfree(rdb_tmpls);
         rdb_tmpls = NULL;
         rdb_tmpls_cap = 0;

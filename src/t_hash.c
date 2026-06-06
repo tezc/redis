@@ -392,8 +392,8 @@ static int templateRegistryKeyCompare(dictCmpCache *cache, const void *k1,
 static void templateRegistryKeyDestructor(dict *d, void *key) {
     UNUSED(d);
     hashTemplate *tmpl = key;
-    /* propargv is freed in hashTemplateDecrClientRef when the last
-     * HIMPORT-prepared client releases the template. */
+    /* propargv is freed in hashTemplateDecrHoldRef when the last non-key
+     * holder releases the template. */
     serverAssert(tmpl->propargv == NULL);
     recycleTemplateId(tmpl->id);
     for (unsigned long long i = 0; i < tmpl->field_count; i++)
@@ -427,7 +427,7 @@ void hashTemplatesInit(void) {
 static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsigned long long field_count) {
     hashTemplate *tmpl = zmalloc(sizeof(*tmpl));
     tmpl->hash = hash;
-    tmpl->client_refcount = 0;
+    tmpl->hold_refcount = 0;
     atomicSet(tmpl->key_refcount, 0);
     tmpl->field_count = field_count;
     tmpl->next_pending_free = NULL;
@@ -441,14 +441,14 @@ static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsi
     return tmpl;
 }
 
-/* Free tmpl and remove from registry if both refcounts are zero.
+/* Free tmpl and remove from registry if all refcounts are zero.
  * Only called from hashTemplateDrainPendingFree (main thread,
  * pending_free_list_lock held). */
 static void hashTemplateTryFree(hashTemplate *tmpl) {
     unsigned long long key_ref;
     
     atomicGet(tmpl->key_refcount, key_ref);
-    if (tmpl->client_refcount == 0 && key_ref == 0)
+    if (tmpl->hold_refcount == 0 && key_ref == 0)
         dictDelete(htemplates->registry, tmpl);
 }
 
@@ -483,10 +483,9 @@ void hashTemplateIncrKeyRef(hashTemplate *tmpl) {
     atomicIncr(htemplates->total_key_refs, 1);
 }
 
-/* Increment client_refcount (called when a client binds the template via
- * HIMPORT PREPARE or caches it for HSETC). */
-void hashTemplateIncrClientRef(hashTemplate *tmpl) {
-    tmpl->client_refcount++;
+/* Increment hold_refcount while non-key state references the template. */
+void hashTemplateIncrHoldRef(hashTemplate *tmpl) {
+    tmpl->hold_refcount++;
 }
 
 /* Push template to pending free list if not already queued. Freeing templates
@@ -501,15 +500,14 @@ static void hashTemplateQueueForFree(hashTemplate *tmpl) {
     pthread_mutex_unlock(&htemplates->pending_free_list_lock);
 }
 
-/* Decrement client_refcount. If both refcounts drop to 0,
+/* Decrement hold_refcount. If both refcounts drop to 0,
  * push to pending free list for cleanup by serverCron. */
-void hashTemplateDecrClientRef(hashTemplate *tmpl) {
-    serverAssert(tmpl->client_refcount > 0);
-    tmpl->client_refcount--;
-    if (tmpl->client_refcount > 0) return;
+void hashTemplateDecrHoldRef(hashTemplate *tmpl) {
+    serverAssert(tmpl->hold_refcount > 0);
+    tmpl->hold_refcount--;
+    if (tmpl->hold_refcount > 0) return;
 
-    /* No HIMPORT-prepared client left: nothing can issue HIMPORT SET against
-     * this template, so the cached propargv is dead weight. */
+    /* No non-key holder is left, so the cached propagation argv is dead weight. */
     if (tmpl->propargv) {
         /* Field robjs live at propargv[2 .. 2+field_count). */
         for (unsigned long long i = 0; i < tmpl->field_count; i++)
@@ -3458,7 +3456,7 @@ void hsetCommand(client *c) {
  *   - sorts the field names
  *   - computes value_order (user argv index for each sorted field position)
  *   - looks up the global template registry and creates the hashTemplate if
- *     the layout is new, then takes a client_refcount on it
+ *     the layout is new, then takes a hold reference on it
  *   - stores name + tmpl + value_order as a himportFieldset on the client
  *
  * HIMPORT SET then just looks up the fieldset by name and writes the key
@@ -3485,7 +3483,7 @@ typedef struct himportFieldsetList {
 static void himportFieldsetFree(himportFieldset *fs) {
     if (!fs) return;
     if (fs->name) sdsfree(fs->name);
-    if (fs->tmpl) hashTemplateDecrClientRef(fs->tmpl);
+    if (fs->tmpl) hashTemplateDecrHoldRef(fs->tmpl);
     if (fs->value_order) zfree(fs->value_order);
 }
 
@@ -3607,7 +3605,7 @@ static int himportCmpFieldIdx(const void *a, const void *b) {
  * Register a named fieldset on this client so subsequent HIMPORT SET calls
  * only have to pass values (not field names). Sorts the fields alphabetically
  * and looks up / creates the matching template in the registry, taking a
- * client_refcount on it. The original user-provided field order is preserved
+ * hold reference on it. The original user-provided field order is preserved
  * as field_order[] so HIMPORT SET can map its positional values back into
  * template-sorted order. Rejects duplicate field names in the fieldset. */
 void himportPrepareCommand(client *c) {
@@ -3640,9 +3638,9 @@ void himportPrepareCommand(client *c) {
         }
     }
 
-    /* Get or create tmpl with sorted fields and hold a client_refcount. */
+    /* Get or create tmpl with sorted fields and hold a reference. */
     hashTemplate *tmpl = hashTemplateGetOrCreate(sorted_fields, field_count);
-    hashTemplateIncrClientRef(tmpl);
+    hashTemplateIncrHoldRef(tmpl);
     zfree(sorted_fields);
 
     himportFieldsetAdd(c, sdsdup(fieldset_name), tmpl, field_order);
@@ -3721,12 +3719,12 @@ void himportDiscardallCommand(client *c) {
 
 /* Per-client cache of the last HSETC template — when consecutive calls share
  * the same field schema (the common case during replication/AOF replay) we
- * skip computeFieldsHash + dictFind. The cached tmpl holds a client_refcount,
+ * skip computeFieldsHash + dictFind. The cached tmpl holds a reference,
  * so tmpl->fields stays alive and serves as the comparison snapshot. */
 void hsetcCacheFree(client *c) {
     hashTemplate *tmpl = c->hsetc_cache;
     if (!tmpl) return;
-    hashTemplateDecrClientRef(tmpl);
+    hashTemplateDecrHoldRef(tmpl);
     c->hsetc_cache = NULL;
 }
 
@@ -3771,7 +3769,7 @@ void hsetcCommand(client *c) {
         if (fields != stack_fields) zfree(fields);
 
         hsetcCacheFree(c);
-        hashTemplateIncrClientRef(tmpl);
+        hashTemplateIncrHoldRef(tmpl);
         c->hsetc_cache = tmpl;
     }
 
