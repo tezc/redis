@@ -1135,6 +1135,31 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         r himport discard t5_tpl
     }
 
+    test {convert: TMPL_LP -> TMPL_AR via HSET new fields (count > listpack-entries)} {
+        # hash-max-listpack-entries is 8 in this server. Start at the limit.
+        set fields {}; set values {}
+        for {set i 0} {$i < 8} {incr i} {
+            lappend fields "f$i"; lappend values "v$i"
+        }
+        r himport prepare t5b_tpl {*}$fields
+        r himport set t5b t5b_tpl {*}$values
+        assert_equal [r object encoding t5b] template-listpack
+
+        # Adding the 9th field via HSET grows a new template and pushes the
+        # count past the limit -> must escalate TMPL_LP to TMPL_ARRAY.
+        r hset t5b f8 v8
+        assert_equal [r object encoding t5b] template-array
+
+        # Data integrity across the conversion.
+        assert_equal [r hlen t5b] 9
+        for {set i 0} {$i < 9} {incr i} {
+            assert_equal [r hget t5b f$i] v$i
+        }
+
+        r del t5b
+        r himport discard t5b_tpl
+    }
+
     test {convert: TMPL_LP -> LISTPACK_EX via HEXPIRE (small)} {
         r himport prepare t6_tpl a b c d
         r himport set t6 t6_tpl 1 2 3 4

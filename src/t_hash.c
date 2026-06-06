@@ -1504,6 +1504,12 @@ int hashTypeSet(redisDb *db, kvobj *o, sds field, sds value, int flags) {
             o->ptr = hta;
         }
 
+        if (o->encoding == OBJ_ENCODING_TMPL_LP &&
+            new_field_count > server.hash_max_listpack_entries)
+        {
+            hashTypeConvert(db, o, OBJ_ENCODING_TMPL_ARRAY);
+        }
+
         /* update = 0 since we added a new field */
         goto cleanup;
     }
