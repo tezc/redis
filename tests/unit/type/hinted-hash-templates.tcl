@@ -561,6 +561,85 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     }
 
     # ============================================================
+    # HGETDEL - Get and delete fields (template-aware delete path)
+    # ============================================================
+
+    test {HGETDEL returns value and keeps template encoding} {
+        make_hashtmpl hgetdel:test a 1 b 2 c 3 d 4
+        assert_hashtmpl_encoding hgetdel:test
+        assert_equal [r hgetdel hgetdel:test FIELDS 1 b] {2}
+        assert_hashtmpl_encoding hgetdel:test
+        assert_equal [r hlen hgetdel:test] 3
+        assert_equal [r hexists hgetdel:test b] 0
+        assert_equal [r hget hgetdel:test a] 1
+    }
+
+    test {HGETDEL multiple fields on template-based hash} {
+        make_hashtmpl hgetdel:multi a 1 b 2 c 3 d 4 e 5
+        assert_equal [r hgetdel hgetdel:multi FIELDS 2 b d] {2 4}
+        assert_hashtmpl_encoding hgetdel:multi
+        assert_equal [r hlen hgetdel:multi] 3
+    }
+
+    test {HGETDEL non-existent field returns nil and keeps encoding} {
+        make_hashtmpl hgetdel:miss a 1 b 2
+        set res [r hgetdel hgetdel:miss FIELDS 1 zzz]
+        assert_equal [lindex $res 0] {}
+        assert_hashtmpl_encoding hgetdel:miss
+        assert_equal [r hlen hgetdel:miss] 2
+    }
+
+    test {HGETDEL all fields deletes the key} {
+        make_hashtmpl hgetdel:all a 1 b 2
+        assert_equal [r hgetdel hgetdel:all FIELDS 2 a b] {1 2}
+        assert_equal [r exists hgetdel:all] 0
+    }
+
+    # ============================================================
+    # HGETEX - Get and optionally set TTL (template-aware path)
+    # ============================================================
+
+    test {HGETEX without options returns values and keeps template encoding} {
+        make_hashtmpl hgetex:plain a 1 b 2 c 3
+        assert_hashtmpl_encoding hgetex:plain
+        assert_equal [r hgetex hgetex:plain FIELDS 2 a c] {1 3}
+        assert_hashtmpl_encoding hgetex:plain
+    }
+
+    test {HGETEX non-existent field returns nil and keeps encoding} {
+        make_hashtmpl hgetex:miss a 1 b 2
+        set res [r hgetex hgetex:miss FIELDS 1 zzz]
+        assert_equal [lindex $res 0] {}
+        assert_hashtmpl_encoding hgetex:miss
+    }
+
+    test {HGETEX PERSIST converts away from template, no TTL set} {
+        make_hashtmpl hgetex:persist a 1 b 2
+        assert_hashtmpl_encoding hgetex:persist
+        assert_equal [r hgetex hgetex:persist PERSIST FIELDS 1 a] {1}
+        # Any expiration flag forces a template hash into an HFE-capable
+        # encoding (listpackex or hashtable); it is no longer template-based.
+        set enc [r object encoding hgetex:persist]
+        assert {$enc ne "template-listpack" && $enc ne "template-array"}
+        assert_equal [lindex [r httl hgetex:persist FIELDS 1 a] 0] -1
+        assert_equal [r hget hgetex:persist a] 1
+    }
+
+    # EX conversion target is listpackex only when it fits the listpack limits;
+    # under the TMPL_ARRAY iter (entries=0) it becomes hashtable instead.
+    if {$encoding eq "template-listpack"} {
+    test {HGETEX EX converts template to listpackex and sets TTL} {
+        make_hashtmpl hgetex:ex name alice email alice@example.com
+        assert_hashtmpl_encoding hgetex:ex
+        assert_equal [r hgetex hgetex:ex EX 100 FIELDS 1 name] {alice}
+        assert_listpackex_encoding hgetex:ex
+        set ttl [lindex [r httl hgetex:ex FIELDS 1 name] 0]
+        assert {$ttl > 0 && $ttl <= 100}
+        assert_equal [r hget hgetex:ex email] alice@example.com
+    }
+    } ;# end if template-listpack
+
+    # ============================================================
     # HSET - Adding new fields (creates new template)
     # ============================================================
 
