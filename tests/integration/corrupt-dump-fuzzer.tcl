@@ -46,6 +46,15 @@ proc generate_collections {suffix elements} {
         $rd read ; # Discard replies
     }
     $rd close
+    
+    set fields {}
+    set vals {}
+    for {set j 0} {$j < $elements} {incr j} {
+        lappend fields f$j
+        lappend vals $j
+    }
+    r himport prepare tmplfs$suffix {*}$fields
+    r himport set htmpl$suffix tmplfs$suffix {*}$vals
 }
 
 # generate keys with various types and encodings

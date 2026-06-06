@@ -1389,3 +1389,67 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         r config set hash-min-template-entries $prev_m
     }
 }
+
+# ============================================================
+# RESTORE deep validation (sanitize-dump-payload yes).
+# A template payload must carry strictly sorted field names; the
+# field lookup binary search depends on it and duplicate fields are
+# illegal, mirroring the duplicate-field checks done for regular
+# hashes. Out-of-order or duplicate fields must be rejected.
+# ============================================================
+start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
+              overrides {hash-min-template-entries 0
+                         sanitize-dump-payload yes
+                         loglevel debug}} {
+
+    # Patching field-name bytes invalidates the CRC footer; skip the
+    # checksum so the deep field validation is what rejects the payload.
+    r debug set-skip-checksum-validation 1
+
+    # Build a fresh TMPL_LP / TMPL_ARRAY dump for fields field1,field2 -> 1,2.
+    # The field names are long and distinctive so the byte substitutions below
+    # only ever hit the field-name bytes, never the value or footer bytes.
+    proc tmpl_dump {enc} {
+        r del rk
+        catch {r himport discard rtpl}
+        r himport prepare rtpl field1 field2
+        r himport set rk rtpl 1 2
+        assert_equal [r object encoding rk] $enc
+        set dump [r dump rk]
+        r del rk
+        r himport discard rtpl
+        return $dump
+    }
+
+    foreach {enc maxlp} {template-listpack 128 template-array 0} {
+        r config set hash-max-listpack-entries $maxlp
+
+        # The RESTORE reply is always the generic "Bad data format", so we
+        # assert the specific reason via the rdbReportCorruptRDB log message.
+        test "RESTORE deep validation: $enc accepts sorted fields" {
+            set dump [tmpl_dump $enc]
+            r restore rk 0 $dump
+            assert_equal [r object encoding rk] $enc
+            assert_equal [r hgetall rk] {field1 1 field2 2}
+            r del rk
+        }
+
+        test "RESTORE deep validation: $enc rejects out-of-order fields" {
+            set dump [tmpl_dump $enc]
+            # Swap the names so the stored fields become descending (field2, field1).
+            set bad [string map {field1 field2 field2 field1} $dump]
+            set loglines [count_log_lines 0]
+            assert_error "*Bad data format*" {r restore rk 0 $bad}
+            wait_for_log_messages 0 {"*fields not strictly sorted*"} $loglines 50 100
+        }
+
+        test "RESTORE deep validation: $enc rejects duplicate fields" {
+            set dump [tmpl_dump $enc]
+            # Collapse field1 -> field2 so both stored fields are identical.
+            set bad [string map {field1 field2} $dump]
+            set loglines [count_log_lines 0]
+            assert_error "*Bad data format*" {r restore rk 0 $bad}
+            wait_for_log_messages 0 {"*fields not strictly sorted*"} $loglines 50 100
+        }
+    }
+}

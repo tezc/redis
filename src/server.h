@@ -3982,6 +3982,7 @@ void hashTemplateIncrHoldRef(hashTemplate *tmpl);
 void hashTemplateDecrHoldRef(hashTemplate *tmpl);
 
 void hashTemplateDrainPendingFree(void);
+int hashTemplateValidateFields(sds *fields, unsigned long long field_count);
 hashTemplate *hashTemplateGetById(uint64_t id);
 void hashTemplatesInit(void);
 hashTemplate *hashTemplateLpGetTemplate(unsigned char *lp);

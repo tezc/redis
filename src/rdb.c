@@ -1943,6 +1943,14 @@ static int rdbEnsureHashTemplatesCap(uint64_t id) {
     return C_OK;
 }
 
+/* Allocate an sds array of 'n' entries, where 'n' comes from a possibly corrupt
+ * RDB payload. Guards the size multiplication against overflow and returns NULL
+ * (caller reports corruption) instead of OOM-panicking via zmalloc(). */
+static sds *rdbTryAllocSdsArray(uint64_t n) {
+    if (n > SIZE_MAX / sizeof(sds)) return NULL;
+    return ztrymalloc(sizeof(sds) * (size_t)n);
+}
+
 int rdbLoadHashTemplates(rio *rdb) {
     uint64_t num_tmpls;
 
@@ -1972,7 +1980,12 @@ int rdbLoadHashTemplates(rio *rdb) {
         }
 
         /* Allocate fields array. */
-        sds *fields = zmalloc(sizeof(sds) * field_count);
+        sds *fields = rdbTryAllocSdsArray(field_count);
+        if (fields == NULL) {
+            rdbReportCorruptRDB("Hash template field count %llu too large",
+                (unsigned long long)field_count);
+            goto err;
+        }
 
         /* Read each field name. */
         for (uint64_t j = 0; j < field_count; j++) {
@@ -3026,15 +3039,27 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         if (len == RDB_LENERR) return NULL;
         if (len == 0) goto emptykey;
 
-        fields = zmalloc(sizeof(sds) * len);
+        fields = rdbTryAllocSdsArray(len);
+        if (fields == NULL) {
+            rdbReportCorruptRDB("TMPL_LP full field count %llu too large", (unsigned long long)len);
+            return NULL;
+        }
         for (uint64_t i = 0; i < len; i++) {
             fields[i] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
             if (fields[i] == NULL) {
-                for (uint64_t j = 0; j < i; j++) 
+                for (uint64_t j = 0; j < i; j++)
                     sdsfree(fields[j]);
                 zfree(fields);
                 return NULL;
             }
+        }
+
+        /* Under deep validation reject out-of-order or duplicate fields. */
+        if (deep_integrity_validation && !hashTemplateValidateFields(fields, len)) {
+            rdbReportCorruptRDB("TMPL_LP full fields not strictly sorted");
+            for (uint64_t i = 0; i < len; i++) sdsfree(fields[i]);
+            zfree(fields);
+            return NULL;
         }
 
         size_t encoded_len;
@@ -3161,8 +3186,15 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         if (len == 0) goto emptykey;
 
         /* Allocate arrays for fields and values. */
-        fields = zmalloc(sizeof(sds) * len);
-        values = zmalloc(sizeof(sds) * len);
+        fields = rdbTryAllocSdsArray(len);
+        values = rdbTryAllocSdsArray(len);
+        if (fields == NULL || values == NULL) {
+            rdbReportCorruptRDB("TMPL_ARRAY field count %llu too large",
+                (unsigned long long)len);
+            zfree(fields);
+            zfree(values);
+            return NULL;
+        }
 
         /* Load all field-value pairs. */
         for (uint64_t i = 0; i < len; i++) {
@@ -3187,6 +3219,19 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                 zfree(values);
                 return NULL;
             }
+        }
+
+        /* Under deep validation reject out-of-order or duplicate fields. */
+        if (deep_integrity_validation &&
+            !hashTemplateValidateFields(fields, len)) {
+            rdbReportCorruptRDB("TMPL_ARRAY fields not strictly sorted");
+            for (uint64_t i = 0; i < len; i++) {
+                sdsfree(fields[i]);
+                sdsfree(values[i]);
+            }
+            zfree(fields);
+            zfree(values);
+            return NULL;
         }
 
         /* Get or create template. */
@@ -3219,7 +3264,12 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         unsigned long long field_count = tmpl->field_count;
 
         /* Allocate values array. */
-        values = zmalloc(sizeof(sds) * field_count);
+        values = rdbTryAllocSdsArray(field_count);
+        if (values == NULL) {
+            rdbReportCorruptRDB("TMPL_ARRAY REF field count %llu too large",
+                (unsigned long long)field_count);
+            return NULL;
+        }
 
         /* Load all values. */
         for (unsigned long long i = 0; i < field_count; i++) {

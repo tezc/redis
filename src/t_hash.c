@@ -613,6 +613,14 @@ int hashTemplateFieldIndex(hashTemplate *tmpl, sds field) {
     return -(lo + 1);
 }
 
+/* Return 1 if fields are strictly ascending (sorted, no duplicates), else 0. */
+int hashTemplateValidateFields(sds *fields, unsigned long long field_count) {
+    for (unsigned long long i = 1; i < field_count; i++)
+        if (sdscmplen(fields[i - 1], fields[i]) >= 0)
+            return 0;
+    return 1;
+}
+
 /* Return the equivalent non-template encoding name (listpack or hashtable)
  * for a template-encoded hash, by checking field/value sizes and count against
  * listpack limits. Useful sun existing test suite during development when the 
