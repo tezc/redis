@@ -315,12 +315,16 @@ static void listpackExFree(listpackEx *lpt) {
 /* Global template registry - also accessible via htemplates */
 static hashTemplates *htemplates = NULL;
 
-/* Allocate the smallest available template ID and register in by_id. */
+/* Allocate the smallest available template ID and register in by_id.
+ * Takes htemplates->lock around the by_id mutation so a BIO thread reading
+ * by_id in the free path never sees a reallocated/freed buffer. */
 static uint64_t allocateTemplateId(hashTemplate *tmpl) {
+    pthread_mutex_lock(&htemplates->lock);
     /* Scan for first free slot. TODO: need a faster way? */
     for (size_t i = 0; i < htemplates->by_id_cap; i++) {
         if (htemplates->by_id[i] == NULL) {
             htemplates->by_id[i] = tmpl;
+            pthread_mutex_unlock(&htemplates->lock);
             return i;
         }
     }
@@ -330,6 +334,7 @@ static uint64_t allocateTemplateId(hashTemplate *tmpl) {
     htemplates->by_id = zrealloc(htemplates->by_id, sizeof(*htemplates->by_id) * htemplates->by_id_cap);
     memset(htemplates->by_id + id, 0, sizeof(hashTemplate *) * (htemplates->by_id_cap - id));
     htemplates->by_id[id] = tmpl;
+    pthread_mutex_unlock(&htemplates->lock);
     return id;
 }
 
@@ -418,7 +423,7 @@ void hashTemplatesInit(void) {
     htemplates = zcalloc(sizeof(hashTemplates));
     htemplates->registry = dictCreate(&templateRegistryDictType);
     htemplates->pending_free_list = NULL;
-    pthread_mutex_init(&htemplates->pending_free_list_lock, NULL);
+    pthread_mutex_init(&htemplates->lock, NULL);
     server.htemplates = htemplates;
 }
 
@@ -443,7 +448,7 @@ static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsi
 
 /* Free tmpl and remove from registry if all refcounts are zero.
  * Only called from hashTemplateDrainPendingFree (main thread,
- * pending_free_list_lock held). */
+ * htemplates->lock held). */
 static void hashTemplateTryFree(hashTemplate *tmpl) {
     unsigned long long key_ref;
     
@@ -491,13 +496,13 @@ void hashTemplateIncrHoldRef(hashTemplate *tmpl) {
 /* Push template to pending free list if not already queued. Freeing templates
  * is deferred to the main thread to handle key deletion in BIO threads. */
 static void hashTemplateQueueForFree(hashTemplate *tmpl) {
-    pthread_mutex_lock(&htemplates->pending_free_list_lock);
+    pthread_mutex_lock(&htemplates->lock);
     if (!tmpl->pending_free) {
         tmpl->pending_free = 1;
         tmpl->next_pending_free = htemplates->pending_free_list;
         htemplates->pending_free_list = tmpl;
     }
-    pthread_mutex_unlock(&htemplates->pending_free_list_lock);
+    pthread_mutex_unlock(&htemplates->lock);
 }
 
 /* Decrement hold_refcount. If both refcounts drop to 0,
@@ -536,7 +541,7 @@ void hashTemplateDecrKeyRef(hashTemplate *tmpl) {
 
 /* Drain pending free list. Called from serverCron (main thread). */
 void hashTemplateDrainPendingFree(void) {
-    pthread_mutex_lock(&htemplates->pending_free_list_lock);
+    pthread_mutex_lock(&htemplates->lock);
     hashTemplate *head = htemplates->pending_free_list;
     htemplates->pending_free_list = NULL;
     while (head) {
@@ -546,7 +551,7 @@ void hashTemplateDrainPendingFree(void) {
         hashTemplateTryFree(head);
         head = next;
     }
-    pthread_mutex_unlock(&htemplates->pending_free_list_lock);
+    pthread_mutex_unlock(&htemplates->lock);
 }
 
 /* Get number of templates in the registry. */
@@ -723,9 +728,15 @@ unsigned char *hashTemplateLpCreate(hashTemplate *tmpl, sds *values) {
     return lp;
 }
 
-/* Free a template listpack (release template ref and free lp). */
+/* Free a template listpack (release template ref and free lp).
+ * The by_id lookup may run in a BIO thread (bulk async free), so it is taken
+ * under htemplates->lock to be safe against a concurrent main-thread
+ * allocateTemplateId() reallocating the by_id buffer. The lock is released
+ * before hashTemplateDecrKeyRef() since that acquires the same lock. */
 void hashTemplateLpFree(unsigned char *lp) {
+    pthread_mutex_lock(&htemplates->lock);
     hashTemplate *tmpl = hashTemplateLpGetTemplate(lp);
+    pthread_mutex_unlock(&htemplates->lock);
     hashTemplateDecrKeyRef(tmpl);
     lpFree(lp);
 }

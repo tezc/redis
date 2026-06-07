@@ -3885,7 +3885,11 @@ typedef struct hashTemplates {
     hashTemplate **by_id;       /* ID -> template lookup */
     size_t by_id_cap;           /* Allocated slots in by_id array. */
     hashTemplate *pending_free_list;        /* Pending free list head. */
-    pthread_mutex_t pending_free_list_lock; /* Protects pending_free_list. */
+    pthread_mutex_t lock;       /* Serializes the main thread against BIO
+                                 * threads over the registry's mutable shared
+                                 * bookkeeping: the by_id array (realloc/free)
+                                 * and the pending_free_list. The registry dict
+                                 * itself is main-thread only and unguarded. */
     int rdb_saving;              /* 1 during RDB save (compact refs). */
     redisAtomic size_t total_key_refs; /* Sum of key_refcount across all templates. */
 } hashTemplates;
