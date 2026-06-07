@@ -1989,6 +1989,17 @@ int rdbLoadHashTemplates(rio *rdb) {
         }
     }
 
+    /* hashTemplateGetOrCreate() requires strictly ascending fields: the
+     * per-template binary search (hashTemplateFieldIndex) silently misbehaves
+     * otherwise. A corrupt or incompatible RDB could carry unsorted/duplicate
+     * fields, so reject them here.  */
+    if (!hashTemplateValidateFields(fields, field_count)) {
+        rdbReportCorruptRDB("Hash template fields not strictly sorted");
+        for (uint64_t j = 0; j < field_count; j++) sdsfree(fields[j]);
+        zfree(fields);
+        goto err;
+    }
+
     /* Get or create template. */
     hashTemplate *tmpl = hashTemplateGetOrCreate(fields, field_count);
     hashTemplateIncrHoldRef(tmpl);

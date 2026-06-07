@@ -1045,7 +1045,7 @@ int hashTypeIsExpired(const robj *o, uint64_t expireAt) {
 
 /* Returns listpack pointer of the object. */
 unsigned char *hashTypeListpackGetLp(robj *o) {
-    if (o->encoding == OBJ_ENCODING_LISTPACK || o->encoding == OBJ_ENCODING_TMPL_LP)
+    if (o->encoding == OBJ_ENCODING_LISTPACK)
         return o->ptr;
     else if (o->encoding == OBJ_ENCODING_LISTPACK_EX)
         return ((listpackEx*)o->ptr)->lp;
@@ -1132,7 +1132,13 @@ void hashTypeTryConversion(redisDb *db, kvobj *o, robj **argv, int start, int en
         }
         sum += len;
     }
-    if (!lpSafeToAdd(hashTypeListpackGetLp(o), sum))
+    /* o is one of LISTPACK / LISTPACK_EX / TMPL_LP here (guarded above). The
+     * raw listpack lives in o->ptr for LISTPACK and TMPL_LP; LISTPACK_EX wraps
+     * it. We don't use hashTypeListpackGetLp() so that helper can stay strict
+     * and keep panicking for TMPL_LP at every other call site. */
+    unsigned char *lp = (o->encoding == OBJ_ENCODING_LISTPACK_EX) ?
+                        ((listpackEx*)o->ptr)->lp : o->ptr;
+    if (!lpSafeToAdd(lp, sum))
         hashTypeConvert(db, o, target_enc);
 }
 
