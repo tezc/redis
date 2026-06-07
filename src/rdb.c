@@ -1861,21 +1861,22 @@ werr:
 /* Save the global hash template registry (id -> field names). Hashes saved
  * in REF form only carry [tid][values...] and look up their field names here
  * at load time.
- * Format: [OPCODE][num_tmpls][tpl1][tpl2]...
- * Each template: [id][field_count][field1][field2]... */
+ *
+ * Each active template is written as its own record, framed by an
+ * RDB_OPCODE_HASH_TEMPLATES opcode, so the loader consumes them inline in its
+ * main opcode loop with no leading count. This keeps the save a single pass
+ * and immune to concurrent key_refcount changes from BIO lazyfree threads: a
+ * template whose key_refcount drops to 0 mid-save is simply included or not,
+ * with no count left to contradict the body.
+ * Each record: [OPCODE][id][field_count][field1][field2]... */
 ssize_t rdbSaveHashTemplates(rio *rdb) {
     ssize_t written = 0;
     ssize_t ret;
 
-    uint64_t num_tmpls = hashTemplateCountActive();
-    if (num_tmpls == 0) return 0; /* Nothing to save */
+    if (!server.htemplates || !server.htemplates->registry) return 0;
 
-    if ((ret = rdbSaveType(rdb, RDB_OPCODE_HASH_TEMPLATES)) < 0) return -1;
-    written += ret;
-    if ((ret = rdbSaveLen(rdb, num_tmpls)) < 0) return -1;
-    written += ret;
-
-    /* Mark that templates have been saved (for compact key refs). */
+    /* Save template-encoded hashes in compact REF form (id + values). Without
+     * this flag (e.g. DUMP) they are written self-contained in full form. */
     server.htemplates->rdb_saving = 1;
 
     dictIterator *di = dictGetIterator(server.htemplates->registry);
@@ -1886,6 +1887,8 @@ ssize_t rdbSaveHashTemplates(rio *rdb) {
         atomicGet(tmpl->key_refcount, key_ref);
         if (key_ref == 0) continue;
 
+        if ((ret = rdbSaveType(rdb, RDB_OPCODE_HASH_TEMPLATES)) < 0) goto werr;
+        written += ret;
         if ((ret = rdbSaveLen(rdb, tmpl->id)) < 0) goto werr;
         written += ret;
         if ((ret = rdbSaveLen(rdb, tmpl->field_count)) < 0) goto werr;
@@ -1898,8 +1901,6 @@ ssize_t rdbSaveHashTemplates(rio *rdb) {
         }
     }
     dictReleaseIterator(di);
-
-    serverLog(LL_DEBUG, "Saved %lu hash templates to RDB", (unsigned long)num_tmpls);
     return written;
 
 werr:
@@ -1907,9 +1908,10 @@ werr:
     return -1;
 }
 
-/* Load hash template registry from RDB.
- * Format: [num_tmpls][tpl1][tpl2]...
- * Each template: [id][field_count][field1][field2]...
+/* Load one hash template record (one RDB_OPCODE_HASH_TEMPLATES opcode). The
+ * main load loop calls this once per record; the template section ends
+ * naturally when the next opcode is something else.
+ * Record: [id][field_count][field1][field2]...
  * Builds rdb_tmpls mapping from saved ID to loaded template. */
 static hashTemplate **rdb_tmpls = NULL;
 static size_t rdb_tmpls_cap = 0;
@@ -1952,63 +1954,51 @@ static sds *rdbTryAllocSdsArray(uint64_t n) {
 }
 
 int rdbLoadHashTemplates(rio *rdb) {
-    uint64_t num_tmpls;
+    uint64_t id, field_count;
 
-    /* Read number of templates. */
-    if ((num_tmpls = rdbLoadLen(rdb, NULL)) == RDB_LENERR)
-        return C_ERR;
+    /* Read template ID. */
+    if ((id = rdbLoadLen(rdb, NULL)) == RDB_LENERR)
+        goto err;
 
-    if (num_tmpls == 0)
-        return C_OK;
+    /* Read field count. */
+    if ((field_count = rdbLoadLen(rdb, NULL)) == RDB_LENERR)
+        goto err;
 
-    for (uint64_t i = 0; i < num_tmpls; i++) {
-        uint64_t id, field_count;
-
-        /* Read template ID. */
-        if ((id = rdbLoadLen(rdb, NULL)) == RDB_LENERR) 
-            goto err;
-
-        /* Read field count. */
-        if ((field_count = rdbLoadLen(rdb, NULL)) == RDB_LENERR)
-            goto err;
-
-        if (rdbEnsureHashTemplatesCap(id) != C_OK)
-            goto err;
-        if (rdb_tmpls[id] != NULL) {
-            rdbReportCorruptRDB("Duplicate hash template ID %llu", (unsigned long long)id);
-            goto err;
-        }
-
-        /* Allocate fields array. */
-        sds *fields = rdbTryAllocSdsArray(field_count);
-        if (fields == NULL) {
-            rdbReportCorruptRDB("Hash template field count %llu too large",
-                (unsigned long long)field_count);
-            goto err;
-        }
-
-        /* Read each field name. */
-        for (uint64_t j = 0; j < field_count; j++) {
-            fields[j] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
-            if (fields[j] == NULL) {
-                for (uint64_t k = 0; k < j; k++) sdsfree(fields[k]);
-                zfree(fields);
-                goto err;
-            }
-        }
-
-        /* Get or create template. */
-        hashTemplate *tmpl = hashTemplateGetOrCreate(fields, field_count);
-        hashTemplateIncrHoldRef(tmpl);
-        rdb_tmpls[id] = tmpl;
-
-        /* Free fields array (template made copies). */
-        for (uint64_t j = 0; j < field_count; j++) 
-            sdsfree(fields[j]);
-        zfree(fields);
+    if (rdbEnsureHashTemplatesCap(id) != C_OK)
+        goto err;
+    if (rdb_tmpls[id] != NULL) {
+        rdbReportCorruptRDB("Duplicate hash template ID %llu", (unsigned long long)id);
+        goto err;
     }
 
-    serverLog(LL_DEBUG, "Loaded %lu hash templates from RDB", (unsigned long)num_tmpls);
+    /* Allocate fields array. */
+    sds *fields = rdbTryAllocSdsArray(field_count);
+    if (fields == NULL) {
+        rdbReportCorruptRDB("Hash template field count %llu too large",
+            (unsigned long long)field_count);
+        goto err;
+    }
+
+    /* Read each field name. */
+    for (uint64_t j = 0; j < field_count; j++) {
+        fields[j] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
+        if (fields[j] == NULL) {
+            for (uint64_t k = 0; k < j; k++) sdsfree(fields[k]);
+            zfree(fields);
+            goto err;
+        }
+    }
+
+    /* Get or create template. */
+    hashTemplate *tmpl = hashTemplateGetOrCreate(fields, field_count);
+    hashTemplateIncrHoldRef(tmpl);
+    rdb_tmpls[id] = tmpl;
+
+    /* Free fields array (template made copies). */
+    for (uint64_t j = 0; j < field_count; j++)
+        sdsfree(fields[j]);
+    zfree(fields);
+
     return C_OK;
 
 err:

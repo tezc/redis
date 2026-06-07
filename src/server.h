@@ -3995,7 +3995,6 @@ unsigned char *hashTemplateLpCreate(hashTemplate *tmpl, sds *values);
 hashTemplateArray *hashTemplateArrayCreate(hashTemplate *tmpl, sds *values, int take);
 robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values);
 size_t hashTemplateRegistrySize(void);
-size_t hashTemplateCountActive(void);
 size_t hashTemplateKeyCount(void);
 unsigned char *hashTypeListpackGetLp(robj *o);
 uint64_t hashTypeGetMinExpire(robj *o, int accurate);

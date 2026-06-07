@@ -568,24 +568,6 @@ size_t hashTemplateKeyCount(void) {
     return count;
 }
 
-/* Count templates with key_refcount > 0 (for RDB save). */
-size_t hashTemplateCountActive(void) {
-    if (!htemplates->registry) return 0;
-
-    size_t count = 0;
-    dictIterator *di = dictGetIterator(htemplates->registry);
-    dictEntry *de;
-    while ((de = dictNext(di)) != NULL) {
-        hashTemplate *tmpl = dictGetKey(de);
-        unsigned long long key_ref;
-        atomicGet(tmpl->key_refcount, key_ref);
-        if (key_ref > 0)
-            count++;
-    }
-    dictReleaseIterator(di);
-    return count;
-}
-
 /* Lazy-build the propargv. Field robjs are stored contiguously at
  * propargv[2 .. 2+field_count), making them directly usable both for
  * propagation and for keyspace subkey notifications. Returns the field
