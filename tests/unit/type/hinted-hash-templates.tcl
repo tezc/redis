@@ -465,6 +465,20 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         assert_match "*unknown command*" $err
     }
 
+    test {HSETC is rejected from scripts (EVAL/FCALL)} {
+        catch {r eval {return redis.call('HSETC', KEYS[1], 'a', 'va')} 1 hsetc:eval} e1
+        assert_match "*not allowed from script*" $e1
+        r function load replace {#!lua name=hsetclib
+            redis.register_function('hsetc_call', function(keys, args)
+                return redis.call('HSETC', keys[1], 'a', 'va')
+            end)}
+        catch {r fcall hsetc_call 1 hsetc:fcall} e2
+        assert_match "*not allowed from script*" $e2
+        # No corrupt template/key created via either path.
+        assert_equal 0 [r exists hsetc:eval]
+        assert_equal 0 [r exists hsetc:fcall]
+    }
+
     # ============================================================
     # Basic hash operations on template-based hashes
     # ============================================================
@@ -1203,6 +1217,80 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
     }
 }
 } ;# end foreach encoding
+
+# Disk-based replica (repl-diskless-load disabled): the received RDB is written
+# to disk and loaded via rdbLoad(). A second full resync must not leak the
+# load-time template registry (mirrors the diskless test for the disk path).
+start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
+              overrides {hash-min-template-entries 0 repl-diskless-sync no}} {
+    start_server {overrides {hash-min-template-entries 0 repl-diskless-load disabled}} {
+        test {Disk-based replica survives repeated full resyncs with templates} {
+            set master [srv -1 client]
+            set master_host [srv -1 host]
+            set master_port [srv -1 port]
+            set replica [srv 0 client]
+
+            $master flushall
+            $master himport prepare u a b c
+            $master himport set dr:k1 u 1 2 3
+            $master himport set dr:k2 u 4 5 6
+
+            $replica replicaof $master_host $master_port
+            wait_for_sync $replica
+            assert_equal [$replica hget dr:k1 a] 1
+            set tmpls [s 0 hash_templates]
+            set keys [s 0 hash_template_keys]
+
+            # Force full resync #2 (changing the master replid defeats partial
+            # resync) so the template registry is loaded a second time.
+            $replica replicaof no one
+            $master debug change-repl-id
+            $replica replicaof $master_host $master_port
+            wait_for_sync $replica
+
+            assert_equal PONG [$replica ping]
+            assert_equal [$replica hget dr:k1 a] 1
+            assert_equal [$replica hget dr:k2 c] 6
+            assert_equal $tmpls [s 0 hash_templates]
+            assert_equal $keys [s 0 hash_template_keys]
+            assert {[s -1 sync_full] >= 2}
+        }
+    }
+}
+
+# Chained replication A->B->C: HSETC (the propagated form of HIMPORT SET) must
+# flow down the chain and reconstruct the template hash on every node.
+start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "cluster:skip" "external:skip"}
+              overrides {hash-min-template-entries 0}} {
+    start_server {overrides {hash-min-template-entries 0}} {
+        start_server {overrides {hash-min-template-entries 0}} {
+            test {Chained replication propagates template hashes A->B->C} {
+                set a [srv -2 client]
+                set a_host [srv -2 host]
+                set a_port [srv -2 port]
+                set b [srv -1 client]
+                set b_host [srv -1 host]
+                set b_port [srv -1 port]
+                set c [srv 0 client]
+
+                $b replicaof $a_host $a_port
+                $c replicaof $b_host $b_port
+                wait_for_sync $b
+                wait_for_sync $c
+
+                $a himport prepare u name email
+                $a himport set chain:1 u alice alice@x.com
+
+                wait_for_condition 50 100 { [$c exists chain:1] == 1 } else {
+                    fail "template hash not propagated to C"
+                }
+                assert_equal [$c hgetall chain:1] {name alice email alice@x.com}
+                assert_equal [$c object encoding chain:1] template-listpack
+                assert_equal [$b hget chain:1 email] alice@x.com
+            }
+        }
+    }
+}
 
 # hashTypeTryConvertToTemplate() must honor the disabled (0) sentinel: a plain
 # hash loaded from RDB converts to a template encoding only when the feature is
