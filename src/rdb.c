@@ -1958,17 +1958,17 @@ int rdbLoadHashTemplates(rio *rdb) {
 
     /* Read template ID. */
     if ((id = rdbLoadLen(rdb, NULL)) == RDB_LENERR)
-        goto err;
+        return C_ERR;
 
     /* Read field count. */
     if ((field_count = rdbLoadLen(rdb, NULL)) == RDB_LENERR)
-        goto err;
+        return C_ERR;
 
     if (rdbEnsureHashTemplatesCap(id) != C_OK)
-        goto err;
+        return C_ERR;
     if (rdb_tmpls[id] != NULL) {
         rdbReportCorruptRDB("Duplicate hash template ID %llu", (unsigned long long)id);
-        goto err;
+        return C_ERR;
     }
 
     /* Allocate fields array. */
@@ -1976,7 +1976,7 @@ int rdbLoadHashTemplates(rio *rdb) {
     if (fields == NULL) {
         rdbReportCorruptRDB("Hash template field count %llu too large",
             (unsigned long long)field_count);
-        goto err;
+        return C_ERR;
     }
 
     /* Read each field name. */
@@ -1985,7 +1985,7 @@ int rdbLoadHashTemplates(rio *rdb) {
         if (fields[j] == NULL) {
             for (uint64_t k = 0; k < j; k++) sdsfree(fields[k]);
             zfree(fields);
-            goto err;
+            return C_ERR;
         }
     }
 
@@ -1997,7 +1997,7 @@ int rdbLoadHashTemplates(rio *rdb) {
         rdbReportCorruptRDB("Hash template fields not strictly sorted");
         for (uint64_t j = 0; j < field_count; j++) sdsfree(fields[j]);
         zfree(fields);
-        goto err;
+        return C_ERR;
     }
 
     /* Get or create template. */
@@ -2011,10 +2011,6 @@ int rdbLoadHashTemplates(rio *rdb) {
     zfree(fields);
 
     return C_OK;
-
-err:
-    rdbClearHashTemplates();
-    return C_ERR;
 }
 
 /* Get template by saved ID (for loading keys). */
@@ -4625,7 +4621,7 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
  * The rdb_loading_ctx argument holds objects to which the rdb will be loaded to,
  * currently it only allow to set db object and functionLibCtx to which the data
  * will be loaded (in the future it might contains more such objects). */
-int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadingCtx *rdb_loading_ctx) {
+static int rdbLoadRioWithLoadingCtxInternal(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadingCtx *rdb_loading_ctx) {
     uint64_t dbid = 0;
     int type, rdbver;
     uint64_t db_size = 0, expires_size = 0;
@@ -5030,6 +5026,19 @@ eoferr:
     return C_ERR;
 }
 
+/* Public entry point: load the RDB, then always release the load-time hash
+ * template registry (rdb_tmpls) regardless of success or failure. Every load
+ * path funnels through here -- disk load and AOF preamble via rdbLoadRio(),
+ * diskless replication by calling this directly -- so doing the cleanup here
+ * (rather than in any single caller) guarantees rdb_tmpls never leaks. If it
+ * leaks, the stale entries hold template hold-refs forever and the next full
+ * resync aborts with "Duplicate hash template ID", terminating the replica. */
+int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadingCtx *rdb_loading_ctx) {
+    int retval = rdbLoadRioWithLoadingCtxInternal(rdb, rdbflags, rsi, rdb_loading_ctx);
+    rdbClearHashTemplates();
+    return retval;
+}
+
 int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     return rdbLoadWithEmptyFunc(filename, rsi, rdbflags, NULL);
 }
@@ -5077,9 +5086,6 @@ int rdbLoadWithEmptyFunc(char *filename, rdbSaveInfo *rsi, int rdbflags, void (*
     fclose(fp);
     if (retval != C_OK && emptyDbFunc)
         emptyDbFunc(); /* Clean up partial db. */
-
-    /* Clear RDB template array after load. */
-    rdbClearHashTemplates();
 
     stopLoading(retval==C_OK);
     /* Reclaim the cache backed by rdb */

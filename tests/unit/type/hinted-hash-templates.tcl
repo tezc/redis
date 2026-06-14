@@ -1051,6 +1051,51 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:de
     }
 }
 
+# A diskless replica reaches rdbLoadRioWithLoadingCtx() directly, bypassing
+# rdbLoadRio(). The load-time template registry must be released after each load
+# so that a second full resync does not hit a stale "Duplicate hash template
+# ID". Force two full resyncs and assert the replica stays intact.
+start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
+              overrides {hash-min-template-entries 0 repl-diskless-sync yes repl-diskless-sync-delay 0}} {
+    start_server {overrides {hash-min-template-entries 0 repl-diskless-load swapdb}} {
+        test "Diskless replica survives repeated full resyncs with templates ($encoding)" {
+            set master [srv -1 client]
+            set master_host [srv -1 host]
+            set master_port [srv -1 port]
+            set replica [srv 0 client]
+
+            if {$encoding eq "template-array"} {
+                $master config set hash-max-listpack-entries 0
+            }
+            $master flushall
+            $master himport prepare u a b c
+            $master himport set dr:k1 u 1 2 3
+            $master himport set dr:k2 u 4 5 6
+
+            # Full resync #1 (diskless load into an empty db).
+            $replica replicaof $master_host $master_port
+            wait_for_sync $replica
+            assert_equal [$replica hget dr:k1 a] 1
+            set tmpls [s 0 hash_templates]
+            set keys [s 0 hash_template_keys]
+
+            # Force full resync #2 (changing the master replid defeats partial
+            # resync) so the template registry is loaded a second time.
+            $replica replicaof no one
+            $master debug change-repl-id
+            $replica replicaof $master_host $master_port
+            wait_for_sync $replica
+
+            assert_equal PONG [$replica ping]
+            assert_equal [$replica hget dr:k1 a] 1
+            assert_equal [$replica hget dr:k2 c] 6
+            assert_equal $tmpls [s 0 hash_templates]
+            assert_equal $keys [s 0 hash_template_keys]
+            assert {[s -1 sync_full] >= 2}
+        }
+    }
+}
+
 # ============================================================
 # AOF rewrite tests
 # ============================================================
@@ -1127,6 +1172,34 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
         assert_equal $enc_p1 "listpack"
         assert_equal [r hget mix:tmpl1 b] 2
         assert_equal [r hget mix:plain1 x] 100
+    }
+
+    # The load-time template registry (rdb_tmpls in rdb.c) must be released
+    # after every RDB load so that loading the same dataset more than once does
+    # not see a stale "Duplicate hash template ID". The AOF-preamble path loads
+    # via rdbLoadRio(); exercise it by reloading several times in a row.
+    test {Repeated AOF rdb-preamble loads keep templates stable} {
+        r config set aof-use-rdb-preamble yes
+        if {$encoding eq "template-array"} { r config set hash-max-listpack-entries 0 }
+        r flushall
+        waitForBgrewriteaof r
+
+        make_hashtmpl_aof aofreload:k1 a 1 b 2 c 3
+        make_hashtmpl_aof aofreload:k2 a 4 b 5 c 6
+        set tmpls_before [s hash_templates]
+        set keys_before [s hash_template_keys]
+
+        r bgrewriteaof
+        waitForBgrewriteaof r
+
+        for {set i 0} {$i < 3} {incr i} {
+            r debug loadaof
+            assert_equal PONG [r ping]
+            assert_equal $tmpls_before [s hash_templates]
+            assert_equal $keys_before [s hash_template_keys]
+        }
+        assert_equal [r hget aofreload:k1 a] 1
+        assert_equal [r hget aofreload:k2 c] 6
     }
 }
 } ;# end foreach encoding
