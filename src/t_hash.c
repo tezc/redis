@@ -2878,6 +2878,9 @@ static int hashTypeTryConvertCmpPair(const void *a, const void *b) {
 int hashTypeTryConvertToTemplate(robj *o) {
     size_t min_fields = server.hash_min_template_entries;
 
+    /* min_fields == 0 means the feature is disabled (the default). */
+    if (min_fields == 0) return 0;
+
     /* Only LP and HT (without HFE) can be converted. */
     if (o->encoding == OBJ_ENCODING_LISTPACK_EX) return 0;
     if (o->encoding == OBJ_ENCODING_TMPL_LP) return 0;

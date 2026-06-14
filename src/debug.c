@@ -684,11 +684,11 @@ NULL
             addReplyErrorObject(c,shared.nokeyerr);
             return;
         }
-        /* When hash_min_template_entries > 0, regular hashes get auto-converted
-         * to template encoding. Mask that here so the existing test suite, which
-         * asserts on listpack/hashtable, keeps passing under that config.
-         * TODO: Remove before merge. */
-        if (server.hash_min_template_entries > 0 &&
+        /* Report the real encoding (template-listpack/template-array). The
+         * TEMPORARY hash-template-mask-encoding shim (remove before merge) makes
+         * us report the legacy listpack/hashtable name instead, so the existing
+         * hash test suite passes with templates enabled. */
+        if (server.hash_template_mask_encoding &&
             (kv->encoding == OBJ_ENCODING_TMPL_LP ||
              kv->encoding == OBJ_ENCODING_TMPL_ARRAY))
             strenc = hashTemplateEquivalentEncoding(kv);

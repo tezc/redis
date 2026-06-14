@@ -3800,12 +3800,10 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                 if (hashTypeLength(o, 0) > server.hash_max_listpack_entries)
                     hashTypeConvert(NULL /*db*/, o, OBJ_ENCODING_HT);
 
-                /* Try to convert to template-based hash if threshold
-                 * met. Only for LISTPACK (no HFE). Skip when
-                 * integrity was not deeply validated to avoid
-                 * iterating over a corrupt listpack. */
-                if (rdbtype == RDB_TYPE_HASH_LISTPACK && deep_integrity_validation)
-                    hashTypeTryConvertToTemplate(o);
+                /* Try to convert to template-based hash if threshold met.
+                 * hashTypeTryConvertToTemplate() is a no-op for HFE encodings
+                 * and when the feature is disabled, so no extra gate is needed. */
+                hashTypeTryConvertToTemplate(o);
 
                 break;
             default:

@@ -2494,6 +2494,12 @@ struct redisServer {
                                        * templates are created only via HIMPORT
                                        * SET. Falling below the threshold via
                                        * HDEL converts back to listpack/ht. */
+    int hash_template_mask_encoding; /* TEMPORARY (remove before merge): when
+                                      * set, OBJECT ENCODING / DEBUG OBJECT report
+                                      * the legacy listpack/hashtable name for
+                                      * template-encoded hashes instead of
+                                      * template-*, so the existing hash test
+                                      * suite passes with templates enabled. */
 
     struct hashTemplates *htemplates;               /* Global template registry */
     size_t set_max_intset_entries;

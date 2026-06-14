@@ -1204,12 +1204,75 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
 }
 } ;# end foreach encoding
 
+# hashTypeTryConvertToTemplate() must honor the disabled (0) sentinel: a plain
+# hash loaded from RDB converts to a template encoding only when the feature is
+# enabled (> 0), never at the default 0.
+start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" "external:skip"}
+              overrides {hash-min-template-entries 0 hash-max-listpack-entries 64 appendonly no}} {
+    # "small" stays listpack (<= hash-max-listpack-entries), "big" is hashtable.
+    test {hash-min-template-entries=0: restart keeps plain hashes unconverted} {
+        r flushall
+        for {set i 0} {$i < 5}   {incr i} { r hset small f$i v$i }
+        for {set i 0} {$i < 200} {incr i} { r hset big f$i v$i }
+        assert_equal listpack  [r object encoding small]
+        assert_equal hashtable [r object encoding big]
+        r save
+        restart_server 0 true false
+        assert_equal listpack  [r object encoding small]
+        assert_equal hashtable [r object encoding big]
+        assert_equal 0 [s hash_templates]
+        assert_equal v3   [r hget small f3]
+        assert_equal v100 [r hget big f100]
+    }
+
+    test {hash-min-template-entries>0: restart converts listpack to TMPL_LP and hashtable to TMPL_ARRAY} {
+        r flushall
+        for {set i 0} {$i < 5}   {incr i} { r hset small f$i v$i }
+        for {set i 0} {$i < 200} {incr i} { r hset big f$i v$i }
+        assert_equal 0 [s hash_templates]
+        # Persist config so the restarted server loads with the feature enabled.
+        r config set hash-min-template-entries 4
+        r config rewrite
+        r save
+        restart_server 0 true false
+        # Both plain hashes were converted at load time: small via the listpack
+        # path, big via the hashtable path.
+        assert_equal template-listpack [r object encoding small]
+        assert_equal template-array    [r object encoding big]
+        assert_equal 2 [s hash_templates]
+        assert_equal v3   [r hget small f3]
+        assert_equal v100 [r hget big f100]
+    }
+
+    test {hash-min-template-entries>0: RESTORE converts plain listpack and hashtable hashes} {
+        r config set hash-min-template-entries 0
+        r flushall
+        wait_for_condition 50 20 { [s hash_templates] == 0 } else {
+            fail "templates not drained after flushall"
+        }
+        for {set i 0} {$i < 5}   {incr i} { r hset src_lp f$i v$i }
+        for {set i 0} {$i < 200} {incr i} { r hset src_ht f$i v$i }
+        assert_equal listpack  [r object encoding src_lp]
+        assert_equal hashtable [r object encoding src_ht]
+        set lp_payload [r dump src_lp]
+        set ht_payload [r dump src_ht]
+        r config set hash-min-template-entries 4
+        r restore dst_lp 0 $lp_payload
+        r restore dst_ht 0 $ht_payload
+        assert_equal template-listpack [r object encoding dst_lp]
+        assert_equal template-array    [r object encoding dst_ht]
+        assert_equal 2 [s hash_templates]
+        assert_equal v3   [r hget dst_lp f3]
+        assert_equal v100 [r hget dst_ht f100]
+    }
+}
+
 # ============================================================
 # Tests under hash-min-template-entries=1 (production default).
-# In this mode plain HSET auto-converts to a template encoding and
-# OBJECT ENCODING / DEBUG OBJECT report the equivalent non-template
-# encoding name ("listpack" / "hashtable") to keep behavior backward
-# compatible. The only public signal is INFO stats.
+# In this mode plain HSET auto-converts to a template encoding, which
+# OBJECT ENCODING / DEBUG OBJECT report as template-listpack / template-array
+# (the legacy listpack/hashtable name is only reported when the
+# hash-template-mask-encoding compat config is set).
 # ============================================================
 start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
               overrides {hash-min-template-entries 1}} {
@@ -1243,9 +1306,8 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
         lassign [tmpl_stats] t1 k1
         assert {$t1 > $t0}
         assert_equal [expr {$k1 - $k0}] 1
-        # Encoding is masked to "listpack" for backward compat.
-        assert_equal [r object encoding auto:1] "listpack"
-        assert_match "*encoding:listpack*" [r debug object auto:1]
+        assert_equal [r object encoding auto:1] "template-listpack"
+        assert_match "*encoding:template-listpack*" [r debug object auto:1]
         assert_equal [r hgetall auto:1] {a 1 b 2 c 3}
     }
 
@@ -1262,17 +1324,17 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
         assert_equal [r hget shared:2 b] 8
     }
 
-    test {threshold=1: large hash auto-converts and reports as hashtable} {
+    test {threshold=1: large hash auto-converts to template-array} {
         r flushall
         wait_tmpl_drain
-        # Force a low listpack threshold so equivalent encoding flips to
-        # "hashtable" deterministically regardless of test defaults.
+        # Force a low listpack threshold so the template uses the array variant
+        # deterministically regardless of test defaults.
         set saved [lindex [r config get hash-max-listpack-entries] 1]
         r config set hash-max-listpack-entries 16
         set cmd [list r hset big:1]
         for {set i 0} {$i < 32} {incr i} { lappend cmd "f$i" "v$i" }
         {*}$cmd
-        assert_equal [r object encoding big:1] "hashtable"
+        assert_equal [r object encoding big:1] "template-array"
         assert_equal [r hget big:1 f10] "v10"
         assert_equal [r hlen big:1] 32
         r config set hash-max-listpack-entries $saved
@@ -1302,7 +1364,7 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
         assert_equal $k_before $k_after
         assert_equal [r hgetall rdb:k1] {a 1 b 2 c 3}
         assert_equal [r hget rdb:k2 b] 8
-        assert_equal [r object encoding rdb:k1] "listpack"
+        assert_equal [r object encoding rdb:k1] "template-listpack"
     }
 
     test {threshold=1: HDEL releases template ref when key is dropped} {
@@ -1330,6 +1392,7 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
         assert_equal $t_before $t_after
         assert_equal $k_before $k_after
         assert_equal [r hgetall aof:1] {a 1 b 2 c 3}
+        assert_equal [r object encoding aof:1] "template-listpack"
     }
 }
 
