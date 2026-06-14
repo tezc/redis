@@ -494,15 +494,14 @@ void hashTemplateIncrHoldRef(hashTemplate *tmpl) {
 }
 
 /* Push template to pending free list if not already queued. Freeing templates
- * is deferred to the main thread to handle key deletion in BIO threads. */
-static void hashTemplateQueueForFree(hashTemplate *tmpl) {
-    pthread_mutex_lock(&htemplates->lock);
+ * is deferred to the main thread to handle key deletion in BIO threads.
+ * Caller must hold htemplates->lock. */
+static void hashTemplateQueueForFreeLocked(hashTemplate *tmpl) {
     if (!tmpl->pending_free) {
         tmpl->pending_free = 1;
         tmpl->next_pending_free = htemplates->pending_free_list;
         htemplates->pending_free_list = tmpl;
     }
-    pthread_mutex_unlock(&htemplates->lock);
 }
 
 /* Decrement hold_refcount. If both refcounts drop to 0,
@@ -512,7 +511,8 @@ void hashTemplateDecrHoldRef(hashTemplate *tmpl) {
     tmpl->hold_refcount--;
     if (tmpl->hold_refcount > 0) return;
 
-    /* No non-key holder is left, so the cached propagation argv is dead weight. */
+    /* No non-key holder is left, so the cached propagation argv is dead weight.
+     * propargv is main-thread-only state, so free it outside the lock. */
     if (tmpl->propargv) {
         /* Field robjs live at propargv[2 .. 2+field_count). */
         for (unsigned long long i = 0; i < tmpl->field_count; i++)
@@ -521,22 +521,33 @@ void hashTemplateDecrHoldRef(hashTemplate *tmpl) {
         tmpl->propargv = NULL;
     }
 
+    /* Test key_refcount and enqueue under the lock, as one critical section, so
+     * a concurrent hashTemplateDecrKeyRef() on a BIO thread cannot free tmpl in
+     * the window between this test and the enqueue (the lock also serializes
+     * with hashTemplateDrainPendingFree, which performs the actual free). */
+    pthread_mutex_lock(&htemplates->lock);
     unsigned long long key_ref;
     atomicGet(tmpl->key_refcount, key_ref);
     if (key_ref == 0)
-        hashTemplateQueueForFree(tmpl);
+        hashTemplateQueueForFreeLocked(tmpl);
+    pthread_mutex_unlock(&htemplates->lock);
 }
 
-/* Decrement key_refcount (called when hash key is deleted).
- * Thread-safe: uses atomic decrement and pending free queue. */
+/* Decrement key_refcount (called when a hash key is deleted, possibly from a
+ * BIO lazyfree thread). The decrement, the zero-test and the enqueue are done
+ * as one critical section under htemplates->lock: otherwise a BIO thread
+ * descheduled between the atomic decrement and the enqueue could touch tmpl
+ * after another path (DecrHoldRef + drain, or revival + delete) already freed
+ * it -> UAF/double-free. The lock also serializes with the drain that frees. */
 void hashTemplateDecrKeyRef(hashTemplate *tmpl) {
     unsigned long long new_val;
 
+    pthread_mutex_lock(&htemplates->lock);
     atomicIncrGet(tmpl->key_refcount, new_val, -1);
     atomicDecr(htemplates->total_key_refs, 1);
-
     if (new_val == 0)
-        hashTemplateQueueForFree(tmpl);
+        hashTemplateQueueForFreeLocked(tmpl);
+    pthread_mutex_unlock(&htemplates->lock);
 }
 
 /* Drain pending free list. Called from serverCron (main thread). */

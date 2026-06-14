@@ -1756,3 +1756,36 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
         }
     }
 }
+
+# Race the BIO key-ref drop (FLUSHALL ASYNC) against the main-thread hold-ref
+# drop (HIMPORT DISCARDALL) on template free. Probabilistic guard for ASan/TSan.
+start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" "external:skip"}
+              overrides {hash-min-template-entries 0
+                         lazyfree-lazy-user-flush yes}} {
+    test {template lifecycle fuzzer: BIO free races main-thread hold-ref drop} {
+        # Unique field names per round so templates fully release on the flush.
+        for {set round 0} {$round < 100} {incr round} {
+            for {set i 0} {$i < 10} {incr i} {
+                if {$i % 3 == 0} {
+                    set s {}
+                    for {set f 0} {$f < 40} {incr f} { lappend s r${round}_${i}_$f }
+                    set vals {}
+                    foreach f $s { lappend vals [string repeat v 80] }
+                } else {
+                    set s [list r${round}_${i}_a r${round}_${i}_b r${round}_${i}_c]
+                    set vals {x y z}
+                }
+                r himport prepare ts$i {*}$s
+                r himport set k:$round:$i ts$i {*}$vals
+            }
+            r flushall async
+            for {set p 0} {$p < 5} {incr p} { r ping }
+            r himport discardall
+        }
+        r flushall
+        wait_for_condition 200 50 { [s hash_templates] == 0 } else {
+            fail "templates did not drain: [s hash_templates]"
+        }
+        assert_equal PONG [r ping]
+    }
+}
