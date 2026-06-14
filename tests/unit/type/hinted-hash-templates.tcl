@@ -1757,6 +1757,45 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
     }
 }
 
+# Field counts spanning HASH_TMPL_STACK_ENTRIES (128): template code uses a
+# stack buffer for <=128 fields and a heap allocation for >128 (himport set,
+# createHashObjectFromTemplate, HDEL field-array rebuild). Verify data is
+# correct across that boundary, including the binary-search HGET and reload.
+start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}} {
+    foreach fc {127 128 129 256} {
+        test "template large field-count correctness: $fc fields" {
+            r flushall
+            set fields {}
+            for {set i 0} {$i < $fc} {incr i} { lappend fields f[format %04d $i] }
+            set vals {}
+            foreach f $fields { lappend vals val_$f }
+            r himport prepare big {*}$fields
+            r himport set k big {*}$vals
+
+            assert_match {template-*} [r object encoding k]
+            assert_equal $fc [r hlen k]
+            # Every field resolves (binary search over the sorted field array,
+            # incl. the heap path for fc > 128); a missing field returns nil.
+            foreach f $fields { assert_equal val_$f [r hget k $f] }
+            assert_equal {} [r hget k nosuchfield]
+            assert_equal [expr {$fc * 2}] [llength [r hgetall k]]
+
+            # HDEL one field rebuilds the template (field-array path) and the
+            # rest must stay correct.
+            assert_equal 1 [r hdel k [lindex $fields 1]]
+            assert_equal [expr {$fc - 1}] [r hlen k]
+            assert_equal {} [r hget k [lindex $fields 1]]
+            assert_equal val_[lindex $fields 0] [r hget k [lindex $fields 0]]
+            assert_equal val_[lindex $fields end] [r hget k [lindex $fields end]]
+
+            # Survives RDB round-trip (save/load of a large template).
+            r debug reload
+            assert_equal [expr {$fc - 1}] [r hlen k]
+            assert_equal val_[lindex $fields end] [r hget k [lindex $fields end]]
+        }
+    }
+}
+
 # Race the BIO key-ref drop (FLUSHALL ASYNC) against the main-thread hold-ref
 # drop (HIMPORT DISCARDALL) on template free. Probabilistic guard for ASan/TSan.
 start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" "external:skip"}
@@ -1789,3 +1828,99 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
         assert_equal PONG [r ping]
     }
 }
+
+# Active defrag relocates the per-key allocations of template-encoded hashes
+# (the TMPL_LP listpack blob, and the hashTemplateArray struct + its value
+# sds's for TMPL_ARRAY). defragKey must update ob->ptr and every values[] entry
+# without touching the shared template. Fragment many template hashes, run
+# active defrag, and assert the data is byte-identical afterwards (debug digest)
+# and the keys still resolve. Requires jemalloc; skipped otherwise.
+run_solo {defrag} {
+    proc wait_for_template_defrag_stop {maxtries delay} {
+        wait_for_condition $maxtries $delay {
+            [s active_defrag_running] eq 0
+        } else {
+            fail "defrag didn't stop (frag [s allocator_frag_ratio])."
+        }
+    }
+
+    start_server {tags {"defrag" "hinted-hash-templates" "external:skip" "tsan:skip" "needs:debug"}
+                  overrides {save "" appendonly no}} {
+        if {[string match {*jemalloc*} [s mem_allocator]] && [r debug mallctl arenas.page] <= 8192} {
+            test {Active defrag: template-encoded hashes keep data intact} {
+                r flushall
+                r config set hz 100
+                r config set activedefrag no
+                r config set active-defrag-threshold-lower 5
+                r config set active-defrag-cycle-min 65
+                r config set active-defrag-cycle-max 75
+                r config set active-defrag-ignore-bytes 100kb
+                r config set maxmemory 0
+                r config set hash-max-listpack-entries 128
+
+                # Two shared schemas: small -> template-listpack, big -> template-array.
+                set big {}
+                for {set f 0} {$f < 40} {incr f} { lappend big field_[format %02d $f] }
+                set bigval [string repeat x 80]
+
+                set n 20000
+                # HIMPORT fieldsets are per-client, so prepare on the same
+                # (deferring) connection that issues the HIMPORT SETs.
+                set rd [redis_deferring_client]
+                $rd himport prepare sm a b c   ; $rd read
+                $rd himport prepare bg {*}$big  ; $rd read
+                set batch 200
+                for {set j 0} {$j < $n} {incr j} {
+                    if {$j % 2 == 0} {
+                        $rd himport set k:$j sm v${j}a v${j}b v${j}c
+                    } else {
+                        set vals {}
+                        for {set f 0} {$f < 40} {incr f} { lappend vals $bigval }
+                        $rd himport set k:$j bg {*}$vals
+                    }
+                    if {($j + 1) % $batch == 0} {
+                        for {set i 0} {$i < $batch} {incr i} { $rd read }
+                    }
+                }
+                for {set j 0} {$j < [expr {$n % $batch}]} {incr j} { $rd read }
+
+                assert_equal template-listpack [r object encoding k:0]
+                assert_equal template-array    [r object encoding k:1]
+
+                # Fragment: delete half (j%4<2) so both schemas survive and both
+                # are freed, leaving holes in their size classes.
+                set deleted 0
+                for {set j 0} {$j < $n} {incr j} {
+                    if {($j % 4) < 2} { $rd del k:$j; incr deleted }
+                }
+                for {set j 0} {$j < $deleted} {incr j} { $rd read }
+                $rd close
+
+                after 120
+                if {$::verbose} { puts "frag before defrag: [s allocator_frag_ratio]" }
+
+                set digest [debug_digest]
+                catch {r config set activedefrag yes}
+                if {[r config get activedefrag] eq "activedefrag yes"} {
+                    wait_for_condition 100 100 {
+                        [s total_active_defrag_time] ne 0
+                    } else {
+                        fail "defrag not started."
+                    }
+                    wait_for_template_defrag_stop 500 100
+                }
+
+                # Data byte-identical after defrag moved the allocations.
+                assert_equal $digest [debug_digest]
+                # Survivors of both encodings still resolve (k:2 sm, k:3 bg).
+                assert_equal template-listpack [r object encoding k:2]
+                assert_equal template-array    [r object encoding k:3]
+                assert_equal v2a    [r hget k:2 a]
+                assert_equal $bigval [r hget k:3 field_00]
+                assert_equal $bigval [r hget k:3 field_39]
+                r save ;# iterate over all data / pointers
+            } {OK}
+        }
+    }
+} ;# run_solo
+
