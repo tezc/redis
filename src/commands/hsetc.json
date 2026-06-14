@@ -9,7 +9,8 @@
         "command_flags": [
             "WRITE",
             "DENYOOM",
-            "INTERNAL"
+            "INTERNAL",
+            "NOSCRIPT"
         ],
         "acl_categories": [
             "HASH"
