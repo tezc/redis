@@ -3,7 +3,7 @@
         "summary": "Creates a schema-based hash, replacing any existing key. Internal command propagated by HIMPORT SET.",
         "complexity": "O(N) where N is the number of field/value pairs.",
         "group": "hash",
-        "since": "8.0.0",
+        "since": "8.10.0",
         "arity": -4,
         "function": "hsetcCommand",
         "command_flags": [

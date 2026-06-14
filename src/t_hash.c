@@ -610,8 +610,8 @@ int hashTemplateValidateFields(sds *fields, unsigned long long field_count) {
 
 /* Return the equivalent non-template encoding name (listpack or hashtable)
  * for a template-encoded hash, by checking field/value sizes and count against
- * listpack limits. Useful sun existing test suite during development when the 
- * feature is enabled  via hash_min_template_entries config.
+ * listpack limits. Used by the hash-template-mask-encoding compat shim so the
+ * existing test suite can run with the feature enabled.
  * TODO: Remove before merge. */
 char *hashTemplateEquivalentEncoding(robj *o) {
     hashTemplate *tmpl = hashTypeGetTemplate(o);

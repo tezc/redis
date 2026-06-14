@@ -2061,6 +2061,7 @@ void clearClientConnectionState(client *c) {
     moduleNotifyUserChanged(c);
     discardTransaction(c);
     himportFieldsetFreeList(c);
+    hsetcCacheFree(c);
 
     pubsubUnsubscribeAllChannels(c,0);
     pubsubUnsubscribeShardAllChannels(c, 0);

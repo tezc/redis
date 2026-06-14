@@ -3,7 +3,7 @@
         "summary": "Removes a single session-local fieldset by name.",
         "complexity": "O(1)",
         "group": "hash",
-        "since": "9.0.0",
+        "since": "8.10.0",
         "arity": 3,
         "container": "HIMPORT",
         "function": "himportDiscardCommand",
