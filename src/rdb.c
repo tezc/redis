@@ -1938,7 +1938,18 @@ static int rdbEnsureHashTemplatesCap(uint64_t id) {
         newcap *= 2;
     }
 
-    rdb_tmpls = zrealloc(rdb_tmpls, sizeof(*rdb_tmpls) * newcap);
+    /* A corrupt RDB can carry a huge (but non-overflowing) id, forcing the
+     * id-indexed array to grow to id+1 entries. Use ztryrealloc so an
+     * oversized request fails cleanly as corruption instead of OOM-aborting
+     * the process (mirrors rdbTryAllocSdsArray below). On failure ztryrealloc
+     * leaves the old block intact, so keep rdb_tmpls/rdb_tmpls_cap untouched. */
+    hashTemplate **newarr = ztryrealloc(rdb_tmpls, sizeof(*rdb_tmpls) * newcap);
+    if (newarr == NULL) {
+        rdbReportCorruptRDB("Hash template ID %llu requires too much memory "
+            "(%zu entries)", (unsigned long long)id, newcap);
+        return C_ERR;
+    }
+    rdb_tmpls = newarr;
     memset(rdb_tmpls + rdb_tmpls_cap, 0,
         sizeof(*rdb_tmpls) * (newcap - rdb_tmpls_cap));
     rdb_tmpls_cap = newcap;
