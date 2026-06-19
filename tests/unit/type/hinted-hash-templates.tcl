@@ -1496,6 +1496,8 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
                          hash-max-listpack-value 64}} {
 
     test {convert: TMPL_LP -> TMPL_AR via HSET large value} {
+        # In-place update of an existing field with a value over
+        # hash-max-listpack-value (64) -> must escalate to TMPL_ARRAY.
         r himport prepare t5_tpl a b c d
         r himport set t5 t5_tpl 1 2 3 4
         assert_equal [r object encoding t5] template-listpack
@@ -1531,6 +1533,27 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
 
         r del t5b
         r himport discard t5b_tpl
+    }
+
+    test {convert: TMPL_LP -> TMPL_AR via HSET new field with large value} {
+        # Field count stays under hash-max-listpack-entries (8); only the new
+        # value crosses hash-max-listpack-value (64) -> must escalate to
+        # TMPL_ARRAY, mirroring the value-size rule of a plain listpack hash.
+        r himport prepare t5c_tpl a b c d
+        r himport set t5c t5c_tpl 1 2 3 4
+        assert_equal [r object encoding t5c] template-listpack
+
+        r hset t5c e [string repeat x 100]
+        assert_equal [r object encoding t5c] template-array
+
+        # Data integrity across the conversion.
+        assert_equal [r hlen t5c] 5
+        assert_equal [r hget t5c e] [string repeat x 100]
+        assert_equal [r hget t5c a] 1
+        assert_equal [r hget t5c d] 4
+
+        r del t5c
+        r himport discard t5c_tpl
     }
 
     test {convert: TMPL_LP -> LISTPACK_EX via HEXPIRE (small)} {

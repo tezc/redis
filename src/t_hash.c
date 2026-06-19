@@ -1456,7 +1456,23 @@ int hashTypeSet(redisDb *db, kvobj *o, sds field, sds value, int flags) {
 
         /* Check if field exists in tmpl; on miss, decode sorted insert position. */
         int field_idx = hashTemplateFieldIndex(tmpl, field);
-        if (field_idx >= 0) {
+        int is_new = field_idx < 0;
+
+        /* Single pre-mutation conversion decision: a TMPL_LP can't hold this
+         * update if the value exceeds the per-value limit, the listpack would
+         * overflow, or a new field pushes the entry count over the limit.
+         * Promote to TMPL_ARRAY up front - mirroring how a plain listpack
+         * converts to a hashtable before the value is ever added. The template
+         * (and thus field_idx) survives the conversion unchanged. */
+        if (o->encoding == OBJ_ENCODING_TMPL_LP &&
+            (sdslen(value) > server.hash_max_listpack_value ||
+             !lpSafeToAdd(o->ptr, sdslen(value)) ||
+             (is_new && tmpl->field_count + 1 > server.hash_max_listpack_entries)))
+        {
+            hashTypeConvert(db, o, OBJ_ENCODING_TMPL_ARRAY);
+        }
+
+        if (!is_new) {
             /* Field exists - update value in place. */
             if (o->encoding == OBJ_ENCODING_TMPL_LP) {
                 unsigned char *lp = o->ptr;
@@ -1513,12 +1529,6 @@ int hashTypeSet(redisDb *db, kvobj *o, sds field, sds value, int flags) {
             hashTemplateDecrKeyRef(tmpl);
             hta->tmpl = new_tmpl;
             o->ptr = hta;
-        }
-
-        if (o->encoding == OBJ_ENCODING_TMPL_LP &&
-            new_field_count > server.hash_max_listpack_entries)
-        {
-            hashTypeConvert(db, o, OBJ_ENCODING_TMPL_ARRAY);
         }
 
         /* update = 0 since we added a new field */
