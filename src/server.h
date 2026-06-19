@@ -3872,7 +3872,10 @@ typedef struct hashTemplate {
                           * 8-byte template pointer, and written by RDB save
                           * to identify the template. */
     uint64_t hash;       /* Pre-computed hash of sorted field names. */
-    redisAtomic unsigned long long key_refcount; /* Number of hash keys. */
+    redisAtomic unsigned long long key_refcount; /* Number of hash keys. Atomic:
+                          * a BIO lazyfree thread may decrement it directly. Only
+                          * the zero-transition enqueues the template id for the
+                          * main thread to reclaim (see hashTemplates.reclaim_ids). */
     unsigned long long hold_refcount; /* Non-key holders: clients and RDB load. */
     unsigned long long field_count; /* Number of fields in the template. */
     sds *fields;         /* Ordered array of field names (sorted, owned). */
@@ -3881,8 +3884,6 @@ typedef struct hashTemplate {
                                               NULL_v0, NULL_v1, ..., NULL_vN-1].
                             Field slots own field robjs; key and value slots
                             are filled per HIMPORT SET / HSETC call.  */
-    struct hashTemplate *next_pending_free; /* Pending free list link. */
-    int pending_free;    /* 1 if in pending free list (lock-protected). */
 } hashTemplate;
 
 /* Global registry for hash templates. */
@@ -3890,13 +3891,22 @@ typedef struct hashTemplates {
     dict *registry;             /* field set -> template lookup */
     hashTemplate **by_id;       /* ID -> template lookup */
     size_t by_id_cap;           /* Allocated slots in by_id array. */
-    hashTemplate *pending_free_list;        /* Pending free list head. */
-    pthread_mutex_t lock;       /* Serializes the main thread against BIO
-                                 * threads over the registry's mutable shared
-                                 * bookkeeping: the by_id array (realloc/free)
-                                 * and the pending_free_list. The registry dict
-                                 * itself is main-thread only and unguarded. */
-    int rdb_saving;              /* 1 during RDB save (compact refs). */
+    uint64_t *reclaim_ids;      /* Queue of template IDs whose key_refcount hit
+                                 * zero in a BIO lazyfree thread (the main thread
+                                 * frees inline). The main thread drains it in
+                                 * hashTemplateDrainPendingFree, re-validates that
+                                 * the template is still unreferenced, and only
+                                 * then removes it from the registry. Bounded by
+                                 * the number of distinct templates reaching zero
+                                 * between drains, not by the number of keys. */
+    size_t reclaim_count;       /* Used slots in reclaim_ids. */
+    size_t reclaim_cap;         /* Allocated slots in reclaim_ids. */
+    pthread_mutex_t lock;       /* Sole cross-thread point: guards the reclaim_ids
+                                 * queue and the by_id array (BIO resolves ids to
+                                 * templates under it; the main thread grows/recycles
+                                 * by_id under it). The registry, hold_refcount and
+                                 * propargv stay main-thread only. */
+    int rdb_saving;             /* 1 during RDB save (compact refs). */
     redisAtomic size_t total_key_refs; /* Sum of key_refcount across all templates. */
 } hashTemplates;
 
@@ -3996,6 +4006,7 @@ int hashTemplateValidateFields(sds *fields, unsigned long long field_count);
 hashTemplate *hashTemplateGetById(uint64_t id);
 void hashTemplatesInit(void);
 hashTemplate *hashTemplateLpGetTemplate(unsigned char *lp);
+uint64_t hashTemplateLpGetTemplateId(unsigned char *lp);
 char *hashTemplateEquivalentEncoding(robj *o);
 unsigned char *hashTemplateLpCreate(hashTemplate *tmpl, sds *values);
 hashTemplateArray *hashTemplateArrayCreate(hashTemplate *tmpl, sds *values, int take);

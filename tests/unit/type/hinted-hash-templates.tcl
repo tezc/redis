@@ -53,6 +53,20 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         return [list $templates $keys]
     }
 
+    # A key-ref released by a BIO lazyfree thread (flushall, resync, etc.) is
+    # dropped on that background thread, so hash_template_keys is eventually
+    # consistent: it settles once the BIO free job runs. Poll for the expected
+    # value on the given client ('r' by default, or a level such as 0 / -1 for
+    # replication tests).
+    proc wait_hashtmpl_keys {expected {level ""}} {
+        wait_for_condition 50 100 {
+            [s {*}$level hash_template_keys] == $expected
+        } else {
+            fail "hash_template_keys did not settle to $expected\
+                  (got [s {*}$level hash_template_keys])"
+        }
+    }
+
     # ============================================================
     # HIMPORT PREPARE / SET / DISCARD / DISCARDALL
     # ============================================================
@@ -842,8 +856,10 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 
     test {INFO stats shows hash template stats} {
         r flushall
-        lassign [get_template_stats] tpl_before keys_before
-        assert_equal $keys_before 0
+        # Key-refs from a flushall are released on a BIO lazyfree thread, so the
+        # live key count is eventually consistent; poll for the clean baseline
+        # left by prior tests.
+        wait_hashtmpl_keys 0
 
         # Create 3 keys with same template
         make_hashtmpl info:k1 a 1 b 2
@@ -862,10 +878,9 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         lassign [get_template_stats] tpl3 keys3
         assert_equal $keys3 3
 
-        # Flushall resets to 0
+        # Flushall resets to 0 (key-refs released on a BIO lazyfree thread)
         r flushall
-        lassign [get_template_stats] tpl_after keys_after
-        assert_equal $keys_after 0
+        wait_hashtmpl_keys 0
     }
 
     # ============================================================
@@ -1104,7 +1119,9 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:de
             assert_equal [$replica hget dr:k1 a] 1
             assert_equal [$replica hget dr:k2 c] 6
             assert_equal $tmpls [s 0 hash_templates]
-            assert_equal $keys [s 0 hash_template_keys]
+            # The old dataset's key-refs are released by a BIO lazyfree thread,
+            # so the count settles back asynchronously after the resync.
+            wait_hashtmpl_keys $keys 0
             assert {[s -1 sync_full] >= 2}
         }
     }
@@ -1134,6 +1151,9 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
         test "AOF rewrite preserves template encoding (rdb-preamble=$rdbpre)" {
             r config set aof-use-rdb-preamble $rdbpre
             r flushall
+            # Drain deferred key-ref releases left by the previous test so the
+            # baseline below counts only the keys created here.
+            wait_hashtmpl_keys 0
             waitForBgrewriteaof r
 
             make_hashtmpl_aof aof:k1 a 1 b 2 c 3
@@ -1158,7 +1178,7 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
             assert {$enc3r eq "template-listpack" || $enc3r eq "template-array"}
 
             assert_equal $tmpls_before [s hash_templates]
-            assert_equal $keys_before [s hash_template_keys]
+            wait_hashtmpl_keys $keys_before
 
             assert_equal [r hget aof:k1 a] 1
             assert_equal [r hget aof:k2 b] 5
@@ -1196,6 +1216,8 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
         r config set aof-use-rdb-preamble yes
         if {$encoding eq "template-array"} { r config set hash-max-listpack-entries 0 }
         r flushall
+        # Drain deferred key-ref releases from the previous test first.
+        wait_hashtmpl_keys 0
         waitForBgrewriteaof r
 
         make_hashtmpl_aof aofreload:k1 a 1 b 2 c 3
@@ -1210,7 +1232,7 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
             r debug loadaof
             assert_equal PONG [r ping]
             assert_equal $tmpls_before [s hash_templates]
-            assert_equal $keys_before [s hash_template_keys]
+            wait_hashtmpl_keys $keys_before
         }
         assert_equal [r hget aofreload:k1 a] 1
         assert_equal [r hget aofreload:k2 c] 6
@@ -1252,7 +1274,9 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:de
             assert_equal [$replica hget dr:k1 a] 1
             assert_equal [$replica hget dr:k2 c] 6
             assert_equal $tmpls [s 0 hash_templates]
-            assert_equal $keys [s 0 hash_template_keys]
+            # Old dataset key-refs are released asynchronously by the replica's
+            # BIO lazyfree thread after the resync.
+            wait_hashtmpl_keys $keys 0
             assert {[s -1 sync_full] >= 2}
         }
     }

@@ -1802,10 +1802,11 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         pendingCommandPoolCron();
     }
 
-    /* Free templates whose key_refcount dropped to 0 from bio thread. */
-    run_with_period(1000) {
-        hashTemplateDrainPendingFree();
-    }
+    /* Reclaim templates that a BIO lazyfree thread brought to zero references
+     * (the BIO thread can't remove them from the registry, so it enqueues their
+     * ids). Cheap when the queue is empty, so run it every cron tick to keep the
+     * live template registry from lagging behind. */
+    hashTemplateDrainPendingFree();
 
     /* Resize tracking keys table if needed. This is also done at every
      * command execution, but we want to be sure that if the last command
