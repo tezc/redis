@@ -77,14 +77,9 @@ static size_t hashDictMetadataBytes(dict *d);
 static size_t hashDictWithExpireMetadataBytes(dict *d);
 static void hashDictWithExpireOnRelease(dict *d);
 static kvobj* hashTypeLookupWriteOrCreate(client *c, robj *key);
-static void hashTypeConvertTmplLpToListpack(robj *o);
-static void hashTypeConvertTmplLpToHT(robj *o);
-
-static void hashTypeConvertTmplForHFE(robj *o);
-static int hashTypeCanConvertTmplLpToListpack(robj *o);
-static void hashTypeConvertTmplArrayToListpack(robj *o);
-static void hashTypeConvertTmplArrayToHT(robj *o);
-static int hashTypeCanConvertTmplArrayToListpack(robj *o);
+static int hashTypeCanConvertTmplToListpack(robj *o);
+static void hashTypeConvertTmplGeneric(robj *o, int target_enc, int with_hfe);
+static void hashTypeConvertTmplToListpackOrHT(robj *o, int lp_enc, int with_hfe);
 
 /*-----------------------------------------------------------------------------
  * Define dictType of hash
@@ -1831,7 +1826,8 @@ int hashTypeSetExInit(robj *key, kvobj *o, client *c, redisDb *db,
         hashTypeConvert(c->db, o, OBJ_ENCODING_LISTPACK_EX);
     } else if (o->encoding == OBJ_ENCODING_TMPL_LP ||
                o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
-        hashTypeConvertTmplForHFE(o);
+        /* Prepare template hash for HFE: LISTPACK_EX if it fits, else HT-with-HFE. */
+        hashTypeConvertTmplToListpackOrHT(o, OBJ_ENCODING_LISTPACK_EX, 1);
     } else if (o->encoding == OBJ_ENCODING_HT) {
         /* Take care dict has HFE metadata */
         if (!isDictWithMetaHFE(ht)) {
@@ -2003,17 +1999,7 @@ int hashTypeDelete(robj *o, void *field) {
     {
         size_t fc = hashTypeLength(o, 0);
         if (fc < server.hash_min_template_entries) {
-            if (o->encoding == OBJ_ENCODING_TMPL_LP) {
-                if (hashTypeCanConvertTmplLpToListpack(o))
-                    hashTypeConvertTmplLpToListpack(o);
-                else
-                    hashTypeConvertTmplLpToHT(o);
-            } else {
-                if (hashTypeCanConvertTmplArrayToListpack(o))
-                    hashTypeConvertTmplArrayToListpack(o);
-                else
-                    hashTypeConvertTmplArrayToHT(o);
-            }
+            hashTypeConvertTmplToListpackOrHT(o, OBJ_ENCODING_LISTPACK, 0);
         }
     }
 
@@ -2386,92 +2372,131 @@ static kvobj *hashTypeLookupWriteOrCreate(client *c, robj *key) {
     return kv;
 }
 
-/* Check if TMPL_LP can be converted to LISTPACK.
- * Returns 1 if it fits, 0 otherwise. */
-static int hashTypeCanConvertTmplLpToListpack(robj *o) {
-    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
+/* Can a TMPL_LP / TMPL_ARRAY hash be re-encoded as a plain listpack?
+ * Generic over both template encodings: checks field-name limits, plus the
+ * separately-stored values for TMPL_ARRAY (TMPL_LP holds them inline). */
+static int hashTypeCanConvertTmplToListpack(robj *o) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP ||
+                 o->encoding == OBJ_ENCODING_TMPL_ARRAY);
+    hashTemplate *tmpl = hashTypeGetTemplate(o);
 
-    unsigned char *lp = o->ptr;
-    hashTemplate *tmpl = hashTemplateLpGetTemplate(lp);
-
-    /* Check field count. */
     if (tmpl->field_count > server.hash_max_listpack_entries)
         return 0;
 
-    /* Check field name sizes and calculate total. */
-    size_t field_names_size = 0;
+    size_t total_size = 0;
     for (unsigned long long i = 0; i < tmpl->field_count; i++) {
         size_t flen = sdslen(tmpl->fields[i]);
         if (flen > server.hash_max_listpack_value)
             return 0;
-        field_names_size += flen;
+        total_size += flen;
     }
 
-    /* Check total size: current lp (has values) + field names. */
-    if (!lpSafeToAdd(NULL, lpBytes(lp) + field_names_size))
-        return 0;
+    if (o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        hashTemplateArray *hta = o->ptr;
+        for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+            size_t vlen = sdslen(hta->values[i]);
+            if (vlen > server.hash_max_listpack_value)
+                return 0;
+            total_size += vlen;
+        }
+        return lpSafeToAdd(NULL, total_size) ? 1 : 0;
+    }
 
-    return 1;
+    /* TMPL_LP: values already live in the listpack blob. */
+    return lpSafeToAdd(NULL, lpBytes((unsigned char *)o->ptr) + total_size) ? 1 : 0;
 }
 
-/* TMPL_LP -> LISTPACK */
-static void hashTypeConvertTmplLpToListpack(robj *o) {
-    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
+/* Convert a TMPL_LP / TMPL_ARRAY hash to LISTPACK, LISTPACK_EX or HT. Fields
+ * and values are read through the generic hash iterator, which already
+ * abstracts over both template encodings, so one body covers every
+ * source/target pair. 'with_hfe' selects an HFE-capable hashtable and only
+ * applies when target_enc is HT (LISTPACK_EX always carries TTL slots). */
+static void hashTypeConvertTmplGeneric(robj *o, int target_enc, int with_hfe) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP ||
+                 o->encoding == OBJ_ENCODING_TMPL_ARRAY);
+    int src_enc = o->encoding;
+    void *old_ptr = o->ptr;
 
-    unsigned char *old_lp = o->ptr;
-    hashTemplate *tmpl = hashTemplateLpGetTemplate(old_lp);
-    unsigned char *p = hashTemplateLpFirstValue(old_lp);
+    hashTypeIterator hi;
+    hashTypeInitIterator(&hi, o);
 
-    unsigned char *new_lp = lpNew(0);
-    for (unsigned long long i = 0; i < tmpl->field_count; i++) {
-        sds field = tmpl->fields[i];
-        new_lp = lpAppend(new_lp, (unsigned char *)field, sdslen(field));
+    void *new_ptr;
+    if (target_enc == OBJ_ENCODING_HT) {
+        dict *d = dictCreate(with_hfe ? &entryHashDictTypeWithHFE
+                                      : &entryHashDictType);
+        dictExpand(d, hashTypeLength(o, 0));
 
-        unsigned int vlen;
-        long long vll;
-        unsigned char *vstr = lpGetValue(p, &vlen, &vll);
-        if (vstr)
+        size_t usable, *alloc_size;
+        if (with_hfe) {
+            htMetadataEx *meta = htGetMetadataEx(d);
+            meta->hfe = ebCreate();
+            meta->expireMeta.trash = 1;
+            alloc_size = &meta->alloc_size;
+        } else {
+            alloc_size = htGetMetadataSize(d);
+        }
+
+        while (hashTypeNext(&hi, 0) != C_ERR) {
+            Entry *entry = hashTypeCurrentObjectNewEntry(&hi, &usable);
+            int ret = dictAdd(d, entry, NULL);
+            serverAssert(ret == DICT_OK);
+            *alloc_size += usable;
+        }
+        new_ptr = d;
+    } else {
+        /* LISTPACK or LISTPACK_EX: rebuild field/value pairs (EX appends a
+         * no-TTL marker after each value). */
+        int ex = (target_enc == OBJ_ENCODING_LISTPACK_EX);
+        unsigned char *new_lp = lpNew(0);
+        while (hashTypeNext(&hi, 0) != C_ERR) {
+            unsigned char *vstr;
+            unsigned int vlen;
+            long long vll;
+
+            hashTypeCurrentObject(&hi, OBJ_HASH_KEY, &vstr, &vlen, &vll, NULL);
             new_lp = lpAppend(new_lp, vstr, vlen);
-        else
-            new_lp = lpAppendInteger(new_lp, vll);
-        p = lpNext(old_lp, p);
+
+            hashTypeCurrentObject(&hi, OBJ_HASH_VALUE, &vstr, &vlen, &vll, NULL);
+            if (vstr)
+                new_lp = lpAppend(new_lp, vstr, vlen);
+            else
+                new_lp = lpAppendInteger(new_lp, vll);
+
+            if (ex)
+                new_lp = lpAppendInteger(new_lp, HASH_LP_NO_TTL);
+        }
+        if (ex) {
+            listpackEx *lpt = listpackExCreate();
+            lpt->lp = new_lp;
+            new_ptr = lpt;
+        } else {
+            new_ptr = new_lp;
+        }
     }
 
-    hashTemplateLpFree(old_lp);
-    o->encoding = OBJ_ENCODING_LISTPACK;
-    o->ptr = new_lp;
+    hashTypeResetIterator(&hi);
+
+    /* Release the source template structure (drops its template ref). */
+    if (src_enc == OBJ_ENCODING_TMPL_LP)
+        hashTemplateLpFree(old_ptr);
+    else
+        hashTemplateArrayFree(old_ptr);
+
+    o->ptr = new_ptr;
+    o->encoding = (target_enc == OBJ_ENCODING_LISTPACK_EX) ? OBJ_ENCODING_LISTPACK_EX :
+                  (target_enc == OBJ_ENCODING_LISTPACK)    ? OBJ_ENCODING_LISTPACK    :
+                                                             OBJ_ENCODING_HT;
 }
 
-/* TMPL_LP -> LISTPACK_EX */
-static void hashTypeConvertTmplLpToListpackEx(robj *o) {
-    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
-
-    unsigned char *old_lp = o->ptr;
-    hashTemplate *tmpl = hashTemplateLpGetTemplate(old_lp);
-    unsigned char *p = hashTemplateLpFirstValue(old_lp);
-
-    unsigned char *new_lp = lpNew(0);
-    for (unsigned long long i = 0; i < tmpl->field_count; i++) {
-        sds field = tmpl->fields[i];
-        new_lp = lpAppend(new_lp, (unsigned char *)field, sdslen(field));
-
-        unsigned int vlen;
-        long long vll;
-        unsigned char *vstr = lpGetValue(p, &vlen, &vll);
-        if (vstr)
-            new_lp = lpAppend(new_lp, vstr, vlen);
-        else
-            new_lp = lpAppendInteger(new_lp, vll);
-
-        new_lp = lpAppendInteger(new_lp, HASH_LP_NO_TTL);
-        p = lpNext(old_lp, p);
-    }
-
-    hashTemplateLpFree(old_lp);
-    listpackEx *lpt = listpackExCreate();
-    lpt->lp = new_lp;
-    o->encoding = OBJ_ENCODING_LISTPACK_EX;
-    o->ptr = lpt;
+/* Re-encode a template hash to a listpack-family target ('lp_enc' is LISTPACK
+ * or LISTPACK_EX) when it fits listpack limits, otherwise fall back to HT.
+ * 'with_hfe' applies HFE metadata to the HT fallback (LISTPACK_EX carries TTL
+ * slots inline, so the listpack path needs no extra flag). */
+static void hashTypeConvertTmplToListpackOrHT(robj *o, int lp_enc, int with_hfe) {
+    if (hashTypeCanConvertTmplToListpack(o))
+        hashTypeConvertTmplGeneric(o, lp_enc, 0);
+    else
+        hashTypeConvertTmplGeneric(o, OBJ_ENCODING_HT, with_hfe);
 }
 
 /* TMPL_LP -> TMPL_ARRAY */
@@ -2502,201 +2527,6 @@ static void hashTypeConvertTmplLpToArray(robj *o) {
 
     o->encoding = OBJ_ENCODING_TMPL_ARRAY;
     o->ptr = hta;
-}
-
-/* TMPL_LP -> HT */
-static void hashTypeConvertTmplLpToHT(robj *o) {
-    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
-
-    hashTypeIterator hi;
-    hashTypeInitIterator(&hi, o);
-
-    dict *d = dictCreate(&entryHashDictType);
-    dictExpand(d, hashTypeLength(o, 0));
-
-    size_t usable, *alloc_size = htGetMetadataSize(d);
-    while (hashTypeNext(&hi, 0) != C_ERR) {
-        Entry *entry = hashTypeCurrentObjectNewEntry(&hi, &usable);
-        int ret = dictAdd(d, entry, NULL);
-        serverAssert(ret == DICT_OK);
-        *alloc_size += usable;
-    }
-    hashTypeResetIterator(&hi);
-
-    hashTemplateLpFree(o->ptr);
-    o->encoding = OBJ_ENCODING_HT;
-    o->ptr = d;
-}
-
-/* TMPL_LP -> HT with HFE metadata */
-static void hashTypeConvertTmplLpToHfeHT(robj *o) {
-    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
-
-    hashTypeIterator hi;
-    hashTypeInitIterator(&hi, o);
-
-    dict *d = dictCreate(&entryHashDictTypeWithHFE);
-    dictExpand(d, hashTypeLength(o, 0));
-    htMetadataEx *meta = htGetMetadataEx(d);
-    meta->hfe = ebCreate();
-    meta->expireMeta.trash = 1;
-
-    size_t usable, *alloc_size = &meta->alloc_size;
-    while (hashTypeNext(&hi, 0) != C_ERR) {
-        Entry *entry = hashTypeCurrentObjectNewEntry(&hi, &usable);
-        int ret = dictAdd(d, entry, NULL);
-        serverAssert(ret == DICT_OK);
-        *alloc_size += usable;
-    }
-    hashTypeResetIterator(&hi);
-
-    hashTemplateLpFree(o->ptr);
-    o->encoding = OBJ_ENCODING_HT;
-    o->ptr = d;
-}
-
-/* Check if TMPL_ARRAY can be converted to LISTPACK.
- * Returns 1 if it fits, 0 otherwise. */
-static int hashTypeCanConvertTmplArrayToListpack(robj *o) {
-    serverAssert(o->encoding == OBJ_ENCODING_TMPL_ARRAY);
-
-    hashTemplateArray *hta = o->ptr;
-    hashTemplate *tmpl = hta->tmpl;
-
-    /* Check field count. */
-    if (tmpl->field_count > server.hash_max_listpack_entries)
-        return 0;
-
-    /* Check field name and value sizes. */
-    size_t total_size = 0;
-    for (unsigned long long i = 0; i < tmpl->field_count; i++) {
-        size_t flen = sdslen(tmpl->fields[i]);
-        if (flen > server.hash_max_listpack_value)
-            return 0;
-        total_size += flen;
-
-        size_t vlen = sdslen(hta->values[i]);
-        if (vlen > server.hash_max_listpack_value)
-            return 0;
-        total_size += vlen;
-    }
-
-    if (!lpSafeToAdd(NULL, total_size))
-        return 0;
-
-    return 1;
-}
-
-/* TMPL_ARRAY -> LISTPACK */
-void hashTypeConvertTmplArrayToListpack(robj *o) {
-    serverAssert(o->encoding == OBJ_ENCODING_TMPL_ARRAY);
-
-    hashTemplateArray *hta = o->ptr;
-    unsigned char *new_lp = lpNew(0);
-
-    for (unsigned long long i = 0; i < hta->tmpl->field_count; i++) {
-        sds field = hta->tmpl->fields[i];
-        new_lp = lpAppend(new_lp, (unsigned char *)field, sdslen(field));
-
-        sds val = hta->values[i];
-        new_lp = lpAppend(new_lp, (unsigned char *)val, sdslen(val));
-    }
-
-    hashTemplateArrayFree(hta);
-    o->encoding = OBJ_ENCODING_LISTPACK;
-    o->ptr = new_lp;
-}
-
-/* TMPL_ARRAY -> LISTPACK_EX */
-static void hashTypeConvertTmplArrayToListpackEx(robj *o) {
-    serverAssert(o->encoding == OBJ_ENCODING_TMPL_ARRAY);
-
-    hashTemplateArray *hta = o->ptr;
-    unsigned char *new_lp = lpNew(0);
-
-    for (unsigned long long i = 0; i < hta->tmpl->field_count; i++) {
-        sds field = hta->tmpl->fields[i];
-        new_lp = lpAppend(new_lp, (unsigned char *)field, sdslen(field));
-
-        sds val = hta->values[i];
-        new_lp = lpAppend(new_lp, (unsigned char *)val, sdslen(val));
-
-        new_lp = lpAppendInteger(new_lp, HASH_LP_NO_TTL);
-    }
-
-    hashTemplateArrayFree(hta);
-    listpackEx *lpt = listpackExCreate();
-    lpt->lp = new_lp;
-    o->encoding = OBJ_ENCODING_LISTPACK_EX;
-    o->ptr = lpt;
-}
-
-/* TMPL_ARRAY -> HT */
-static void hashTypeConvertTmplArrayToHT(robj *o) {
-    serverAssert(o->encoding == OBJ_ENCODING_TMPL_ARRAY);
-
-    hashTypeIterator hi;
-    hashTypeInitIterator(&hi, o);
-
-    dict *d = dictCreate(&entryHashDictType);
-    dictExpand(d, hashTypeLength(o, 0));
-
-    size_t usable, *alloc_size = htGetMetadataSize(d);
-    while (hashTypeNext(&hi, 0) != C_ERR) {
-        Entry *entry = hashTypeCurrentObjectNewEntry(&hi, &usable);
-        int ret = dictAdd(d, entry, NULL);
-        serverAssert(ret == DICT_OK);
-        *alloc_size += usable;
-    }
-    hashTypeResetIterator(&hi);
-
-    hashTemplateArrayFree(o->ptr);
-    o->encoding = OBJ_ENCODING_HT;
-    o->ptr = d;
-}
-
-/* TMPL_ARRAY -> HT with HFE metadata */
-static void hashTypeConvertTmplArrayToHfeHT(robj *o) {
-    serverAssert(o->encoding == OBJ_ENCODING_TMPL_ARRAY);
-
-    hashTypeIterator hi;
-    hashTypeInitIterator(&hi, o);
-
-    dict *d = dictCreate(&entryHashDictTypeWithHFE);
-    dictExpand(d, hashTypeLength(o, 0));
-    htMetadataEx *meta = htGetMetadataEx(d);
-    meta->hfe = ebCreate();
-    meta->expireMeta.trash = 1;
-
-    size_t usable, *alloc_size = &meta->alloc_size;
-    while (hashTypeNext(&hi, 0) != C_ERR) {
-        Entry *entry = hashTypeCurrentObjectNewEntry(&hi, &usable);
-        int ret = dictAdd(d, entry, NULL);
-        serverAssert(ret == DICT_OK);
-        *alloc_size += usable;
-    }
-    hashTypeResetIterator(&hi);
-
-    hashTemplateArrayFree(o->ptr);
-    o->encoding = OBJ_ENCODING_HT;
-    o->ptr = d;
-}
-
-/* Prepare a TMPL_LP/TMPL_ARRAY hash for field-level expiration (HFE):
- * pick LISTPACK_EX if the data fits listpack limits, otherwise HT-with-HFE. */
-void hashTypeConvertTmplForHFE(robj *o) {
-    if (o->encoding == OBJ_ENCODING_TMPL_LP) {
-        if (hashTypeCanConvertTmplLpToListpack(o))
-            hashTypeConvertTmplLpToListpackEx(o);
-        else
-            hashTypeConvertTmplLpToHfeHT(o);
-    } else {
-        serverAssert(o->encoding == OBJ_ENCODING_TMPL_ARRAY);
-        if (hashTypeCanConvertTmplArrayToListpack(o))
-            hashTypeConvertTmplArrayToListpackEx(o);
-        else
-            hashTypeConvertTmplArrayToHfeHT(o);
-    }
 }
 
 void hashTypeConvertListpack(robj *o, int enc) {
@@ -2821,20 +2651,12 @@ void hashTypeConvertTmplLp(robj *o, int enc) {
 
     if (enc == OBJ_ENCODING_TMPL_LP) {
         /* Nothing to do. */
-    } else if (enc == OBJ_ENCODING_LISTPACK) {
-        if (hashTypeCanConvertTmplLpToListpack(o))
-            hashTypeConvertTmplLpToListpack(o);
-        else
-            hashTypeConvertTmplLpToHT(o);
-    } else if (enc == OBJ_ENCODING_LISTPACK_EX) {
-        if (hashTypeCanConvertTmplLpToListpack(o))
-            hashTypeConvertTmplLpToListpackEx(o);
-        else
-            hashTypeConvertTmplLpToHT(o);
+    } else if (enc == OBJ_ENCODING_LISTPACK || enc == OBJ_ENCODING_LISTPACK_EX) {
+        hashTypeConvertTmplToListpackOrHT(o, enc, 0);
     } else if (enc == OBJ_ENCODING_TMPL_ARRAY) {
         hashTypeConvertTmplLpToArray(o);
     } else if (enc == OBJ_ENCODING_HT) {
-        hashTypeConvertTmplLpToHT(o);
+        hashTypeConvertTmplGeneric(o, OBJ_ENCODING_HT, 0);
     } else {
         serverPanic("Unknown target encoding: %d", enc);
     }
@@ -2847,7 +2669,7 @@ void hashTypeConvertTmplArray(robj *o, int enc) {
     if (enc == OBJ_ENCODING_TMPL_ARRAY) {
         /* Nothing to do. */
     } else if (enc == OBJ_ENCODING_HT) {
-        hashTypeConvertTmplArrayToHT(o);
+        hashTypeConvertTmplGeneric(o, OBJ_ENCODING_HT, 0);
     } else {
         /* TMPL_ARRAY can only go to HT. */
         serverPanic("Invalid conversion from TMPL_ARRAY to %d", enc);
