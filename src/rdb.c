@@ -1964,6 +1964,81 @@ static sds *rdbTryAllocSdsArray(uint64_t n) {
     return ztrymalloc(sizeof(sds) * (size_t)n);
 }
 
+/* Free 'count' SDS strings and the array holding them. Safe on NULL. */
+static void rdbFreeSdsVector(sds *v, uint64_t count) {
+    if (v == NULL) return;
+    for (uint64_t i = 0; i < count; i++) sdsfree(v[i]);
+    zfree(v);
+}
+
+/* Load 'count' SDS strings into a freshly-allocated array. On any failure frees
+ * everything loaded so far and returns NULL. 'ctx' prefixes the OOM message. */
+static sds *rdbLoadSdsVector(rio *rdb, uint64_t count, const char *ctx) {
+    sds *v = rdbTryAllocSdsArray(count);
+    if (v == NULL) {
+        rdbReportCorruptRDB("%s field count %llu too large",
+            ctx, (unsigned long long)count);
+        return NULL;
+    }
+    for (uint64_t i = 0; i < count; i++) {
+        v[i] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
+        if (v[i] == NULL) {
+            rdbFreeSdsVector(v, i);
+            return NULL;
+        }
+    }
+    return v;
+}
+
+/* Load and validate a TMPL_LP listpack blob whose first entry is a template ID.
+ * Returns the listpack and, if 'id_out' is non-NULL, the encoded first-entry id.
+ * On any corruption frees the blob and returns NULL. */
+static unsigned char *rdbLoadTmplLpBlob(rio *rdb, int deep, long long *id_out) {
+    size_t encoded_len;
+    unsigned char *lp = rdbGenericLoadStringObject(rdb, RDB_LOAD_PLAIN, &encoded_len);
+    if (lp == NULL || encoded_len == 0) {
+        zfree(lp);
+        return NULL;
+    }
+
+    if (deep) server.stat_dump_payload_sanitizations++;
+    if (!lpValidateIntegrity(lp, encoded_len, deep, NULL, NULL)) {
+        rdbReportCorruptRDB("TMPL_LP listpack integrity check failed.");
+        zfree(lp);
+        return NULL;
+    }
+
+    /* First entry is the saved-side template ID (must be an integer). */
+    unsigned char *p = lpFirst(lp);
+    if (p == NULL) {
+        rdbReportCorruptRDB("TMPL_LP listpack is empty.");
+        zfree(lp);
+        return NULL;
+    }
+    unsigned int vlen;
+    long long vll;
+    if (lpGetValue(p, &vlen, &vll) != NULL) {
+        rdbReportCorruptRDB("TMPL_LP first entry is not an integer.");
+        zfree(lp);
+        return NULL;
+    }
+    if (id_out) *id_out = vll;
+    return lp;
+}
+
+/* Rewrite the leading template-ID entry of 'lp' to tmpl's local id, bump the
+ * key ref and wrap the listpack in a TMPL_LP hash object. Consumes 'lp'. */
+static robj *rdbFinalizeTmplLp(unsigned char *lp, hashTemplate *tmpl) {
+    unsigned char *p = lpFirst(lp);
+    serverAssert(p != NULL);
+    lp = lpReplaceInteger(lp, &p, (long long)tmpl->id);
+
+    hashTemplateIncrKeyRef(tmpl);
+    robj *o = createObject(OBJ_HASH, lp);
+    o->encoding = OBJ_ENCODING_TMPL_LP;
+    return o;
+}
+
 int rdbLoadHashTemplates(rio *rdb) {
     uint64_t id, field_count;
 
@@ -3039,129 +3114,49 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
          * Field names are loaded individually (so the template can be
          * recreated locally), then the listpack is loaded as a single blob.
          * The first listpack entry is the source-side template ID, swapped
-         * in-place to our local registry's ID if it differs. */
-        uint64_t len;
-        sds *fields = NULL;
-
-        len = rdbLoadLen(rdb, NULL);
+         * in-place to our local registry's ID. */
+        uint64_t len = rdbLoadLen(rdb, NULL);
         if (len == RDB_LENERR) return NULL;
         if (len == 0) goto emptykey;
 
-        fields = rdbTryAllocSdsArray(len);
-        if (fields == NULL) {
-            rdbReportCorruptRDB("TMPL_LP full field count %llu too large", (unsigned long long)len);
-            return NULL;
-        }
-        for (uint64_t i = 0; i < len; i++) {
-            fields[i] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
-            if (fields[i] == NULL) {
-                for (uint64_t j = 0; j < i; j++)
-                    sdsfree(fields[j]);
-                zfree(fields);
-                return NULL;
-            }
-        }
+        sds *fields = rdbLoadSdsVector(rdb, len, "TMPL_LP full");
+        if (fields == NULL) return NULL;
 
         /* Under deep validation reject out-of-order or duplicate fields. */
         if (deep_integrity_validation && !hashTemplateValidateFields(fields, len)) {
             rdbReportCorruptRDB("TMPL_LP full fields not strictly sorted");
-            for (uint64_t i = 0; i < len; i++) sdsfree(fields[i]);
-            zfree(fields);
+            rdbFreeSdsVector(fields, len);
             return NULL;
         }
 
-        size_t encoded_len;
-        unsigned char *lp = rdbGenericLoadStringObject(rdb, RDB_LOAD_PLAIN, &encoded_len);
-        if (lp == NULL || encoded_len == 0) {
-            for (uint64_t i = 0; i < len; i++) 
-                sdsfree(fields[i]);
-            zfree(fields);
-            zfree(lp);
-            return NULL;
-        }
-
-        if (deep_integrity_validation) server.stat_dump_payload_sanitizations++;
-        if (!lpValidateIntegrity(lp, encoded_len, deep_integrity_validation, NULL, NULL)) {
-            rdbReportCorruptRDB("TMPL_LP full listpack integrity check failed.");
-            for (uint64_t i = 0; i < len; i++) sdsfree(fields[i]);
-            zfree(fields);
-            zfree(lp);
+        unsigned char *lp = rdbLoadTmplLpBlob(rdb, deep_integrity_validation, NULL);
+        if (lp == NULL) {
+            rdbFreeSdsVector(fields, len);
             return NULL;
         }
         if (lpLength(lp) != len + 1) {
             rdbReportCorruptRDB(
                 "TMPL_LP full entry count %lu does not match field count %llu",
                 (unsigned long)lpLength(lp), (unsigned long long)len);
-            for (uint64_t i = 0; i < len; i++) sdsfree(fields[i]);
-            zfree(fields);
-            zfree(lp);
-            return NULL;
-        }
-
-        /* First entry must be the template ID (integer). */
-        unsigned char *p = lpFirst(lp);
-        unsigned char *vstr;
-        unsigned int vlen;
-        long long vll;
-        vstr = lpGetValue(p, &vlen, &vll);
-        if (vstr != NULL) {
-            rdbReportCorruptRDB("TMPL_LP full first entry is not an integer.");
-            for (uint64_t i = 0; i < len; i++) sdsfree(fields[i]);
-            zfree(fields);
+            rdbFreeSdsVector(fields, len);
             zfree(lp);
             return NULL;
         }
 
         hashTemplate *tmpl = hashTemplateGetOrCreate(fields, len);
-        /* Rewrite saved-side template ID with local registry ID. */
-        serverAssert(p != NULL);
-        lp = lpReplaceInteger(lp, &p, (long long)tmpl->id);
-
-        for (uint64_t i = 0; i < len; i++) 
-            sdsfree(fields[i]);
-        zfree(fields);
-
-        hashTemplateIncrKeyRef(tmpl);
-        o = createObject(OBJ_HASH, lp);
-        o->encoding = OBJ_ENCODING_TMPL_LP;
+        rdbFreeSdsVector(fields, len);
+        o = rdbFinalizeTmplLp(lp, tmpl);
     } else if (rdbtype == RDB_TYPE_HASH_TMPL_REF_LP) {
         /* TMPL_LP compact: raw listpack blob. The first listpack entry is the
          * source-side template ID, which we map to our local registry and
-         * swap in-place if it differs. */
-        size_t encoded_len;
-        unsigned char *lp = rdbGenericLoadStringObject(rdb, RDB_LOAD_PLAIN, &encoded_len);
-        if (lp == NULL || encoded_len == 0) {
-            zfree(lp);
-            return NULL;
-        }
+         * swap in-place. */
+        long long src_id;
+        unsigned char *lp = rdbLoadTmplLpBlob(rdb, deep_integrity_validation, &src_id);
+        if (lp == NULL) return NULL;
 
-        if (deep_integrity_validation) server.stat_dump_payload_sanitizations++;
-        if (!lpValidateIntegrity(lp, encoded_len, deep_integrity_validation, NULL, NULL)) {
-            rdbReportCorruptRDB("TMPL_LP listpack integrity check failed.");
-            zfree(lp);
-            return NULL;
-        }
-
-        /* First entry is the saved-side template ID. */
-        unsigned char *p = lpFirst(lp);
-        if (p == NULL) {
-            rdbReportCorruptRDB("TMPL_LP listpack is empty.");
-            zfree(lp);
-            return NULL;
-        }
-        unsigned char *vstr;
-        unsigned int vlen;
-        long long vll;
-        vstr = lpGetValue(p, &vlen, &vll);
-        if (vstr != NULL) {
-            rdbReportCorruptRDB("TMPL_LP first entry is not an integer.");
-            zfree(lp);
-            return NULL;
-        }
-
-        hashTemplate *tmpl = rdbGetHashTemplateById((uint64_t)vll);
+        hashTemplate *tmpl = rdbGetHashTemplateById((uint64_t)src_id);
         if (tmpl == NULL) {
-            rdbReportCorruptRDB("Invalid hash template ID %lld in TMPL_LP", vll);
+            rdbReportCorruptRDB("Invalid hash template ID %lld in TMPL_LP", src_id);
             zfree(lp);
             return NULL;
         }
@@ -3174,28 +3169,17 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
             return NULL;
         }
 
-        /* Rewrite saved-side template ID with local registry ID. */
-        serverAssert(p != NULL);
-        lp = lpReplaceInteger(lp, &p, (long long)tmpl->id);
-
-        hashTemplateIncrKeyRef(tmpl);
-        o = createObject(OBJ_HASH, lp);
-        o->encoding = OBJ_ENCODING_TMPL_LP;
+        o = rdbFinalizeTmplLp(lp, tmpl);
     } else if (rdbtype == RDB_TYPE_HASH_TMPL_ARRAY) {
         /* TMPL_ARRAY self-contained format: same layout as RDB_TYPE_HASH
          * (len + interleaved field-value pairs). Reconstruct as template-based
          * hash. */
-        uint64_t len;
-        sds *fields = NULL;
-        sds *values = NULL;
-
-        len = rdbLoadLen(rdb, NULL);
+        uint64_t len = rdbLoadLen(rdb, NULL);
         if (len == RDB_LENERR) return NULL;
         if (len == 0) goto emptykey;
 
-        /* Allocate arrays for fields and values. */
-        fields = rdbTryAllocSdsArray(len);
-        values = rdbTryAllocSdsArray(len);
+        sds *fields = rdbTryAllocSdsArray(len);
+        sds *values = rdbTryAllocSdsArray(len);
         if (fields == NULL || values == NULL) {
             rdbReportCorruptRDB("TMPL_ARRAY field count %llu too large",
                 (unsigned long long)len);
@@ -3204,27 +3188,16 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
             return NULL;
         }
 
-        /* Load all field-value pairs. */
-        for (uint64_t i = 0; i < len; i++) {
-            fields[i] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
-            if (fields[i] == NULL) {
-                for (uint64_t j = 0; j < i; j++) {
-                    sdsfree(fields[j]);
-                    sdsfree(values[j]);
-                }
-                zfree(fields);
-                zfree(values);
-                return NULL;
-            }
-            values[i] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
-            if (values[i] == NULL) {
-                sdsfree(fields[i]);
-                for (uint64_t j = 0; j < i; j++) {
-                    sdsfree(fields[j]);
-                    sdsfree(values[j]);
-                }
-                zfree(fields);
-                zfree(values);
+        /* Load all interleaved field-value pairs. */
+        uint64_t loaded = 0;
+        for (; loaded < len; loaded++) {
+            fields[loaded] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
+            values[loaded] = fields[loaded] ?
+                rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL) : NULL;
+            if (fields[loaded] == NULL || values[loaded] == NULL) {
+                sdsfree(fields[loaded]); /* safe on NULL */
+                rdbFreeSdsVector(fields, loaded);
+                rdbFreeSdsVector(values, loaded);
                 return NULL;
             }
         }
@@ -3233,68 +3206,33 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         if (deep_integrity_validation &&
             !hashTemplateValidateFields(fields, len)) {
             rdbReportCorruptRDB("TMPL_ARRAY fields not strictly sorted");
-            for (uint64_t i = 0; i < len; i++) {
-                sdsfree(fields[i]);
-                sdsfree(values[i]);
-            }
-            zfree(fields);
-            zfree(values);
+            rdbFreeSdsVector(fields, len);
+            rdbFreeSdsVector(values, len);
             return NULL;
         }
 
-        /* Get or create template. */
         hashTemplate *tmpl = hashTemplateGetOrCreate(fields, len);
         o = createHashObjectFromTemplate(tmpl, values);
-
-        /* Free fields and values arrays. */
-        for (uint64_t i = 0; i < len; i++) {
-            sdsfree(fields[i]);
-            sdsfree(values[i]);
-        }
-        zfree(fields);
-        zfree(values);
+        rdbFreeSdsVector(fields, len);
+        rdbFreeSdsVector(values, len);
     } else if (rdbtype == RDB_TYPE_HASH_TMPL_REF_ARRAY) {
         /* TMPL_ARRAY REF form: [template_id][value1][value2]... */
         uint64_t template_id;
-        sds *values = NULL;
-
-        /* Read template ID. */
         if ((template_id = rdbLoadLen(rdb, NULL)) == RDB_LENERR)
             return NULL;
 
-        /* Get template from RDB template array. */
         hashTemplate *tmpl = rdbGetHashTemplateById(template_id);
         if (tmpl == NULL) {
             rdbReportCorruptRDB("Invalid hash template ID %lu", (unsigned long)template_id);
             return NULL;
         }
-
         unsigned long long field_count = tmpl->field_count;
 
-        /* Allocate values array. */
-        values = rdbTryAllocSdsArray(field_count);
-        if (values == NULL) {
-            rdbReportCorruptRDB("TMPL_ARRAY REF field count %llu too large",
-                (unsigned long long)field_count);
-            return NULL;
-        }
-
-        /* Load all values. */
-        for (unsigned long long i = 0; i < field_count; i++) {
-            values[i] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
-            if (values[i] == NULL) {
-                for (unsigned long long j = 0; j < i; j++) sdsfree(values[j]);
-                zfree(values);
-                return NULL;
-            }
-        }
+        sds *values = rdbLoadSdsVector(rdb, field_count, "TMPL_ARRAY REF");
+        if (values == NULL) return NULL;
 
         o = createHashObjectFromTemplate(tmpl, values);
-
-        /* Free values array. */
-        for (unsigned long long i = 0; i < field_count; i++)
-            sdsfree(values[i]);
-        zfree(values);
+        rdbFreeSdsVector(values, field_count);
     } else if (rdbtype == RDB_TYPE_HASH_METADATA || rdbtype == RDB_TYPE_HASH_METADATA_PRE_GA) {
         sds value;
         Entry *entry;
