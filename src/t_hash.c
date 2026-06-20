@@ -340,7 +340,11 @@ static void recycleTemplateId(uint64_t id) {
     pthread_mutex_lock(&htemplates->lock);
     htemplates->by_id[id] = NULL;
 
-    if (dictSize(htemplates->registry) == 0) {
+    /* This runs from the registry's key destructor, which dictGenericDelete()
+     * invokes before decrementing the table's used count, so the template being
+     * removed is still counted: dictSize()==1 means it is the last one and the
+     * by_id index can be released. */
+    if (dictSize(htemplates->registry) == 1) {
         zfree(htemplates->by_id);
         htemplates->by_id = NULL;
         htemplates->by_id_cap = 0;
@@ -1862,8 +1866,10 @@ int hashTypeSetExInit(robj *key, kvobj *o, client *c, redisDb *db,
         hashTypeConvert(c->db, o, OBJ_ENCODING_LISTPACK_EX);
     } else if (o->encoding == OBJ_ENCODING_TMPL_LP ||
                o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
-        /* Prepare template hash for HFE: LISTPACK_EX if it fits, else HT-with-HFE. */
-        hashTypeConvertTmplToListpackOrHT(o, OBJ_ENCODING_LISTPACK_EX, 1);
+        /* Prepare template hash for HFE: LISTPACK_EX if it fits, else HT-with-HFE.
+         * Routed through the generic dispatcher (like the plain LISTPACK case
+         * above) so every HFE conversion shares a single entry point. */
+        hashTypeConvert(c->db, o, OBJ_ENCODING_LISTPACK_EX);
     } else if (o->encoding == OBJ_ENCODING_HT) {
         /* Take care dict has HFE metadata */
         if (!isDictWithMetaHFE(ht)) {
@@ -2035,7 +2041,9 @@ int hashTypeDelete(robj *o, void *field) {
     {
         size_t fc = hashTypeLength(o, 0);
         if (fc < server.hash_min_template_entries) {
-            hashTypeConvertTmplToListpackOrHT(o, OBJ_ENCODING_LISTPACK, 0);
+            /* No db in scope here, but the template->listpack path never touches
+             * subexpires, so NULL is safe (same as the RDB-load call sites). */
+            hashTypeConvert(NULL, o, OBJ_ENCODING_LISTPACK);
         }
     }
 
@@ -2681,33 +2689,36 @@ void hashTypeConvertListpackEx(redisDb *db, robj *o, int enc) {
     }
 }
 
-/* Convert TMPL_LP to target encoding. */
+/* Convert TMPL_LP to target encoding. HT is not a valid direct target: a
+ * template reaches HT only as the no-fit fallback inside the LISTPACK /
+ * LISTPACK_EX path (see hashTypeConvertTmplToListpackOrHT). */
 void hashTypeConvertTmplLp(robj *o, int enc) {
     serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP);
 
     if (enc == OBJ_ENCODING_TMPL_LP) {
         /* Nothing to do. */
     } else if (enc == OBJ_ENCODING_LISTPACK || enc == OBJ_ENCODING_LISTPACK_EX) {
-        hashTypeConvertTmplToListpackOrHT(o, enc, 0);
+        /* LISTPACK_EX implies HFE, so the HT fallback must keep HFE metadata. */
+        hashTypeConvertTmplToListpackOrHT(o, enc, enc == OBJ_ENCODING_LISTPACK_EX);
     } else if (enc == OBJ_ENCODING_TMPL_ARRAY) {
         hashTypeConvertTmplLpToArray(o);
-    } else if (enc == OBJ_ENCODING_HT) {
-        hashTypeConvertTmplGeneric(o, OBJ_ENCODING_HT, 0);
     } else {
-        serverPanic("Unknown target encoding: %d", enc);
+        serverPanic("Invalid conversion from TMPL_LP to %d", enc);
     }
 }
 
-/* Convert TMPL_ARRAY to target encoding. */
+/* Convert TMPL_ARRAY to target encoding. HT is not a valid direct target: a
+ * template reaches HT only as the no-fit fallback inside the LISTPACK /
+ * LISTPACK_EX path (see hashTypeConvertTmplToListpackOrHT). */
 void hashTypeConvertTmplArray(robj *o, int enc) {
     serverAssert(o->encoding == OBJ_ENCODING_TMPL_ARRAY);
 
     if (enc == OBJ_ENCODING_TMPL_ARRAY) {
         /* Nothing to do. */
-    } else if (enc == OBJ_ENCODING_HT) {
-        hashTypeConvertTmplGeneric(o, OBJ_ENCODING_HT, 0);
+    } else if (enc == OBJ_ENCODING_LISTPACK || enc == OBJ_ENCODING_LISTPACK_EX) {
+        /* LISTPACK_EX implies HFE, so the HT fallback must keep HFE metadata. */
+        hashTypeConvertTmplToListpackOrHT(o, enc, enc == OBJ_ENCODING_LISTPACK_EX);
     } else {
-        /* TMPL_ARRAY can only go to HT. */
         serverPanic("Invalid conversion from TMPL_ARRAY to %d", enc);
     }
 }

@@ -57,6 +57,19 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         }
     }
 
+    # Poll hash_templates (registry size) until it settles. A template is removed
+    # only once both its key-refs and hold-refs reach zero; the final key-ref may
+    # be dropped on a BIO lazyfree thread and reclaimed in serverCron, so the
+    # registry size is eventually consistent like hash_template_keys above.
+    proc wait_hashtmpl_templates {expected {level ""}} {
+        wait_for_condition 50 100 {
+            [s {*}$level hash_templates] == $expected
+        } else {
+            fail "hash_templates did not settle to $expected\
+                  (got [s {*}$level hash_templates])"
+        }
+    }
+
     # ============================================================
     # HIMPORT PREPARE / SET / DISCARD / DISCARDALL
     # ============================================================
@@ -874,6 +887,36 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     }
 
     # ============================================================
+    # registry shrink
+    # ============================================================
+
+    test {registry frees by_id when the last template is removed} {
+        # Drain to an empty registry: drop all keys (key-refs) and every prepared
+        # template (hold-refs) accumulated by earlier tests on this connection.
+        # Emptying the registry is the path that frees the by_id array.
+        r flushall
+        r himport discardall
+        wait_hashtmpl_templates 0
+
+        make_hashtmpl shrink:k a 1 b 2 c 3
+        assert {[lindex [get_template_stats] 0] >= 1}
+
+        # Drop both refs so the registry empties again.
+        r del shrink:k
+        r himport discardall
+        wait_hashtmpl_templates 0
+
+        # by_id was freed (capacity reset to 0); a fresh template must still be
+        # creatable, exercising the grow-from-NULL path in allocateTemplateId.
+        make_hashtmpl shrink:k2 a 1 b 2 c 3
+        assert_hashtmpl_encoding shrink:k2
+        assert_equal [r hget shrink:k2 a] 1
+
+        r del shrink:k2
+        r himport discardall
+    }
+
+    # ============================================================
     # FLUSHALL / FLUSHDB - async free safety
     # ============================================================
 
@@ -1688,6 +1731,92 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         r himport discard t13_tpl
         r config set hash-max-listpack-value $prev_v
         r config set hash-min-template-entries $prev_m
+    }
+}
+
+# ============================================================
+# Memory savings. Many identical hashes that share one schema must be far
+# cheaper as templates, because the field names are stored once in the shared
+# template instead of once per key. Each test creates 20000 identical hashes in
+# both forms and requires the template form to be at least 40% smaller, both
+# for a single key (MEMORY USAGE) and across all keys (used_memory).
+# ============================================================
+start_server {tags {"hash" "hinted-hash-templates" "memory" "needs:debug" "cluster:skip"}
+              overrides {hash-min-template-entries 0}} {
+    # Every hash holds the same 32 fields. Field names and values are the same
+    # length, so in a plain hash exactly half the payload is field-name bytes,
+    # which is the part a template stores once instead of once per key.
+    set field_names {}
+    set field_values {}
+    set hset_pairs {}
+    for {set i 0} {$i < 32} {incr i} {
+        set name  [format "shared_field_name_%02d" $i]
+        set value [format "shared_value_num_%03d" $i]
+        lappend field_names  $name
+        lappend field_values $value
+        lappend hset_pairs   $name $value
+    }
+
+    test {TMPL_LP is 40%+ smaller than listpack (single key and 20000 total)} {
+        r flushall
+        r config set hash-max-listpack-entries 128   ;# 32 fields stay listpack
+
+        # 20000 plain listpack hashes; record total growth and one key's size.
+        set mem_before [s used_memory]
+        set rd [redis_deferring_client]
+        for {set i 0} {$i < 20000} {incr i} { $rd hset plain:$i {*}$hset_pairs }
+        for {set i 0} {$i < 20000} {incr i} { $rd read }
+        $rd close
+        assert_equal [r object encoding plain:0] listpack
+        set plain_total  [expr {[s used_memory] - $mem_before}]
+        set plain_single [r memory usage plain:0]
+
+        r flushall
+
+        # 20000 template hashes sharing one schema (PREPARE once, same connection).
+        set mem_before [s used_memory]
+        set rd [redis_deferring_client]
+        $rd himport prepare schema {*}$field_names; $rd read
+        for {set i 0} {$i < 20000} {incr i} { $rd himport set tmpl:$i schema {*}$field_values }
+        for {set i 0} {$i < 20000} {incr i} { $rd read }
+        $rd close
+        assert_equal [r object encoding tmpl:0] template-listpack
+        assert_equal [r hget tmpl:0 shared_field_name_00] shared_value_num_000
+        set tmpl_total  [expr {[s used_memory] - $mem_before}]
+        set tmpl_single [r memory usage tmpl:0]
+
+        assert {$tmpl_single <= $plain_single * 0.6}
+        assert {$tmpl_total  <= $plain_total  * 0.6}
+    }
+
+    test {TMPL_ARRAY is 40%+ smaller than hashtable (single key and 20000 total)} {
+        r flushall
+        r config set hash-max-listpack-entries 0     ;# force hashtable / array
+
+        set mem_before [s used_memory]
+        set rd [redis_deferring_client]
+        for {set i 0} {$i < 20000} {incr i} { $rd hset plain:$i {*}$hset_pairs }
+        for {set i 0} {$i < 20000} {incr i} { $rd read }
+        $rd close
+        assert_equal [r object encoding plain:0] hashtable
+        set plain_total  [expr {[s used_memory] - $mem_before}]
+        set plain_single [r memory usage plain:0]
+
+        r flushall
+
+        set mem_before [s used_memory]
+        set rd [redis_deferring_client]
+        $rd himport prepare schema {*}$field_names; $rd read
+        for {set i 0} {$i < 20000} {incr i} { $rd himport set tmpl:$i schema {*}$field_values }
+        for {set i 0} {$i < 20000} {incr i} { $rd read }
+        $rd close
+        assert_equal [r object encoding tmpl:0] template-array
+        assert_equal [r hget tmpl:0 shared_field_name_00] shared_value_num_000
+        set tmpl_total  [expr {[s used_memory] - $mem_before}]
+        set tmpl_single [r memory usage tmpl:0]
+
+        assert {$tmpl_single <= $plain_single * 0.6}
+        assert {$tmpl_total  <= $plain_total  * 0.6}
     }
 }
 
