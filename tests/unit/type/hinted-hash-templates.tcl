@@ -1973,6 +1973,50 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:de
     }
 }
 
+# A replica's master client caches the last template seen via HSETC (a template
+# hold-ref). On an idle link that would otherwise pin the template even after
+# its key is gone; replicationCron drops the cache once idle so it is reclaimed.
+start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "cluster:skip" "external:skip"}
+              overrides {hash-min-template-entries 0}} {
+    start_server {overrides {hash-min-template-entries 0}} {
+        test {Replica releases idle HSETC template cache} {
+            set master [srv -1 client]
+            set master_host [srv -1 host]
+            set master_port [srv -1 port]
+            set replica [srv 0 client]
+
+            $replica replicaof $master_host $master_port
+            wait_for_sync $replica
+
+            # Template hash on master -> replicated as HSETC, which caches the
+            # template on the replica's master client (a hold-ref).
+            $master himport prepare fs name email
+            $master himport set k fs alice alice@x.com
+            wait_for_condition 50 100 { [$replica exists k] == 1 } else {
+                fail "template hash not propagated to replica"
+            }
+            assert_equal template-listpack [$replica object encoding k]
+            assert_equal 1 [s 0 hash_templates]
+
+            # Drop the key: its template key-ref reaches zero, but the master
+            # client's HSETC cache still holds it -> registry stays at 1.
+            $master del k
+            wait_for_condition 50 100 { [$replica exists k] == 0 } else {
+                fail "key not deleted on replica"
+            }
+
+            # After the idle threshold replicationCron drops the cache,
+            # releasing the last hold-ref so the template is reclaimed.
+            wait_for_condition 100 100 {
+                [s 0 hash_templates] == 0
+            } else {
+                fail "replica did not release idle HSETC template cache\
+                      (hash_templates=[s 0 hash_templates])"
+            }
+        }
+    }
+}
+
 # Race the BIO key-ref drop (FLUSHALL ASYNC) against the main-thread hold-ref
 # drop (HIMPORT DISCARDALL) on template free. Probabilistic guard for ASan/TSan.
 start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" "external:skip"}

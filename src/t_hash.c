@@ -3687,6 +3687,7 @@ void hsetcCommand(client *c) {
         hashTemplateIncrHoldRef(tmpl);
         c->hsetc_cache = tmpl;
     }
+    c->hsetc_cache_time = server.mstime;
 
     sds stack_values[HASH_TMPL_STACK_ENTRIES];
     sds *values = (field_count <= HASH_TMPL_STACK_ENTRIES) ?

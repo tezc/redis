@@ -65,6 +65,26 @@ start_server {tags {"modules external:skip"}} {
         r debug set-active-expire 1
     } {OK} {needs:debug}
 
+    test {Module scan hash template-listpack} {
+        r config set hash-min-template-entries 0
+        r config set hash-max-listpack-entries 128
+        r del th
+        r himport prepare tmpl_lp fa fb fc
+        r himport set th tmpl_lp hello 123 world
+        assert_encoding template-listpack th
+        lsort [r scan.scan_key th]
+    } {{fa hello} {fb 123} {fc world}}
+
+    test {Module scan hash template-array} {
+        r config set hash-min-template-entries 0
+        r config set hash-max-listpack-entries 0
+        r del ta
+        r himport prepare tmpl_arr fa fb fc
+        r himport set ta tmpl_arr hello 123 world
+        assert_encoding template-array ta
+        lsort [r scan.scan_key ta]
+    } {{fa hello} {fb 123} {fc world}}
+
     test {Module scan zset listpack} {
         r zadd zz 1 f1 2 f2
         assert_encoding listpack zz

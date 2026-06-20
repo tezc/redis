@@ -258,6 +258,7 @@ client *createClient(connection *conn) {
     c->node_id = NULL;
     c->himport_fieldsets = NULL;
     c->hsetc_cache = NULL;
+    c->hsetc_cache_time = 0;
     atomicSet(c->pending_read, 0);
     return c;
 }

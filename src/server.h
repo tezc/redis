@@ -1665,6 +1665,7 @@ typedef struct client {
     size_t stat_avg_pipeline_length_cnt; /* Count of pipeline length samples */
     void *himport_fieldsets;      /* Session-local HIMPORT fieldsets (himportFieldsetList*) */
     void *hsetc_cache;            /* hashTemplate* - last HSETC template (skips dictFind on repeat) */
+    mstime_t hsetc_cache_time;    /* Last time hsetc_cache was used (for idle eviction) */
 } client;
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
