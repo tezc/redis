@@ -615,29 +615,83 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     # HSCAN on template-based hash
     # ============================================================
 
-    test {HSCAN on template-based hash returns all fields} {
-        make_hashtmpl hscan:test a 1 b 2 c 3
-        set result [r hscan hscan:test 0]
-        set cursor [lindex $result 0]
-        set elements [lindex $result 1]
-        assert_equal $cursor 0
-        assert_equal [llength $elements] 6
+    # The template iterator walks fields in template (sorted) order, so HSCAN
+    # output is deterministic and can be compared verbatim. Each case below
+    # covers a distinct branch of the TMPL_LP/TMPL_ARRAY scan path in db.c, and
+    # the whole file runs under both encodings via the outer foreach.
+
+    # No pattern, with values: integer values exercise the addReplyBulkLongLong
+    # branch under template-listpack (values are sds strings under template-array).
+    test {HSCAN on template-based hash returns all field/value pairs} {
+        make_hashtmpl key a 1 b 2 c 3
+        assert_encoding $encoding key
+        set result [r hscan key 0]
+        assert_equal [lindex $result 0] 0
+        assert_equal [lindex $result 1] {a 1 b 2 c 3}
     }
 
-    test {HSCAN with MATCH pattern on template-based hash} {
-        make_hashtmpl hscan:match field1 val1 field2 val2 other val3
-        set result [r hscan hscan:match 0 MATCH field*]
-        set elements [lindex $result 1]
-        # Should match field1 and field2
-        assert {[llength $elements] == 4}
+    # No pattern, with values: string values exercise the addReplyBulkCBuffer
+    # value branch (also under template-listpack).
+    test {HSCAN on template-based hash returns string values verbatim} {
+        make_hashtmpl key f1 val1 f2 val2 f3 val3
+        set result [r hscan key 0]
+        assert_equal [lindex $result 1] {f1 val1 f2 val2 f3 val3}
     }
 
-    test {HSCAN with NOVALUES on template-based hash} {
-        make_hashtmpl hscan:noval a 1 b 2 c 3
-        set result [r hscan hscan:noval 0 NOVALUES]
-        set elements [lindex $result 1]
-        assert_equal [llength $elements] 3
-        assert_equal [lsort $elements] {a b c}
+    # no_values branch: reply length is n, values skipped.
+    test {HSCAN NOVALUES on template-based hash returns fields only} {
+        make_hashtmpl key a 1 b 2 c 3
+        set result [r hscan key 0 NOVALUES]
+        assert_equal [lindex $result 0] 0
+        assert_equal [lindex $result 1] {a b c}
+    }
+
+    # use_pattern branch with a partial match: deferred length + stringmatchlen
+    # selecting a subset (the "other" field hits the continue path).
+    test {HSCAN MATCH on template-based hash selects a subset} {
+        make_hashtmpl key field1 val1 field2 val2 other val3
+        set result [r hscan key 0 MATCH field*]
+        assert_equal [lindex $result 0] 0
+        assert_equal [lindex $result 1] {field1 val1 field2 val2}
+    }
+
+    # use_pattern where every field hits the continue path: empty result, cursor 0.
+    test {HSCAN MATCH on template-based hash matching nothing is empty} {
+        make_hashtmpl key a 1 b 2 c 3
+        set result [r hscan key 0 MATCH nomatch*]
+        assert_equal [lindex $result 0] 0
+        assert_equal [lindex $result 1] {}
+    }
+
+    # use_pattern where every field matches: full result through the deferred path.
+    test {HSCAN MATCH * on template-based hash returns everything} {
+        make_hashtmpl key a 1 b 2 c 3
+        set result [r hscan key 0 MATCH *]
+        assert_equal [lindex $result 1] {a 1 b 2 c 3}
+    }
+
+    # use_pattern and no_values together: matched fields only, no values.
+    test {HSCAN MATCH with NOVALUES on template-based hash} {
+        make_hashtmpl key field1 val1 field2 val2 other val3
+        set result [r hscan key 0 MATCH field* NOVALUES]
+        assert_equal [lindex $result 0] 0
+        assert_equal [lindex $result 1] {field1 field2}
+    }
+
+    # COUNT is ignored on this path (single-shot scan); cursor stays 0.
+    test {HSCAN COUNT is ignored on template-based hash} {
+        make_hashtmpl key a 1 b 2 c 3 d 4 e 5
+        set result [r hscan key 0 COUNT 1]
+        assert_equal [lindex $result 0] 0
+        assert_equal [lindex $result 1] {a 1 b 2 c 3 d 4 e 5}
+    }
+
+    # Single-field hash edge case.
+    test {HSCAN on single-field template-based hash} {
+        make_hashtmpl key only val
+        set result [r hscan key 0]
+        assert_equal [lindex $result 0] 0
+        assert_equal [lindex $result 1] {only val}
     }
 
     # ============================================================
@@ -1842,41 +1896,79 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
     }
 }
 
-# Field counts spanning HASH_TMPL_STACK_ENTRIES (128): template code uses a
-# stack buffer for <=128 fields and a heap allocation for >128 (himport set,
-# createHashObjectFromTemplate, HDEL field-array rebuild). Verify data is
-# correct across that boundary, including the binary-search HGET and reload.
-start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}} {
-    foreach fc {127 128 129 256} {
-        test "template large field-count correctness: $fc fields" {
-            r flushall
-            set fields {}
-            for {set i 0} {$i < $fc} {incr i} { lappend fields f[format %04d $i] }
-            set vals {}
-            foreach f $fields { lappend vals val_$f }
-            r himport prepare big {*}$fields
-            r himport set k big {*}$vals
+# Large template-based keys, end-to-end, with a replica attached. For a range of
+# field counts and both template encodings, exercise HIMPORT PREPARE/SET (which
+# replicate as HSETC), HRANDFIELD, HSET of a new field and HDEL. After every
+# mutation the entire key (all fields and values) and its template encoding are
+# verified on both the master and the replica. HGETALL is sorted before
+# comparing so the check does not depend on field order.
+start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
+              overrides {hash-min-template-entries 0}} {
+    start_server {overrides {hash-min-template-entries 0}} {
+        set replica [srv -1 client]
+        $replica replicaof [srv 0 host] [srv 0 port]
+        wait_for_sync $replica
 
-            assert_match {template-*} [r object encoding k]
-            assert_equal $fc [r hlen k]
-            # Every field resolves (binary search over the sorted field array,
-            # incl. the heap path for fc > 128); a missing field returns nil.
-            foreach f $fields { assert_equal val_$f [r hget k $f] }
-            assert_equal {} [r hget k nosuchfield]
-            assert_equal [expr {$fc * 2}] [llength [r hgetall k]]
+        foreach {enc maxlp} {template-listpack 1024 template-array 0} {
+            foreach field_count {127 128 129 256 512} {
+                test "large template-based key: $field_count fields ($enc)" {
+                    r config set hash-max-listpack-entries $maxlp
+                    $replica config set hash-max-listpack-entries $maxlp
+                    r flushall
 
-            # HDEL one field rebuilds the template (field-array path) and the
-            # rest must stay correct.
-            assert_equal 1 [r hdel k [lindex $fields 1]]
-            assert_equal [expr {$fc - 1}] [r hlen k]
-            assert_equal {} [r hget k [lindex $fields 1]]
-            assert_equal val_[lindex $fields 0] [r hget k [lindex $fields 0]]
-            assert_equal val_[lindex $fields end] [r hget k [lindex $fields end]]
+                    # Build $field_count fields f0000.. -> val_f0000.. plus the
+                    # flat field/value list we expect HGETALL to return.
+                    set fields {}; set vals {}; set flat {}
+                    for {set i 0} {$i < $field_count} {incr i} {
+                        set f f[format %04d $i]
+                        lappend fields $f
+                        lappend vals val_$f
+                        lappend flat $f val_$f
+                    }
+                    set expected [lsort $flat]
 
-            # Survives RDB round-trip (save/load of a large template).
-            r debug reload
-            assert_equal [expr {$fc - 1}] [r hlen k]
-            assert_equal val_[lindex $fields end] [r hget k [lindex $fields end]]
+                    # HIMPORT PREPARE + SET (reaches the replica as one HSETC).
+                    r himport prepare t {*}$fields
+                    r himport set k t {*}$vals
+
+                    # HRANDFIELD returns all fields with their correct values.
+                    set rand [r hrandfield k $field_count WITHVALUES]
+                    assert_equal [expr {$field_count * 2}] [llength $rand]
+                    foreach {f v} $rand { assert_equal val_$f $v }
+                    assert_equal $field_count [llength [lsort -unique [r hrandfield k $field_count]]]
+                    # Master and replica: template encoded, every field/value correct.
+                    assert_equal $enc [r object encoding k]
+                    assert_equal $expected [lsort [r hgetall k]]
+                    wait_for_condition 50 100 {
+                        [lsort [$replica hgetall k]] eq $expected
+                    } else { fail "Replica out of sync after HIMPORT SET" }
+                    assert_match {template-*} [$replica object encoding k]
+
+                    # HSET a brand-new field: re-verify the whole key everywhere.
+                    set grown [lsort [concat $flat new_field newval]]
+                    r hset k new_field newval
+                    assert_match {template-*} [r object encoding k]
+                    assert_equal $grown [lsort [r hgetall k]]
+                    wait_for_condition 50 100 {
+                        [lsort [$replica hgetall k]] eq $grown
+                    } else { fail "Replica out of sync after HSET" }
+                    assert_match {template-*} [$replica object encoding k]
+
+                    # HDEL the new field: the key is back to its original contents.
+                    assert_equal 1 [r hdel k new_field]
+                    assert_match {template-*} [r object encoding k]
+                    assert_equal $expected [lsort [r hgetall k]]
+                    wait_for_condition 50 100 {
+                        [lsort [$replica hgetall k]] eq $expected
+                    } else { fail "Replica out of sync after HDEL" }
+                    assert_match {template-*} [$replica object encoding k]
+
+                    # Survives an RDB reload with all fields/values intact.
+                    r debug reload
+                    assert_match {template-*} [r object encoding k]
+                    assert_equal $expected [lsort [r hgetall k]]
+                }
+            }
         }
     }
 }

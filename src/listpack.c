@@ -2590,6 +2590,84 @@ int listpackTest(int argc, char *argv[], int flags) {
         lpFree(lp);
     }
 
+    TEST("Batch insert into a NULL listpack") {
+        listpackEntry ent[6] = {
+                {.sval = (unsigned char*)mixlist[0], .slen = strlen(mixlist[0])},
+                {.sval = (unsigned char*)mixlist[1], .slen = strlen(mixlist[1])},
+                {.sval = (unsigned char*)mixlist[2], .slen = strlen(mixlist[2])},
+                {.lval = 4294967296},
+                {.sval = (unsigned char*)mixlist[3], .slen = strlen(mixlist[3])},
+                {.lval = -100}
+        };
+
+        /* lp == NULL builds a brand-new listpack in one exact-size allocation;
+         * 'p' and 'where' are ignored. 'newp' tracks the last written entry. */
+        p = NULL;
+        lp = lpBatchInsert(NULL, NULL, LP_BEFORE, ent, 6, &p);
+        assert(lp != NULL);
+        assert(lpLength(lp) == 6);
+        verifyEntry(p, (unsigned char*)"-100", 4);
+        verifyEntry(lpSeek(lp, 0), ent[0].sval, ent[0].slen);
+        verifyEntry(lpSeek(lp, 1), ent[1].sval, ent[1].slen);
+        verifyEntry(lpSeek(lp, 2), ent[2].sval, ent[2].slen);
+        verifyEntry(lpSeek(lp, 3), (unsigned char*)"4294967296", 10);
+        verifyEntry(lpSeek(lp, 4), ent[4].sval, ent[4].slen);
+        verifyEntry(lpSeek(lp, 5), (unsigned char*)"-100", 4);
+        assert(lpValidateIntegrity(lp, lpBytes(lp), 1, NULL, NULL) == 1);
+        lpFree(lp);
+
+        /* Single-entry new listpack. */
+        lp = lpBatchInsert(NULL, NULL, LP_BEFORE, ent, 1, NULL);
+        assert(lp != NULL);
+        assert(lpLength(lp) == 1);
+        verifyEntry(lpSeek(lp, 0), ent[0].sval, ent[0].slen);
+        assert(lpValidateIntegrity(lp, lpBytes(lp), 1, NULL, NULL) == 1);
+        lpFree(lp);
+    }
+
+    TEST("Batch insert stack/heap buffer boundary") {
+        /* The encoding pre-pass uses a 64-slot stack buffer; len > 64 switches
+         * to a heap allocation. Walk both sides of the boundary. */
+        listpackEntry ent[66];
+
+        /* New-listpack path across the 64-entry boundary (63..66). */
+        for (int n = 63; n <= 66; n++) {
+            for (int j = 0; j < n; j++) {
+                ent[j].sval = NULL;
+                ent[j].lval = j;
+            }
+            lp = lpBatchInsert(NULL, NULL, LP_BEFORE, ent, n, NULL);
+            assert(lp != NULL);
+            assert((int)lpLength(lp) == n);
+            for (int j = 0; j < n; j++) {
+                char buf[LP_INTBUF_SIZE];
+                int blen = snprintf(buf, sizeof(buf), "%d", j);
+                verifyEntry(lpSeek(lp, j), (unsigned char*)buf, blen);
+            }
+            assert(lpValidateIntegrity(lp, lpBytes(lp), 1, NULL, NULL) == 1);
+            lpFree(lp);
+        }
+
+        /* Heap path (len > 64) inserting into an existing listpack. */
+        for (int j = 0; j < 65; j++) {
+            ent[j].sval = NULL;
+            ent[j].lval = j;
+        }
+        lp = lpNew(0);
+        lp = lpAppend(lp, (unsigned char*)"head", 4);
+        p = lpSeek(lp, 0);
+        lp = lpBatchInsert(lp, p, LP_AFTER, ent, 65, NULL);
+        assert(lpLength(lp) == 66);
+        verifyEntry(lpSeek(lp, 0), (unsigned char*)"head", 4);
+        for (int j = 0; j < 65; j++) {
+            char buf[LP_INTBUF_SIZE];
+            int blen = snprintf(buf, sizeof(buf), "%d", j);
+            verifyEntry(lpSeek(lp, j + 1), (unsigned char*)buf, blen);
+        }
+        assert(lpValidateIntegrity(lp, lpBytes(lp), 1, NULL, NULL) == 1);
+        lpFree(lp);
+    }
+
     TEST("Batch delete") {
         unsigned char *lp = createList(); /* char *mixlist[] = {"hello", "foo", "quux", "1024"} */
         assert(lpLength(lp) == 4); /* Pre-condition */

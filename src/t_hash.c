@@ -1521,7 +1521,9 @@ int hashTypeSet(redisDb *db, kvobj *o, sds field, sds value, int flags) {
         /* Field not in tmpl - build sorted new_fields by splicing at insert_pos. */
         int insert_pos = -field_idx - 1;
         unsigned long long new_field_count = tmpl->field_count + 1;
-        sds *new_fields = zmalloc(sizeof(sds) * new_field_count);
+        sds stack_fields[HASH_TMPL_STACK_ENTRIES];
+        sds *new_fields = (new_field_count <= HASH_TMPL_STACK_ENTRIES) ?
+                          stack_fields : zmalloc(sizeof(sds) * new_field_count);
         memcpy(new_fields, tmpl->fields, sizeof(sds) * insert_pos);
         new_fields[insert_pos] = field;
         memcpy(&new_fields[insert_pos + 1], &tmpl->fields[insert_pos],
@@ -1531,7 +1533,7 @@ int hashTypeSet(redisDb *db, kvobj *o, sds field, sds value, int flags) {
         uint64_t new_hash = tmpl->hash + computeFieldHash(field);
         hashTemplate *new_tmpl = hashTemplateGetOrCreateWithHash(new_hash, new_fields, new_field_count);
         hashTemplateIncrKeyRef(new_tmpl);
-        zfree(new_fields);
+        if (new_fields != stack_fields) zfree(new_fields);
 
         /* Insert value at insert_pos in existing structure. */
         if (o->encoding == OBJ_ENCODING_TMPL_LP) {
@@ -1561,7 +1563,6 @@ int hashTypeSet(redisDb *db, kvobj *o, sds field, sds value, int flags) {
             o->ptr = hta;
         }
 
-        /* update = 0 since we added a new field */
         goto cleanup;
     }
 
@@ -2799,26 +2800,29 @@ int hashTypeTryConvertToTemplate(robj *o) {
 
     /* Get or create template. */
     hashTemplate *tmpl = hashTemplateGetOrCreate(fields, num_fields);
+    int took_values; /* TMPL_ARRAY takes ownership of values; TMPL_LP copies. */
     if (o->encoding == OBJ_ENCODING_LISTPACK) {
         /* LP → TMPL_LP */
         unsigned char *new_lp = hashTemplateLpCreate(tmpl, values);
         zfree(o->ptr);
         o->ptr = new_lp;
         o->encoding = OBJ_ENCODING_TMPL_LP;
+        took_values = 0;
     } else {
         /* HT → TMPL_ARRAY */
         hashTemplateArray *hta = hashTemplateArrayCreate(tmpl, values, 1);
         dictRelease(o->ptr);
         o->ptr = hta;
         o->encoding = OBJ_ENCODING_TMPL_ARRAY;
+        took_values = 1;
     }
 
-    /* Free temporary arrays (values taken by TMPL_ARRAY,
-     * but fields always need freeing). */
+    /* Free temporary arrays. Fields are always copied by the template; values
+     * are taken by TMPL_ARRAY but copied by TMPL_LP, so free them only when the
+     * new encoding did not take ownership. */
     for (size_t j = 0; j < num_fields; j++)
         sdsfree(fields[j]);
-    if (o->encoding == OBJ_ENCODING_TMPL_LP) {
-        /* LP path didn't take values. */
+    if (!took_values) {
         for (size_t j = 0; j < num_fields; j++)
             sdsfree(values[j]);
     }
@@ -3590,7 +3594,7 @@ void himportSetCommand(client *c) {
     /* Ensure propargv is built; field robjs live at propargv[2 .. 2+N). */
     robj **fields_robj = hashTemplateGetPropargvFields(tmpl);
     robj **propargv = tmpl->propargv;
-    propargv[1] = c->argv[2]; /* key */
+    propargv[1] = c->argv[2];
 
     for (unsigned long long i = 0; i < field_count; i++) {
         robj *valobj = c->argv[4 + value_order[i]];
@@ -3642,12 +3646,11 @@ void hsetcCacheFree(client *c) {
 }
 
 static int hsetcCacheMatch(hashTemplate *tmpl, client *c, unsigned long long field_count) {
-    if (!tmpl || tmpl->field_count != field_count) 
+    if (!tmpl || tmpl->field_count != field_count)
         return 0;
     for (unsigned long long i = 0; i < field_count; i++)
-        if (sdscmplen(tmpl->fields[i], c->argv[2 + i]->ptr) != 0) 
+        if (sdscmplen(tmpl->fields[i], c->argv[2 + i]->ptr) != 0)
             return 0;
-    
     return 1;
 }
 
@@ -3665,7 +3668,6 @@ void hsetcCommand(client *c) {
 
     unsigned long long field_count = (c->argc - 2) / 2;
     hashTemplate *tmpl = c->hsetc_cache;
-    
     /* Skip tmpl lookup if the cached tmpl matches the field set. */
     if (!hsetcCacheMatch(tmpl, c, field_count)) {
         /* Unwrap robj* into sds* and accumulate the fields hash in the same
@@ -3693,8 +3695,7 @@ void hsetcCommand(client *c) {
         values[i] = c->argv[2 + field_count + i]->ptr;
 
     robj *o = createHashObjectFromTemplate(tmpl, values);
-    if (values != stack_values) 
-        zfree(values);
+    if (values != stack_values) zfree(values);
 
     setKey(c, c->db, c->argv[1], &o, 0);
 

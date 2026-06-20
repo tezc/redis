@@ -2090,11 +2090,11 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
         return;
     } else if (o->type == OBJ_HASH &&
                (o->encoding == OBJ_ENCODING_TMPL_LP ||
-                o->encoding == OBJ_ENCODING_TMPL_ARRAY)) {
+                o->encoding == OBJ_ENCODING_TMPL_ARRAY)) 
+    {
         unsigned long n = hashTypeLength(o, 0);
-
         vecRelease(&keys);
-
+        
         addReplyArrayLen(c, 2);
         /* Cursor is always 0 given we iterate over all hash fields. */
         addReplyBulkLongLong(c, 0);
@@ -2113,15 +2113,16 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
             unsigned int vlen;
             long long vll;
             hashTypeCurrentObject(&hi, OBJ_HASH_KEY, &vstr, &vlen, &vll, NULL);
-            if (use_pattern && !stringmatchlen(pat, patlen,
-                                               (char*)vstr, vlen, 0))
+            if (use_pattern && !stringmatchlen(pat, patlen, (char*)vstr, vlen, 0))
                 continue;
             addReplyBulkCBuffer(c, vstr, vlen);
             cur_length++;
             if (!no_values) {
                 hashTypeCurrentObject(&hi, OBJ_HASH_VALUE, &vstr, &vlen, &vll, NULL);
-                if (vstr) addReplyBulkCBuffer(c, vstr, vlen);
-                else addReplyBulkLongLong(c, vll);
+                if (vstr) 
+                    addReplyBulkCBuffer(c, vstr, vlen);
+                else 
+                    addReplyBulkLongLong(c, vll);
                 cur_length++;
             }
         }
