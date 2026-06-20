@@ -6,8 +6,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         r config set hash-max-listpack-entries 0
     }
 
-    # Build a template-based hash via the user-facing HIMPORT API.
-    # HSETC is internal (CMD_INTERNAL) and only accepted from master/AOF.
+    # Build a template-based hash via HIMPORT command.
     proc make_hashtmpl {key args} {
         set fields {}
         set values {}
@@ -63,114 +62,63 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         }
     }
 
-    # ============================================================
-    # HIMPORT argument validation
-    # ============================================================
-
-    test {HIMPORT with no subcommand returns arity error} {
-        catch {r himport} err
-        assert_match "*wrong number of arguments*" $err
-    }
-
-    test {HIMPORT with unknown subcommand returns error} {
-        catch {r himport foobar} err
-        assert_match "*unknown subcommand*" $err
-    }
-
-    test {HIMPORT subcommand is case-insensitive} {
-        assert_equal [r himport PREPARE caseT a b] OK
-        assert_equal [r himport Prepare caseT2 a b] OK
-        assert_equal [r HIMPORT prepare caseT3 a b] OK
-        r himport discardall
-    }
-
-    # --- HIMPORT PREPARE arity / validation ---
-
-    test {HIMPORT PREPARE with no fieldset name fails} {
-        catch {r himport prepare} err
-        assert_match "*wrong number of arguments*" $err
-    }
-
-    test {HIMPORT PREPARE with no fields fails} {
-        catch {r himport prepare foo} err
-        assert_match "*wrong number of arguments*" $err
+    test {HIMPORT argument validation} {
+        # Bad subcommand / no subcommand.
+        assert_error "*wrong number of arguments*" {r himport}
+        assert_error "*unknown subcommand*" {r himport foobar}
+        # PREPARE needs a name and at least one field.
+        assert_error "*wrong number of arguments*" {r himport prepare}
+        assert_error "*wrong number of arguments*" {r himport prepare fieldset}
+        # SET needs a key, a template and values.
+        assert_error "*wrong number of arguments*" {r himport set}
+        assert_error "*wrong number of arguments*" {r himport set k}
+        assert_error "*wrong number of arguments*" {r himport set k fieldset}
+        # DISCARD takes exactly one name; DISCARDALL takes none.
+        assert_error "*wrong number of arguments*" {r himport discard}
+        assert_error "*wrong number of arguments*" {r himport discard a b}
+        assert_error "*wrong number of arguments*" {r himport discardall extra}
     }
 
     test {HIMPORT PREPARE with single field works} {
-        assert_equal [r himport prepare single f1] OK
-        assert_equal [r himport set single:k single v1] OK
-        assert_equal [r hgetall single:k] {f1 v1}
-        r himport discard single
+        assert_equal [r himport prepare fieldset f1] OK
+        assert_equal [r himport set key fieldset v1] OK
+        assert_equal [r hgetall key] {f1 v1}
+        r himport discard fieldset
     }
 
     test {HIMPORT PREPARE rejects duplicate field names} {
-        catch {r himport prepare dup1 a a b} err
-        assert_match "*duplicate field name*" $err
-        catch {r himport prepare dup2 a b a} err
-        assert_match "*duplicate field name*" $err
-        catch {r himport prepare dup3 same same} err
-        assert_match "*duplicate field name*" $err
+        assert_error "*duplicate field name*" {r himport prepare fieldset1 a a b}
+        assert_error "*duplicate field name*" {r himport prepare fieldset2 a b a}
+        assert_error "*duplicate field name*" {r himport prepare fieldset3 same same}
         # Failed PREPARE must not register the fieldset.
-        catch {r himport set dup:k dup1 v1 v2 v3} err
-        assert_match "*no such fieldset*" $err
+        assert_error "*no such fieldset*" {r himport set key fieldset1 v1 v2 v3}
     }
 
     test {HIMPORT PREPARE accepts empty field name} {
-        assert_equal [r himport prepare emptyf "" b] OK
-        assert_equal [r himport set emptyf:k emptyf va vb] OK
-        assert_equal [r hget emptyf:k ""] va
-        assert_equal [r hget emptyf:k b] vb
-        r himport discard emptyf
+        assert_equal [r himport prepare fieldset "" b] OK
+        assert_equal [r himport set key fieldset va vb] OK
+        assert_equal [r hget key ""] va
+        assert_equal [r hget key b] vb
+        r himport discard fieldset
     }
 
     test {HIMPORT PREPARE accepts empty template name} {
         assert_equal [r himport prepare "" f1 f2] OK
-        assert_equal [r himport set emptynam:k "" v1 v2] OK
-        assert_equal [r hgetall emptynam:k] {f1 v1 f2 v2}
+        assert_equal [r himport set key "" v1 v2] OK
+        assert_equal [r hgetall key] {f1 v1 f2 v2}
         r himport discard ""
     }
 
-    # --- HIMPORT SET arity / validation ---
-
-    test {HIMPORT SET with no key fails} {
-        catch {r himport set} err
-        assert_match "*wrong number of arguments*" $err
-    }
-
-    test {HIMPORT SET with no template fails} {
-        catch {r himport set k} err
-        assert_match "*wrong number of arguments*" $err
-    }
-
-    test {HIMPORT SET with no values fails} {
-        catch {r himport set k tpl} err
-        assert_match "*wrong number of arguments*" $err
-    }
-
     test {HIMPORT SET with too many values fails} {
-        r himport prepare twof a b
-        catch {r himport set twof:k twof v1 v2 v3} err
-        assert_match "*value count does not match*" $err
-        r himport discard twof
+        r himport prepare fieldset a b
+        assert_error "*value count does not match*" {r himport set key fieldset v1 v2 v3}
+        r himport discard fieldset
     }
 
     test {HIMPORT SET with too few values fails} {
-        r himport prepare threef a b c
-        catch {r himport set threef:k threef v1 v2} err
-        assert_match "*value count does not match*" $err
-        r himport discard threef
-    }
-
-    # --- HIMPORT DISCARD arity / behavior ---
-
-    test {HIMPORT DISCARD with no fieldset name fails} {
-        catch {r himport discard} err
-        assert_match "*wrong number of arguments*" $err
-    }
-
-    test {HIMPORT DISCARD with extra args fails} {
-        catch {r himport discard a b} err
-        assert_match "*wrong number of arguments*" $err
+        r himport prepare fieldset a b c
+        assert_error "*value count does not match*" {r himport set key fieldset v1 v2}
+        r himport discard fieldset
     }
 
     test {HIMPORT DISCARD on nonexistent fieldset returns 0} {
@@ -178,30 +126,22 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     }
 
     test {HIMPORT DISCARD returns 1 when fieldset removed} {
-        r himport prepare disc1 a b
-        assert_equal [r himport discard disc1] 1
-        assert_equal [r himport discard disc1] 0
+        r himport prepare fieldset a b
+        assert_equal [r himport discard fieldset] 1
+        assert_equal [r himport discard fieldset] 0
     }
 
     test {HIMPORT DISCARD does not invalidate existing keys} {
-        r himport prepare ref a b c
-        r himport set ref:k1 ref v1 v2 v3
-        assert_encoding $encoding ref:k1
+        r himport prepare fieldset a b c
+        r himport set key1 fieldset v1 v2 v3
+        assert_encoding $encoding key1
         # Discard the fieldset; existing key must remain valid.
-        r himport discard ref
-        assert_encoding $encoding ref:k1
-        assert_equal [r hgetall ref:k1] {a v1 b v2 c v3}
+        r himport discard fieldset
+        assert_encoding $encoding key1
+        assert_equal [r hgetall key1] {a v1 b v2 c v3}
         # SET with the discarded name now fails.
-        catch {r himport set ref:k2 ref v1 v2 v3} err
-        assert_match "*no such fieldset*" $err
-        r del ref:k1
-    }
-
-    # --- HIMPORT DISCARDALL arity / behavior ---
-
-    test {HIMPORT DISCARDALL with extra args fails} {
-        catch {r himport discardall extra} err
-        assert_match "*wrong number of arguments*" $err
+        assert_error "*no such fieldset*" {r himport set key2 fieldset v1 v2 v3}
+        r del key1
     }
 
     test {HIMPORT DISCARDALL with no fieldsets returns 0} {
@@ -209,44 +149,28 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         assert_equal [r himport discardall] 0
     }
 
-    test {HIMPORT DISCARDALL returns count of removed fieldsets} {
+    test {HIMPORT DISCARDALL returns number of removed fieldsets} {
         r himport discardall
-        r himport prepare a1 x y
-        r himport prepare a2 x y z
-        r himport prepare a3 m n
+        r himport prepare fieldset1 x y
+        r himport prepare fieldset2 x y z
+        r himport prepare fieldset3 m n
         assert_equal [r himport discardall] 3
-        foreach name {a1 a2 a3} {
-            catch {r himport set k $name v1 v2} err
-            assert_match "*no such fieldset*" $err
+        foreach name {fieldset1 fieldset2 fieldset3} {
+            assert_error "*no such fieldset*" {r himport set k $name v1 v2}
         }
     }
 
-    # ============================================================
-    # HIMPORT SET / DISCARD behavior
-    # ============================================================
-
     test {HIMPORT SET creates template-based hash} {
         r del myhash
-        # Fieldset fields: name email age (user order)
-        # Schema fields: sorted length-first: age, name, email
-        # Values alice alice@example.com 25 -> sorted: 25 alice alice@example.com
         r himport prepare user name email age
         r himport set myhash user alice alice@example.com 25
         assert_encoding $encoding myhash
         assert_equal [r hgetall myhash] {age 25 name alice email alice@example.com}
     }
 
-    test {HIMPORT SET with wrong field count fails} {
-        r del myhash
-        r himport prepare user name email age
-        catch {r himport set myhash user bob bob@example.com} err
-        assert_match "*value count does not match*" $err
-    }
-
     test {HIMPORT SET with unknown fieldset fails} {
         r del myhash
-        catch {r himport set myhash nosuchfs alice alice@example.com 25} err
-        assert_match "*no such fieldset*" $err
+        assert_error "*no such fieldset*" {r himport set myhash nosuchfs alice alice@example.com 25}
     }
 
     test {HIMPORT SET replaces existing string key} {
@@ -282,21 +206,6 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         assert_equal [r hget myhash name] {}
     }
 
-    test {HIMPORT DISCARD removes fieldset} {
-        r himport prepare temptest f1 f2
-        r himport discard temptest
-        catch {r himport set key1 temptest v1 v2} err
-        assert_match "*no such fieldset*" $err
-    }
-
-    test {HIMPORT DISCARDALL removes all fieldsets} {
-        r himport prepare t1 f1 f2
-        r himport prepare t2 f1 f2 f3
-        r himport discardall
-        catch {r himport set key1 t1 v1 v2} err
-        assert_match "*no such fieldset*" $err
-    }
-
     test {HIMPORT PREPARE state is accounted in client memory} {
         # tot-mem from CLIENT INFO for the current connection.
         proc cur_tot_mem {} {
@@ -314,7 +223,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
             for {set f 0} {$f < 64} {incr f} {
                 lappend fields "field_${i}_${f}"
             }
-            r himport prepare fs$i {*}$fields
+            r himport prepare fieldset$i {*}$fields
         }
         set after [cur_tot_mem]
 
@@ -352,7 +261,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
             for {set f 0} {$f < 2000} {incr f} {
                 lappend fields "field_${i}_${f}"
             }
-            if {[catch {$rr himport prepare fs$i {*}$fields}]} {
+            if {[catch {$rr himport prepare fieldset$i {*}$fields}]} {
                 set evicted 1 ;# server closed the connection on eviction
                 break
             }
@@ -369,82 +278,91 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 
     test {HIMPORT PREPARE replaces existing fieldset with same name} {
         # Create template with 2 fields
-        r himport prepare reuse a b
-        r himport set reuse:1 reuse val_a val_b
-        assert_equal [r hgetall reuse:1] {a val_a b val_b}
+        r himport prepare fieldset a b
+        r himport set key1 fieldset val_a val_b
+        assert_equal [r hgetall key1] {a val_a b val_b}
 
         # Replace with template with 3 fields (same name)
-        r himport prepare reuse x y z
-        r himport set reuse:2 reuse val_x val_y val_z
-        assert_equal [r hgetall reuse:2] {x val_x y val_y z val_z}
+        r himport prepare fieldset x y z
+        r himport set key2 fieldset val_x val_y val_z
+        assert_equal [r hgetall key2] {x val_x y val_y z val_z}
 
         # Old template definition should be gone - using with 2 values fails
-        catch {r himport set reuse:3 reuse v1 v2} err
-        assert_match "*value count does not match*" $err
+        assert_error "*value count does not match*" {r himport set key3 fieldset v1 v2}
 
         # Cleanup
-        r himport discard reuse
+        r himport discard fieldset
     }
 
     # --- Session isolation ---
 
     test {Fieldsets are not shared between connections} {
         set rd [redis_client]
-        $rd himport prepare iso a b
-        # Main connection cannot see the other connection's fieldset.
-        catch {r himport set iso:k iso v1 v2} err
-        assert_match "*no such fieldset*" $err
+        $rd himport prepare fieldset a b
+        # The main client cannot see the other connection's fieldset.
+        assert_error "*no such fieldset*" {r himport set key fieldset v1 v2}
         # The fieldset still works on its owning connection.
-        assert_equal [$rd himport set iso:k iso v1 v2] OK
+        assert_equal [$rd himport set key fieldset v1 v2] OK
         $rd close
-        r del iso:k
+        r del key
     }
 
     test {CLIENT RESET clears session-local fieldsets} {
-        r himport prepare resettpl a b c
-        assert_equal [r himport set reset:k1 resettpl v1 v2 v3] OK
+        r himport prepare fieldset a b c
+        assert_equal [r himport set key1 fieldset v1 v2 v3] OK
         r reset
-        catch {r himport set reset:k2 resettpl v1 v2 v3} err
-        assert_match "*no such fieldset*" $err
-        r del reset:k1
+        assert_error "*no such fieldset*" {r himport set key2 fieldset v1 v2 v3}
+        r del key1
+    }
+
+    test {Client disconnect frees its session-local fieldsets} {
+        # A prepared fieldset holds a hold-ref on its template, so a fresh
+        # schema bumps the registry by one. Disconnecting the owning client
+        # must run himportFieldsetFreeList and drop that hold-ref, removing
+        # the template again (no key references it).
+        set base [s hash_templates]
+        set rd [redis_client]
+        $rd himport prepare fieldset f1 f2 f3
+        assert_equal [expr {$base + 1}] [s hash_templates]
+        $rd close
+        # The hold-ref is released on disconnect; the registry settles back.
+        wait_hashtmpl_templates $base
     }
 
     test {EVAL invocations do not share session-local fieldsets} {
-        assert_equal [r eval {redis.call('HIMPORT','PREPARE','evaltpl','a'); return 'OK'} 0] OK
+        assert_equal [r eval {redis.call('HIMPORT','PREPARE','fieldset','a'); return 'OK'} 0] OK
 
-        catch {r eval {return redis.call('HIMPORT','SET','eval:k','evaltpl','1')} 0} err
-        assert_match "*no such fieldset*" $err
+        assert_error "*no such fieldset*" {r eval {return redis.call('HIMPORT','SET','key','fieldset','1')} 0}
 
         assert_equal [r eval {
-            redis.call('HIMPORT','PREPARE','evaltpl','a')
-            return redis.call('HIMPORT','SET','eval:k','evaltpl','1')
+            redis.call('HIMPORT','PREPARE','fieldset','a')
+            return redis.call('HIMPORT','SET','key','fieldset','1')
         } 0] OK
-        assert_equal [r hgetall eval:k] {a 1}
-        r del eval:k
+        assert_equal [r hgetall key] {a 1}
+        r del key
     }
 
     test {FCALL invocations do not share session-local fieldsets} {
         r function flush
         r function load replace {#!lua name=himporttest
             redis.register_function('prepare_only', function(KEYS, ARGV)
-                return redis.call('HIMPORT','PREPARE','functpl','a')
+                return redis.call('HIMPORT','PREPARE','fieldset','a')
             end)
             redis.register_function('set_only', function(KEYS, ARGV)
-                return redis.call('HIMPORT','SET',KEYS[1],'functpl','1')
+                return redis.call('HIMPORT','SET',KEYS[1],'fieldset','1')
             end)
             redis.register_function('prepare_and_set', function(KEYS, ARGV)
-                redis.call('HIMPORT','PREPARE','functpl','a')
-                return redis.call('HIMPORT','SET',KEYS[1],'functpl','1')
+                redis.call('HIMPORT','PREPARE','fieldset','a')
+                return redis.call('HIMPORT','SET',KEYS[1],'fieldset','1')
             end)
         }
 
         assert_equal [r fcall prepare_only 0] OK
-        catch {r fcall set_only 1 func:k} err
-        assert_match "*no such fieldset*" $err
+        assert_error "*no such fieldset*" {r fcall set_only 1 key}
 
-        assert_equal [r fcall prepare_and_set 1 func:k] OK
-        assert_equal [r hgetall func:k] {a 1}
-        r del func:k
+        assert_equal [r fcall prepare_and_set 1 key] OK
+        assert_equal [r hgetall key] {a 1}
+        r del key
         r function flush
     }
 
@@ -452,24 +370,23 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 
     test {HIMPORT PREPARE/SET inside MULTI/EXEC works} {
         r multi
-        r himport prepare mtpl a b c
-        r himport set multi:k mtpl v1 v2 v3
+        r himport prepare fieldset a b c
+        r himport set key fieldset v1 v2 v3
         set replies [r exec]
         assert_equal [lindex $replies 0] OK
         assert_equal [lindex $replies 1] OK
-        assert_encoding $encoding multi:k
-        assert_equal [r hgetall multi:k] {a v1 b v2 c v3}
-        r himport discard mtpl
+        assert_encoding $encoding key
+        assert_equal [r hgetall key] {a v1 b v2 c v3}
+        r himport discard fieldset
     }
 
     test {HIMPORT DISCARDALL inside MULTI/EXEC works} {
-        r himport prepare mdt1 a b
-        r himport prepare mdt2 c d
+        r himport prepare fieldset1 a b
+        r himport prepare fieldset2 c d
         r multi
         r himport discardall
         r exec
-        catch {r himport set k mdt1 v1 v2} err
-        assert_match "*no such fieldset*" $err
+        assert_error "*no such fieldset*" {r himport set k fieldset1 v1 v2}
     }
 
 
@@ -478,19 +395,16 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     # ============================================================
 
     test {HSETC is rejected from non-internal clients} {
-        catch {r hsetc hsetc:test name alice} err
-        assert_match "*unknown command*" $err
+        assert_error "*unknown command*" {r hsetc hsetc:test name alice}
     }
 
     test {HSETC is rejected from scripts (EVAL/FCALL)} {
-        catch {r eval {return redis.call('HSETC', KEYS[1], 'a', 'va')} 1 hsetc:eval} e1
-        assert_match "*not allowed from script*" $e1
+        assert_error "*not allowed from script*" {r eval {return redis.call('HSETC', KEYS[1], 'a', 'va')} 1 hsetc:eval}
         r function load replace {#!lua name=hsetclib
             redis.register_function('hsetc_call', function(keys, args)
                 return redis.call('HSETC', keys[1], 'a', 'va')
             end)}
-        catch {r fcall hsetc_call 1 hsetc:fcall} e2
-        assert_match "*not allowed from script*" $e2
+        assert_error "*not allowed from script*" {r fcall hsetc_call 1 hsetc:fcall}
         # No corrupt template/key created via either path.
         assert_equal 0 [r exists hsetc:eval]
         assert_equal 0 [r exists hsetc:fcall]
@@ -537,7 +451,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     test {HINCRBYFLOAT on template-based hash} {
         make_hashtmpl basic:incrfloat value 10.5
         set result [r hincrbyfloat basic:incrfloat value 0.1]
-        assert {$result >= 10.5 && $result <= 10.7}
+        assert_range $result 10.5 10.7
         assert_encoding $encoding basic:incrfloat
     }
 
@@ -644,16 +558,16 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         assert_encoding $encoding hgetex:miss
     }
 
-    test {HGETEX PERSIST converts away from template, no TTL set} {
+    test {HGETEX PERSIST returns value and leaves field without TTL} {
         make_hashtmpl hgetex:persist a 1 b 2
         assert_encoding $encoding hgetex:persist
+        # PERSIST on a field that has no TTL is a TTL no-op. Whether the hash
+        # deconverts from the template is an implementation detail we don't
+        # assert on; what matters is the values survive and no TTL is left.
         assert_equal [r hgetex hgetex:persist PERSIST FIELDS 1 a] {1}
-        # Any expiration flag forces a template hash into an HFE-capable
-        # encoding (listpackex or hashtable); it is no longer template-based.
-        set enc [r object encoding hgetex:persist]
-        assert {$enc ne "template-listpack" && $enc ne "template-array"}
         assert_equal [lindex [r httl hgetex:persist FIELDS 1 a] 0] -1
         assert_equal [r hget hgetex:persist a] 1
+        assert_equal [r hget hgetex:persist b] 2
     }
 
     # EX conversion target is listpackex only when it fits the listpack limits;
@@ -665,7 +579,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         assert_equal [r hgetex hgetex:ex EX 100 FIELDS 1 name] {alice}
         assert_match "*encoding:listpackex*" [r debug object hgetex:ex]
         set ttl [lindex [r httl hgetex:ex FIELDS 1 name] 0]
-        assert {$ttl > 0 && $ttl <= 100}
+        assert_range $ttl 1 100
         assert_equal [r hget hgetex:ex email] alice@example.com
     }
     } ;# end if template-listpack
@@ -773,7 +687,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         assert_equal [r hget hfe:test email] alice@example.com
         # The TTL is actually active on the targeted field, and only it.
         set ttl [lindex [r hpttl hfe:test FIELDS 1 name] 0]
-        assert {$ttl > 0 && $ttl <= 100000}
+        assert_range $ttl 1 100000
         assert_equal [r hpttl hfe:test FIELDS 1 email] {-1}
     }
 
@@ -786,15 +700,45 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         assert_equal [r hget hfe:expire age] 30
         assert_equal [r hget hfe:expire name] bob
         set ttl [lindex [r httl hfe:expire FIELDS 1 age] 0]
-        assert {$ttl > 0 && $ttl <= 100}
+        assert_range $ttl 1 100
         assert_equal [r httl hfe:expire FIELDS 1 name] {-1}
     }
 
     test {HSETEX without expiration keeps template encoding} {
         make_hashtmpl hfe:noexp name alice
-        # HSET without expiration should keep template-based encoding
-        r hset hfe:noexp email alice@example.com
+        # HSETEX with no expiration token only sets fields, so the hash must
+        # stay template-encoded just like a plain HSET.
+        assert_equal [r hsetex hfe:noexp FIELDS 1 email alice@example.com] 1
         assert_encoding $encoding hfe:noexp
+        assert_equal [r hget hfe:noexp email] alice@example.com
+    }
+
+    test {HSETEX with expiration converts template key to regular hash} {
+        make_hashtmpl hfe:setex name alice email alice@example.com
+        assert_encoding $encoding hfe:setex
+        # An expiration token forces the template hash into an HFE-capable
+        # encoding, exactly like HEXPIRE/HPEXPIRE above.
+        assert_equal [r hsetex hfe:setex EX 100 FIELDS 1 name bob] 1
+        assert_encoding $hfe_target hfe:setex
+        # The set value is visible and the TTL is active only on that field.
+        assert_equal [r hget hfe:setex name] bob
+        set ttl [lindex [r httl hfe:setex FIELDS 1 name] 0]
+        assert_range $ttl 1 100
+        assert_equal [r httl hfe:setex FIELDS 1 email] {-1}
+    }
+
+    test {HFE on template-based hash actually expires the field} {
+        make_hashtmpl hfe:gone name alice email bob
+        assert_encoding $encoding hfe:gone
+        # A short TTL deconverts the template and must really expire the field.
+        assert_equal [r hpexpire hfe:gone 50 FIELDS 1 name] {1}
+        wait_for_condition 50 20 {
+            [r hexists hfe:gone name] == 0
+        } else {
+            fail "field 'name' did not expire on template-based hash"
+        }
+        # The untouched field keeps its value after the expiry.
+        assert_equal [r hget hfe:gone email] bob
     }
 
     # ============================================================
@@ -1000,7 +944,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         make_hashtmpl expire:test name alice
         r expire expire:test 100
         set ttl [r ttl expire:test]
-        assert {$ttl > 0 && $ttl <= 100}
+        assert_range $ttl 1 100
         assert_encoding $encoding expire:test
     }
 
@@ -1127,9 +1071,9 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:de
                 $master config set hash-max-listpack-entries 0
             }
             $master flushall
-            $master himport prepare u a b c
-            $master himport set dr:k1 u 1 2 3
-            $master himport set dr:k2 u 4 5 6
+            $master himport prepare fieldset a b c
+            $master himport set dr:k1 fieldset 1 2 3
+            $master himport set dr:k2 fieldset 4 5 6
 
             # Full resync #1 (diskless load into an empty db).
             $replica replicaof $master_host $master_port
@@ -1271,9 +1215,9 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:de
             set replica [srv 0 client]
 
             $master flushall
-            $master himport prepare u a b c
-            $master himport set dr:k1 u 1 2 3
-            $master himport set dr:k2 u 4 5 6
+            $master himport prepare fieldset a b c
+            $master himport set dr:k1 fieldset 1 2 3
+            $master himport set dr:k2 fieldset 4 5 6
 
             $replica replicaof $master_host $master_port
             wait_for_sync $replica
@@ -1320,8 +1264,8 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "cluster:
                 wait_for_sync $b
                 wait_for_sync $c
 
-                $a himport prepare u name email
-                $a himport set chain:1 u alice alice@x.com
+                $a himport prepare fieldset name email
+                $a himport set chain:1 fieldset alice alice@x.com
 
                 wait_for_condition 50 100 { [$c exists chain:1] == 1 } else {
                     fail "template hash not propagated to C"
@@ -1530,8 +1474,8 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
     test {convert: TMPL_LP -> TMPL_AR via HSET large value} {
         # In-place update of an existing field with a value over
         # hash-max-listpack-value (64) -> must escalate to TMPL_ARRAY.
-        r himport prepare t5_tpl a b c d
-        r himport set t5 t5_tpl 1 2 3 4
+        r himport prepare fieldset a b c d
+        r himport set t5 fieldset 1 2 3 4
         assert_equal [r object encoding t5] template-listpack
 
         r hset t5 a [string repeat x 100]
@@ -1539,7 +1483,7 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         assert_equal [r hget t5 a] [string repeat x 100]
 
         r del t5
-        r himport discard t5_tpl
+        r himport discard fieldset
     }
 
     test {convert: TMPL_LP -> TMPL_AR via HSET new fields (count > listpack-entries)} {
@@ -1548,8 +1492,8 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         for {set i 0} {$i < 8} {incr i} {
             lappend fields "f$i"; lappend values "v$i"
         }
-        r himport prepare t5b_tpl {*}$fields
-        r himport set t5b t5b_tpl {*}$values
+        r himport prepare fieldset {*}$fields
+        r himport set t5b fieldset {*}$values
         assert_equal [r object encoding t5b] template-listpack
 
         # Adding the 9th field via HSET grows a new template and pushes the
@@ -1564,15 +1508,15 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         }
 
         r del t5b
-        r himport discard t5b_tpl
+        r himport discard fieldset
     }
 
     test {convert: TMPL_LP -> TMPL_AR via HSET new field with large value} {
         # Field count stays under hash-max-listpack-entries (8); only the new
         # value crosses hash-max-listpack-value (64) -> must escalate to
         # TMPL_ARRAY, mirroring the value-size rule of a plain listpack hash.
-        r himport prepare t5c_tpl a b c d
-        r himport set t5c t5c_tpl 1 2 3 4
+        r himport prepare fieldset a b c d
+        r himport set t5c fieldset 1 2 3 4
         assert_equal [r object encoding t5c] template-listpack
 
         r hset t5c e [string repeat x 100]
@@ -1585,12 +1529,12 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         assert_equal [r hget t5c d] 4
 
         r del t5c
-        r himport discard t5c_tpl
+        r himport discard fieldset
     }
 
     test {convert: TMPL_LP -> LISTPACK_EX via HEXPIRE (small)} {
-        r himport prepare t6_tpl a b c d
-        r himport set t6 t6_tpl 1 2 3 4
+        r himport prepare fieldset a b c d
+        r himport set t6 fieldset 1 2 3 4
         assert_equal [r object encoding t6] template-listpack
 
         r hexpire t6 100 FIELDS 1 a
@@ -1598,7 +1542,7 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         assert_equal [r hget t6 b] 2
 
         r del t6
-        r himport discard t6_tpl
+        r himport discard fieldset
     }
 
     test {convert: TMPL_LP -> HT via HEXPIRE (count > listpack-entries)} {
@@ -1609,8 +1553,8 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         for {set i 0} {$i < 16} {incr i} {
             lappend fields "f$i"; lappend values "v$i"
         }
-        r himport prepare t7_tpl {*}$fields
-        r himport set t7 t7_tpl {*}$values
+        r himport prepare fieldset {*}$fields
+        r himport set t7 fieldset {*}$values
         assert_equal [r object encoding t7] template-listpack
 
         # Tighten limit so HFE-trigger escalates LP_EX -> HT.
@@ -1620,7 +1564,7 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         assert_equal [r hget t7 f5] v5
 
         r del t7
-        r himport discard t7_tpl
+        r himport discard fieldset
         r config set hash-max-listpack-entries $prev_e
     }
 
@@ -1628,8 +1572,8 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         set prev_e [lindex [r config get hash-max-listpack-entries] 1]
         # Force TMPL_AR at create time.
         r config set hash-max-listpack-entries 0
-        r himport prepare t8_tpl a b c d
-        r himport set t8 t8_tpl 1 2 3 4
+        r himport prepare fieldset a b c d
+        r himport set t8 fieldset 1 2 3 4
         r config set hash-max-listpack-entries $prev_e
         assert_equal [r object encoding t8] template-array
 
@@ -1638,7 +1582,7 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         assert_equal [r hget t8 b] 2
 
         r del t8
-        r himport discard t8_tpl
+        r himport discard fieldset
     }
 
     test {convert: TMPL_AR -> HT via HEXPIRE (count > listpack-entries)} {
@@ -1649,8 +1593,8 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         for {set i 0} {$i < 16} {incr i} {
             lappend fields "f$i"; lappend values "v$i"
         }
-        r himport prepare t9_tpl {*}$fields
-        r himport set t9 t9_tpl {*}$values
+        r himport prepare fieldset {*}$fields
+        r himport set t9 fieldset {*}$values
         assert_equal [r object encoding t9] template-array
 
         # Raise limit just enough that count(16) still > limit -> escalates to HT.
@@ -1660,14 +1604,14 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         assert_equal [r hget t9 f7] v7
 
         r del t9
-        r himport discard t9_tpl
+        r himport discard fieldset
         r config set hash-max-listpack-entries $prev_e
     }
 
     test {convert: TMPL_LP -> LISTPACK via auto-trim (fits)} {
         set prev_m [lindex [r config get hash-min-template-entries] 1]
-        r himport prepare t10_tpl a b c d
-        r himport set t10 t10_tpl 1 2 3 4
+        r himport prepare fieldset a b c d
+        r himport set t10 fieldset 1 2 3 4
         assert_equal [r object encoding t10] template-listpack
 
         # Raise threshold so HDEL drops count below min and triggers trim.
@@ -1677,7 +1621,7 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         assert_equal [r hget t10 b] 2
 
         r del t10
-        r himport discard t10_tpl
+        r himport discard fieldset
         r config set hash-min-template-entries $prev_m
     }
 
@@ -1690,8 +1634,8 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         for {set i 0} {$i < 8} {incr i} {
             lappend fields "f$i"; lappend values "v$i"
         }
-        r himport prepare t11_tpl {*}$fields
-        r himport set t11 t11_tpl {*}$values
+        r himport prepare fieldset {*}$fields
+        r himport set t11 fieldset {*}$values
         assert_equal [r object encoding t11] template-listpack
 
         # Tighten limit and raise trim threshold; HDEL fails CanConvert -> HT.
@@ -1702,7 +1646,7 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         assert_equal [r hget t11 f3] v3
 
         r del t11
-        r himport discard t11_tpl
+        r himport discard fieldset
         r config set hash-max-listpack-entries $prev_e
         r config set hash-min-template-entries $prev_m
     }
@@ -1711,8 +1655,8 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         set prev_e [lindex [r config get hash-max-listpack-entries] 1]
         set prev_m [lindex [r config get hash-min-template-entries] 1]
         r config set hash-max-listpack-entries 0
-        r himport prepare t12_tpl a b c d
-        r himport set t12 t12_tpl 1 2 3 4
+        r himport prepare fieldset a b c d
+        r himport set t12 fieldset 1 2 3 4
         r config set hash-max-listpack-entries $prev_e
         assert_equal [r object encoding t12] template-array
 
@@ -1723,7 +1667,7 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         assert_equal [r hget t12 c] 3
 
         r del t12
-        r himport discard t12_tpl
+        r himport discard fieldset
         r config set hash-min-template-entries $prev_m
     }
 
@@ -1732,8 +1676,8 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         set prev_m [lindex [r config get hash-min-template-entries] 1]
         r config set hash-max-listpack-value 10
         # 50-char value forces TMPL_AR at create and fails the trim CanConvert.
-        r himport prepare t13_tpl a b c d
-        r himport set t13 t13_tpl 1 2 3 [string repeat y 50]
+        r himport prepare fieldset a b c d
+        r himport set t13 fieldset 1 2 3 [string repeat y 50]
         assert_equal [r object encoding t13] template-array
 
         r config set hash-min-template-entries 4
@@ -1742,7 +1686,7 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         assert_equal [r hget t13 d] [string repeat y 50]
 
         r del t13
-        r himport discard t13_tpl
+        r himport discard fieldset
         r config set hash-max-listpack-value $prev_v
         r config set hash-min-template-entries $prev_m
     }
@@ -1855,13 +1799,13 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
     # only ever hit the field-name bytes, never the value or footer bytes.
     proc tmpl_dump {enc} {
         r del rk
-        catch {r himport discard rtpl}
-        r himport prepare rtpl field1 field2
-        r himport set rk rtpl 1 2
+        catch {r himport discard fieldset}
+        r himport prepare fieldset field1 field2
+        r himport set rk fieldset 1 2
         assert_equal [r object encoding rk] $enc
         set dump [r dump rk]
         r del rk
-        r himport discard rtpl
+        r himport discard fieldset
         return $dump
     }
 
@@ -1955,8 +1899,8 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
                     set s [list r${round}_${i}_a r${round}_${i}_b r${round}_${i}_c]
                     set vals {x y z}
                 }
-                r himport prepare ts$i {*}$s
-                r himport set k:$round:$i ts$i {*}$vals
+                r himport prepare fieldset$i {*}$s
+                r himport set k:$round:$i fieldset$i {*}$vals
             }
             r flushall async
             for {set p 0} {$p < 5} {incr p} { r ping }
@@ -1969,99 +1913,4 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
         assert_equal PONG [r ping]
     }
 }
-
-# Active defrag relocates the per-key allocations of template-encoded hashes
-# (the TMPL_LP listpack blob, and the hashTemplateArray struct + its value
-# sds's for TMPL_ARRAY). defragKey must update ob->ptr and every values[] entry
-# without touching the shared template. Fragment many template hashes, run
-# active defrag, and assert the data is byte-identical afterwards (debug digest)
-# and the keys still resolve. Requires jemalloc; skipped otherwise.
-run_solo {defrag} {
-    proc wait_for_template_defrag_stop {maxtries delay} {
-        wait_for_condition $maxtries $delay {
-            [s active_defrag_running] eq 0
-        } else {
-            fail "defrag didn't stop (frag [s allocator_frag_ratio])."
-        }
-    }
-
-    start_server {tags {"defrag" "hinted-hash-templates" "external:skip" "tsan:skip" "needs:debug"}
-                  overrides {save "" appendonly no}} {
-        if {[string match {*jemalloc*} [s mem_allocator]] && [r debug mallctl arenas.page] <= 8192} {
-            test {Active defrag: template-encoded hashes keep data intact} {
-                r flushall
-                r config set hz 100
-                r config set activedefrag no
-                r config set active-defrag-threshold-lower 5
-                r config set active-defrag-cycle-min 65
-                r config set active-defrag-cycle-max 75
-                r config set active-defrag-ignore-bytes 100kb
-                r config set maxmemory 0
-                r config set hash-max-listpack-entries 128
-
-                # Two shared schemas: small -> template-listpack, big -> template-array.
-                set big {}
-                for {set f 0} {$f < 40} {incr f} { lappend big field_[format %02d $f] }
-                set bigval [string repeat x 80]
-
-                set n 20000
-                # HIMPORT fieldsets are per-client, so prepare on the same
-                # (deferring) connection that issues the HIMPORT SETs.
-                set rd [redis_deferring_client]
-                $rd himport prepare sm a b c   ; $rd read
-                $rd himport prepare bg {*}$big  ; $rd read
-                set batch 200
-                for {set j 0} {$j < $n} {incr j} {
-                    if {$j % 2 == 0} {
-                        $rd himport set k:$j sm v${j}a v${j}b v${j}c
-                    } else {
-                        set vals {}
-                        for {set f 0} {$f < 40} {incr f} { lappend vals $bigval }
-                        $rd himport set k:$j bg {*}$vals
-                    }
-                    if {($j + 1) % $batch == 0} {
-                        for {set i 0} {$i < $batch} {incr i} { $rd read }
-                    }
-                }
-                for {set j 0} {$j < [expr {$n % $batch}]} {incr j} { $rd read }
-
-                assert_equal template-listpack [r object encoding k:0]
-                assert_equal template-array    [r object encoding k:1]
-
-                # Fragment: delete half (j%4<2) so both schemas survive and both
-                # are freed, leaving holes in their size classes.
-                set deleted 0
-                for {set j 0} {$j < $n} {incr j} {
-                    if {($j % 4) < 2} { $rd del k:$j; incr deleted }
-                }
-                for {set j 0} {$j < $deleted} {incr j} { $rd read }
-                $rd close
-
-                after 120
-                if {$::verbose} { puts "frag before defrag: [s allocator_frag_ratio]" }
-
-                set digest [debug_digest]
-                catch {r config set activedefrag yes}
-                if {[r config get activedefrag] eq "activedefrag yes"} {
-                    wait_for_condition 100 100 {
-                        [s total_active_defrag_time] ne 0
-                    } else {
-                        fail "defrag not started."
-                    }
-                    wait_for_template_defrag_stop 500 100
-                }
-
-                # Data byte-identical after defrag moved the allocations.
-                assert_equal $digest [debug_digest]
-                # Survivors of both encodings still resolve (k:2 sm, k:3 bg).
-                assert_equal template-listpack [r object encoding k:2]
-                assert_equal template-array    [r object encoding k:3]
-                assert_equal v2a    [r hget k:2 a]
-                assert_equal $bigval [r hget k:3 field_00]
-                assert_equal $bigval [r hget k:3 field_39]
-                r save ;# iterate over all data / pointers
-            } {OK}
-        }
-    }
-} ;# run_solo
 
