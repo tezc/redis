@@ -13,16 +13,6 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         assert {$enc eq "template-listpack" || $enc eq "template-array"}
     }
 
-    proc assert_listpack_encoding {key} {
-        set encoding [r debug object $key]
-        assert {[string match "*encoding:listpack*" $encoding]}
-    }
-
-    proc assert_listpackex_encoding {key} {
-        set encoding [r debug object $key]
-        assert {[string match "*encoding:listpackex*" $encoding]}
-    }
-
     # Build a template-based hash via the user-facing HIMPORT API.
     # HSETC is internal (CMD_INTERNAL) and only accepted from master/AOF.
     proc make_hashtmpl {key args} {
@@ -660,7 +650,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         make_hashtmpl hgetex:ex name alice email alice@example.com
         assert_hashtmpl_encoding hgetex:ex
         assert_equal [r hgetex hgetex:ex EX 100 FIELDS 1 name] {alice}
-        assert_listpackex_encoding hgetex:ex
+        assert_match "*encoding:listpackex*" [r debug object hgetex:ex]
         set ttl [lindex [r httl hgetex:ex FIELDS 1 name] 0]
         assert {$ttl > 0 && $ttl <= 100}
         assert_equal [r hget hgetex:ex email] alice@example.com
@@ -763,7 +753,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         make_hashtmpl hfe:test name alice email alice@example.com
         assert_hashtmpl_encoding hfe:test
         r hpexpire hfe:test 100000 FIELDS 1 name
-        assert_listpackex_encoding hfe:test
+        assert_match "*encoding:listpackex*" [r debug object hfe:test]
         assert_equal [r hget hfe:test name] alice
         assert_equal [r hget hfe:test email] alice@example.com
     }
@@ -772,7 +762,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         make_hashtmpl hfe:expire name bob age 30
         assert_hashtmpl_encoding hfe:expire
         r hexpire hfe:expire 100 FIELDS 1 age
-        assert_listpackex_encoding hfe:expire
+        assert_match "*encoding:listpackex*" [r debug object hfe:expire]
     }
     } ;# end if template-listpack
 
@@ -989,23 +979,6 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 start_server {tags {"hash" "hinted-hash-templates" "rdb" "needs:debug"}
               overrides {hash-min-template-entries 0}} {
 
-    proc assert_hashtmpl_encoding {key} {
-        set enc [r object encoding $key]
-        assert {$enc eq "template-listpack" || $enc eq "template-array"}
-    }
-
-    proc make_hashtmpl {key args} {
-        set fields {}
-        set values {}
-        foreach {f v} $args {
-            lappend fields $f
-            lappend values $v
-        }
-        set tplname "tpl_[join $fields _]"
-        r himport prepare $tplname {*}$fields
-        r himport set $key $tplname {*}$values
-    }
-
     test {RDB save and load preserves template-based hash} {
         make_hashtmpl rdb:test name alice email alice@example.com age 25
         assert_hashtmpl_encoding rdb:test
@@ -1135,18 +1108,6 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
               overrides {save {} appendonly yes auto-aof-rewrite-percentage 0
                          hash-min-template-entries 0}} {
 
-    proc make_hashtmpl_aof {key args} {
-        set fields {}
-        set values {}
-        foreach {f v} $args {
-            lappend fields $f
-            lappend values $v
-        }
-        set tplname "tpl_[join $fields _]"
-        r himport prepare $tplname {*}$fields
-        r himport set $key $tplname {*}$values
-    }
-
     foreach rdbpre {yes no} {
         test "AOF rewrite preserves template encoding (rdb-preamble=$rdbpre)" {
             r config set aof-use-rdb-preamble $rdbpre
@@ -1156,9 +1117,9 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
             wait_hashtmpl_keys 0
             waitForBgrewriteaof r
 
-            make_hashtmpl_aof aof:k1 a 1 b 2 c 3
-            make_hashtmpl_aof aof:k2 a 4 b 5 c 6
-            make_hashtmpl_aof aof:k3 x 7 y 8
+            make_hashtmpl aof:k1 a 1 b 2 c 3
+            make_hashtmpl aof:k2 a 4 b 5 c 6
+            make_hashtmpl aof:k3 x 7 y 8
 
             set enc1 [r object encoding aof:k1]
             assert {$enc1 eq "template-listpack" || $enc1 eq "template-array"}
@@ -1191,8 +1152,8 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
         r flushall
         waitForBgrewriteaof r
 
-        make_hashtmpl_aof mix:tmpl1 a 1 b 2 c 3
-        make_hashtmpl_aof mix:tmpl2 a 4 b 5 c 6
+        make_hashtmpl mix:tmpl1 a 1 b 2 c 3
+        make_hashtmpl mix:tmpl2 a 4 b 5 c 6
         r hset mix:plain1 x 100 y 200
         r hset mix:plain2 m 1 n 2 o 3
 
@@ -1220,8 +1181,8 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
         wait_hashtmpl_keys 0
         waitForBgrewriteaof r
 
-        make_hashtmpl_aof aofreload:k1 a 1 b 2 c 3
-        make_hashtmpl_aof aofreload:k2 a 4 b 5 c 6
+        make_hashtmpl aofreload:k1 a 1 b 2 c 3
+        make_hashtmpl aofreload:k2 a 4 b 5 c 6
         set tmpls_before [s hash_templates]
         set keys_before [s hash_template_keys]
 
@@ -1389,22 +1350,12 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
 start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
               overrides {hash-min-template-entries 1}} {
 
-    proc tmpl_stats {} {
-        set info [r info stats]
-        set t 0; set k 0
-        foreach line [split $info "\n"] {
-            if {[regexp {^hash_templates:(\d+)} $line -> v]} { set t $v }
-            if {[regexp {^hash_template_keys:(\d+)} $line -> v]} { set k $v }
-        }
-        return [list $t $k]
-    }
-
     # Template free is deferred to serverCron (every ~1s). After flushall,
     # poll until the registry is fully drained so external-server runs see
     # a clean baseline.
     proc wait_tmpl_drain {} {
         wait_for_condition 30 100 {
-            [lindex [tmpl_stats] 0] == 0
+            [lindex [get_template_stats] 0] == 0
         } else {
             fail "hash template registry did not drain"
         }
@@ -1413,9 +1364,9 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
     test {threshold=1: HSET auto-converts to template encoding} {
         r flushall
         wait_tmpl_drain
-        lassign [tmpl_stats] t0 k0
+        lassign [get_template_stats] t0 k0
         r hset auto:1 a 1 b 2 c 3
-        lassign [tmpl_stats] t1 k1
+        lassign [get_template_stats] t1 k1
         assert {$t1 > $t0}
         assert_equal [expr {$k1 - $k0}] 1
         assert_equal [r object encoding auto:1] "template-listpack"
@@ -1427,10 +1378,10 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
         r flushall
         wait_tmpl_drain
         r hset shared:1 a 1 b 2 c 3
-        lassign [tmpl_stats] t1 _
+        lassign [get_template_stats] t1 _
         r hset shared:2 a 9 b 8 c 7
         r hset shared:3 a 0 b 0 c 0
-        lassign [tmpl_stats] t3 k3
+        lassign [get_template_stats] t3 k3
         assert_equal $t1 $t3
         assert_equal $k3 3
         assert_equal [r hget shared:2 b] 8
@@ -1469,9 +1420,9 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
         wait_tmpl_drain
         r hset rdb:k1 a 1 b 2 c 3
         r hset rdb:k2 a 9 b 8 c 7
-        lassign [tmpl_stats] t_before k_before
+        lassign [get_template_stats] t_before k_before
         r debug reload
-        lassign [tmpl_stats] t_after k_after
+        lassign [get_template_stats] t_after k_after
         assert_equal $t_before $t_after
         assert_equal $k_before $k_after
         assert_equal [r hgetall rdb:k1] {a 1 b 2 c 3}
@@ -1483,9 +1434,9 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
         r flushall
         wait_tmpl_drain
         r hset del:1 a 1 b 2 c 3
-        lassign [tmpl_stats] _ k1
+        lassign [get_template_stats] _ k1
         r del del:1
-        lassign [tmpl_stats] _ k2
+        lassign [get_template_stats] _ k2
         assert_equal [expr {$k1 - $k2}] 1
     }
 
@@ -1496,11 +1447,11 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
         waitForBgrewriteaof r
         r hset aof:1 a 1 b 2 c 3
         r hset aof:2 a 9 b 8 c 7
-        lassign [tmpl_stats] t_before k_before
+        lassign [get_template_stats] t_before k_before
         r bgrewriteaof
         waitForBgrewriteaof r
         r debug loadaof
-        lassign [tmpl_stats] t_after k_after
+        lassign [get_template_stats] t_after k_after
         assert_equal $t_before $t_after
         assert_equal $k_before $k_after
         assert_equal [r hgetall aof:1] {a 1 b 2 c 3}

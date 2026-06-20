@@ -2253,8 +2253,7 @@ static int slotSnapshotSaveKeyValuePair(rio *rdb, kvobj *o, int dbid) {
      * block in the destination if the object is too large, so fall back
      * to AOF format if necessary. Templated hashes always use RESTORE
      * regardless of size: the DUMP payload is self-contained (full
-     * RDB_TYPE_HASH_TMPL_LP/ARRAY with fields inlined), so the destination
-     * does not need a HIMPORT PREPARE to reconstruct the template. */
+     * RDB_TYPE_HASH_TMPL_LP/ARRAY with fields inlined). */
     int isTmplHash = (o->type == OBJ_HASH &&
                       (o->encoding == OBJ_ENCODING_TMPL_LP ||
                        o->encoding == OBJ_ENCODING_TMPL_ARRAY));
