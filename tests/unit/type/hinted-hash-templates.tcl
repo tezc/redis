@@ -6,13 +6,6 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         r config set hash-max-listpack-entries 0
     }
 
-    # Helper to check encoding. With hash-min-template-entries=0,
-    # OBJECT ENCODING reports the real template encoding name.
-    proc assert_hashtmpl_encoding {key} {
-        set enc [r object encoding $key]
-        assert {$enc eq "template-listpack" || $enc eq "template-array"}
-    }
-
     # Build a template-based hash via the user-facing HIMPORT API.
     # HSETC is internal (CMD_INTERNAL) and only accepted from master/AOF.
     proc make_hashtmpl {key args} {
@@ -71,165 +64,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     }
 
     # ============================================================
-    # HIMPORT PREPARE / SET / DISCARD / DISCARDALL
-    # ============================================================
-
-    test {HIMPORT PREPARE creates a template} {
-        r himport prepare user name email age
-    } {OK}
-
-    test {HIMPORT SET creates template-based hash} {
-        # Template fields: name email age (user order)
-        # Schema fields: sorted by length-first: age, name, email
-        # Values: alice alice@example.com 25 → sorted as: 25 alice alice@example.com
-        r himport set user:1 user alice alice@example.com 25
-        assert_hashtmpl_encoding user:1
-        assert_equal [r hgetall user:1] {age 25 name alice email alice@example.com}
-    }
-
-    test {HIMPORT SET with wrong field count fails} {
-        catch {r himport set user:2 user bob bob@example.com} err
-        assert_match "*value count does not match*" $err
-    }
-
-    test {HIMPORT SET with unknown fieldset fails} {
-        catch {r himport set user:3 unknown alice alice@example.com 25} err
-        assert_match "*no such fieldset*" $err
-    }
-
-    test {HIMPORT SET replaces existing string key} {
-        r set mykey "string value"
-        r himport set mykey user charlie charlie@example.com 30
-        assert_hashtmpl_encoding mykey
-        assert_equal [r type mykey] {hash}
-        assert_equal [r hget mykey name] {charlie}
-    }
-
-    test {HIMPORT SET replaces existing regular hash} {
-        r hset override:hash1 oldfield oldvalue
-        r himport set override:hash1 user dave dave@example.com 40
-        assert_hashtmpl_encoding override:hash1
-        assert_equal [r hget override:hash1 name] {dave}
-        assert_equal [r hget override:hash1 oldfield] {}
-    }
-
-    test {HIMPORT SET replaces existing template-based hash} {
-        r himport set override:hash2 user eve eve@example.com 25
-        assert_hashtmpl_encoding override:hash2
-        # Replace with different template
-        r himport prepare other_tpl city country
-        r himport set override:hash2 other_tpl Paris France
-        assert_hashtmpl_encoding override:hash2
-        assert_equal [r hget override:hash2 city] {Paris}
-        assert_equal [r hget override:hash2 name] {}
-    }
-
-    test {HIMPORT DISCARD removes fieldset} {
-        r himport prepare temptest f1 f2
-        r himport discard temptest
-        catch {r himport set key1 temptest v1 v2} err
-        assert_match "*no such fieldset*" $err
-    }
-
-    test {HIMPORT DISCARDALL removes all fieldsets} {
-        r himport prepare t1 f1 f2
-        r himport prepare t2 f1 f2 f3
-        r himport discardall
-        catch {r himport set key1 t1 v1 v2} err
-        assert_match "*no such fieldset*" $err
-    }
-
-    test {HIMPORT PREPARE state is accounted in client memory} {
-        # tot-mem from CLIENT INFO for the current connection.
-        proc cur_tot_mem {} {
-            regexp {tot-mem=(\d+)} [r client info] -> m
-            return $m
-        }
-
-        r himport discardall
-        set before [cur_tot_mem]
-
-        # Prepare many large fieldsets; each pins a template and owns a
-        # value_order map plus the fieldset name.
-        for {set i 0} {$i < 100} {incr i} {
-            set fields {}
-            for {set f 0} {$f < 64} {incr f} {
-                lappend fields "field_${i}_${f}"
-            }
-            r himport prepare fs$i {*}$fields
-        }
-        set after [cur_tot_mem]
-
-        # Client-owned fieldset state must be visible in tot-mem.
-        assert {$after > $before}
-
-        # Releasing the fieldsets returns the accounted memory.
-        r himport discardall
-        set discarded [cur_tot_mem]
-        assert {$discarded < $after}
-    }
-
-    test {HIMPORT PREPARE state can trigger maxmemory-clients eviction} {
-        # Returns the CLIENT LIST entry for $name, or "" if not connected.
-        proc himport_client_line {name} {
-            set clients [split [string trim [r client list]] "\r\n"]
-            return [lsearch -inline $clients *name=$name*]
-        }
-
-        set saved_limit [lindex [r config get maxmemory-clients] 1]
-        r config set maxmemory-clients 2mb
-        r client no-evict on ;# protect the main test connection
-
-        # A separate connection that accumulates HIMPORT fieldset state. A
-        # single PREPARE's query buffer (~tens of KB) stays far below the 2mb
-        # limit, so eviction can only fire once the accounted fieldset memory
-        # (value_order maps) adds up past it.
-        set rr [redis_client]
-        $rr client setname himport_abuser
-        assert {[himport_client_line himport_abuser] ne ""}
-
-        set evicted 0
-        for {set i 0} {$i < 4000} {incr i} {
-            set fields {}
-            for {set f 0} {$f < 2000} {incr f} {
-                lappend fields "field_${i}_${f}"
-            }
-            if {[catch {$rr himport prepare fs$i {*}$fields}]} {
-                set evicted 1 ;# server closed the connection on eviction
-                break
-            }
-            if {[himport_client_line himport_abuser] eq ""} {
-                set evicted 1 ;# evicted asynchronously in beforeSleep
-                break
-            }
-        }
-        assert {$evicted}
-
-        catch {$rr close}
-        r config set maxmemory-clients $saved_limit
-    }
-
-    test {HIMPORT PREPARE replaces existing fieldset with same name} {
-        # Create template with 2 fields
-        r himport prepare reuse a b
-        r himport set reuse:1 reuse val_a val_b
-        assert_equal [r hgetall reuse:1] {a val_a b val_b}
-
-        # Replace with template with 3 fields (same name)
-        r himport prepare reuse x y z
-        r himport set reuse:2 reuse val_x val_y val_z
-        assert_equal [r hgetall reuse:2] {x val_x y val_y z val_z}
-
-        # Old template definition should be gone - using with 2 values fails
-        catch {r himport set reuse:3 reuse v1 v2} err
-        assert_match "*value count does not match*" $err
-
-        # Cleanup
-        r himport discard reuse
-    }
-
-    # ============================================================
-    # Argument validation
+    # HIMPORT argument validation
     # ============================================================
 
     test {HIMPORT with no subcommand returns arity error} {
@@ -351,10 +186,10 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     test {HIMPORT DISCARD does not invalidate existing keys} {
         r himport prepare ref a b c
         r himport set ref:k1 ref v1 v2 v3
-        assert_hashtmpl_encoding ref:k1
+        assert_encoding $encoding ref:k1
         # Discard the fieldset; existing key must remain valid.
         r himport discard ref
-        assert_hashtmpl_encoding ref:k1
+        assert_encoding $encoding ref:k1
         assert_equal [r hgetall ref:k1] {a v1 b v2 c v3}
         # SET with the discarded name now fails.
         catch {r himport set ref:k2 ref v1 v2 v3} err
@@ -384,6 +219,171 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
             catch {r himport set k $name v1 v2} err
             assert_match "*no such fieldset*" $err
         }
+    }
+
+    # ============================================================
+    # HIMPORT SET / DISCARD behavior
+    # ============================================================
+
+    test {HIMPORT SET creates template-based hash} {
+        r del myhash
+        # Fieldset fields: name email age (user order)
+        # Schema fields: sorted length-first: age, name, email
+        # Values alice alice@example.com 25 -> sorted: 25 alice alice@example.com
+        r himport prepare user name email age
+        r himport set myhash user alice alice@example.com 25
+        assert_encoding $encoding myhash
+        assert_equal [r hgetall myhash] {age 25 name alice email alice@example.com}
+    }
+
+    test {HIMPORT SET with wrong field count fails} {
+        r del myhash
+        r himport prepare user name email age
+        catch {r himport set myhash user bob bob@example.com} err
+        assert_match "*value count does not match*" $err
+    }
+
+    test {HIMPORT SET with unknown fieldset fails} {
+        r del myhash
+        catch {r himport set myhash nosuchfs alice alice@example.com 25} err
+        assert_match "*no such fieldset*" $err
+    }
+
+    test {HIMPORT SET replaces existing string key} {
+        r del myhash
+        r himport prepare user name email age
+        r set myhash "string value"
+        r himport set myhash user charlie charlie@example.com 30
+        assert_encoding $encoding myhash
+        assert_equal [r type myhash] {hash}
+        assert_equal [r hget myhash name] {charlie}
+    }
+
+    test {HIMPORT SET replaces existing regular hash} {
+        r del myhash
+        r himport prepare user name email age
+        r hset myhash oldfield oldvalue
+        r himport set myhash user dave dave@example.com 40
+        assert_encoding $encoding myhash
+        assert_equal [r hget myhash name] {dave}
+        assert_equal [r hget myhash oldfield] {}
+    }
+
+    test {HIMPORT SET replaces existing template-based hash} {
+        r del myhash
+        r himport prepare user name email age
+        r himport set myhash user eve eve@example.com 25
+        assert_encoding $encoding myhash
+        # Replace the same key using a different fieldset.
+        r himport prepare user2 city country
+        r himport set myhash user2 Paris France
+        assert_encoding $encoding myhash
+        assert_equal [r hget myhash city] {Paris}
+        assert_equal [r hget myhash name] {}
+    }
+
+    test {HIMPORT DISCARD removes fieldset} {
+        r himport prepare temptest f1 f2
+        r himport discard temptest
+        catch {r himport set key1 temptest v1 v2} err
+        assert_match "*no such fieldset*" $err
+    }
+
+    test {HIMPORT DISCARDALL removes all fieldsets} {
+        r himport prepare t1 f1 f2
+        r himport prepare t2 f1 f2 f3
+        r himport discardall
+        catch {r himport set key1 t1 v1 v2} err
+        assert_match "*no such fieldset*" $err
+    }
+
+    test {HIMPORT PREPARE state is accounted in client memory} {
+        # tot-mem from CLIENT INFO for the current connection.
+        proc cur_tot_mem {} {
+            regexp {tot-mem=(\d+)} [r client info] -> m
+            return $m
+        }
+
+        r himport discardall
+        set before [cur_tot_mem]
+
+        # Prepare many large fieldsets; each pins a template and owns a
+        # value_order map plus the fieldset name.
+        for {set i 0} {$i < 100} {incr i} {
+            set fields {}
+            for {set f 0} {$f < 64} {incr f} {
+                lappend fields "field_${i}_${f}"
+            }
+            r himport prepare fs$i {*}$fields
+        }
+        set after [cur_tot_mem]
+
+        # Client-owned fieldset state must be visible in tot-mem.
+        assert {$after > $before}
+
+        # Releasing the fieldsets returns the accounted memory.
+        r himport discardall
+        set discarded [cur_tot_mem]
+        assert {$discarded < $after}
+    }
+
+    test {HIMPORT PREPARE state can trigger maxmemory-clients eviction} {
+        # Returns the CLIENT LIST entry for $name, or "" if not connected.
+        proc himport_client_line {name} {
+            set clients [split [string trim [r client list]] "\r\n"]
+            return [lsearch -inline $clients *name=$name*]
+        }
+
+        set saved_limit [lindex [r config get maxmemory-clients] 1]
+        r config set maxmemory-clients 2mb
+        r client no-evict on ;# protect the main test connection
+
+        # A separate connection that accumulates HIMPORT fieldset state. A
+        # single PREPARE's query buffer (~tens of KB) stays far below the 2mb
+        # limit, so eviction can only fire once the accounted fieldset memory
+        # (value_order maps) adds up past it.
+        set rr [redis_client]
+        $rr client setname himport_abuser
+        assert {[himport_client_line himport_abuser] ne ""}
+
+        set evicted 0
+        for {set i 0} {$i < 4000} {incr i} {
+            set fields {}
+            for {set f 0} {$f < 2000} {incr f} {
+                lappend fields "field_${i}_${f}"
+            }
+            if {[catch {$rr himport prepare fs$i {*}$fields}]} {
+                set evicted 1 ;# server closed the connection on eviction
+                break
+            }
+            if {[himport_client_line himport_abuser] eq ""} {
+                set evicted 1 ;# evicted asynchronously in beforeSleep
+                break
+            }
+        }
+        assert {$evicted}
+
+        catch {$rr close}
+        r config set maxmemory-clients $saved_limit
+    }
+
+    test {HIMPORT PREPARE replaces existing fieldset with same name} {
+        # Create template with 2 fields
+        r himport prepare reuse a b
+        r himport set reuse:1 reuse val_a val_b
+        assert_equal [r hgetall reuse:1] {a val_a b val_b}
+
+        # Replace with template with 3 fields (same name)
+        r himport prepare reuse x y z
+        r himport set reuse:2 reuse val_x val_y val_z
+        assert_equal [r hgetall reuse:2] {x val_x y val_y z val_z}
+
+        # Old template definition should be gone - using with 2 values fails
+        catch {r himport set reuse:3 reuse v1 v2} err
+        assert_match "*value count does not match*" $err
+
+        # Cleanup
+        r himport discard reuse
     }
 
     # --- Session isolation ---
@@ -457,7 +457,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         set replies [r exec]
         assert_equal [lindex $replies 0] OK
         assert_equal [lindex $replies 1] OK
-        assert_hashtmpl_encoding multi:k
+        assert_encoding $encoding multi:k
         assert_equal [r hgetall multi:k] {a v1 b v2 c v3}
         r himport discard mtpl
     }
@@ -531,14 +531,14 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         make_hashtmpl basic:incr counter 10
         assert_equal [r hincrby basic:incr counter 5] 15
         assert_equal [r hget basic:incr counter] 15
-        assert_hashtmpl_encoding basic:incr
+        assert_encoding $encoding basic:incr
     }
 
     test {HINCRBYFLOAT on template-based hash} {
         make_hashtmpl basic:incrfloat value 10.5
         set result [r hincrbyfloat basic:incrfloat value 0.1]
         assert {$result >= 10.5 && $result <= 10.7}
-        assert_hashtmpl_encoding basic:incrfloat
+        assert_encoding $encoding basic:incrfloat
     }
 
     test {HMGET on template-based hash} {
@@ -570,9 +570,9 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 
     test {HDEL on template-based hash keeps template encoding} {
         make_hashtmpl hdel:test a 1 b 2 c 3 d 4
-        assert_hashtmpl_encoding hdel:test
+        assert_encoding $encoding hdel:test
         assert_equal [r hdel hdel:test b] 1
-        assert_hashtmpl_encoding hdel:test
+        assert_encoding $encoding hdel:test
         assert_equal [r hlen hdel:test] 3
         assert_equal [r hexists hdel:test b] 0
         assert_equal [r hget hdel:test a] 1
@@ -581,7 +581,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     test {HDEL multiple fields on template-based hash} {
         make_hashtmpl hdel:multi a 1 b 2 c 3 d 4 e 5
         assert_equal [r hdel hdel:multi b d] 2
-        assert_hashtmpl_encoding hdel:multi
+        assert_encoding $encoding hdel:multi
         assert_equal [r hlen hdel:multi] 3
     }
 
@@ -597,9 +597,9 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 
     test {HGETDEL returns value and keeps template encoding} {
         make_hashtmpl hgetdel:test a 1 b 2 c 3 d 4
-        assert_hashtmpl_encoding hgetdel:test
+        assert_encoding $encoding hgetdel:test
         assert_equal [r hgetdel hgetdel:test FIELDS 1 b] {2}
-        assert_hashtmpl_encoding hgetdel:test
+        assert_encoding $encoding hgetdel:test
         assert_equal [r hlen hgetdel:test] 3
         assert_equal [r hexists hgetdel:test b] 0
         assert_equal [r hget hgetdel:test a] 1
@@ -608,7 +608,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     test {HGETDEL multiple fields on template-based hash} {
         make_hashtmpl hgetdel:multi a 1 b 2 c 3 d 4 e 5
         assert_equal [r hgetdel hgetdel:multi FIELDS 2 b d] {2 4}
-        assert_hashtmpl_encoding hgetdel:multi
+        assert_encoding $encoding hgetdel:multi
         assert_equal [r hlen hgetdel:multi] 3
     }
 
@@ -616,7 +616,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         make_hashtmpl hgetdel:miss a 1 b 2
         set res [r hgetdel hgetdel:miss FIELDS 1 zzz]
         assert_equal [lindex $res 0] {}
-        assert_hashtmpl_encoding hgetdel:miss
+        assert_encoding $encoding hgetdel:miss
         assert_equal [r hlen hgetdel:miss] 2
     }
 
@@ -632,21 +632,21 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 
     test {HGETEX without options returns values and keeps template encoding} {
         make_hashtmpl hgetex:plain a 1 b 2 c 3
-        assert_hashtmpl_encoding hgetex:plain
+        assert_encoding $encoding hgetex:plain
         assert_equal [r hgetex hgetex:plain FIELDS 2 a c] {1 3}
-        assert_hashtmpl_encoding hgetex:plain
+        assert_encoding $encoding hgetex:plain
     }
 
     test {HGETEX non-existent field returns nil and keeps encoding} {
         make_hashtmpl hgetex:miss a 1 b 2
         set res [r hgetex hgetex:miss FIELDS 1 zzz]
         assert_equal [lindex $res 0] {}
-        assert_hashtmpl_encoding hgetex:miss
+        assert_encoding $encoding hgetex:miss
     }
 
     test {HGETEX PERSIST converts away from template, no TTL set} {
         make_hashtmpl hgetex:persist a 1 b 2
-        assert_hashtmpl_encoding hgetex:persist
+        assert_encoding $encoding hgetex:persist
         assert_equal [r hgetex hgetex:persist PERSIST FIELDS 1 a] {1}
         # Any expiration flag forces a template hash into an HFE-capable
         # encoding (listpackex or hashtable); it is no longer template-based.
@@ -661,7 +661,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     if {$encoding eq "template-listpack"} {
     test {HGETEX EX converts template to listpackex and sets TTL} {
         make_hashtmpl hgetex:ex name alice email alice@example.com
-        assert_hashtmpl_encoding hgetex:ex
+        assert_encoding $encoding hgetex:ex
         assert_equal [r hgetex hgetex:ex EX 100 FIELDS 1 name] {alice}
         assert_match "*encoding:listpackex*" [r debug object hgetex:ex]
         set ttl [lindex [r httl hgetex:ex FIELDS 1 name] 0]
@@ -676,9 +676,9 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 
     test {HSET adds new field to template-based hash} {
         make_hashtmpl hset:add name alice email alice@example.com
-        assert_hashtmpl_encoding hset:add
+        assert_encoding $encoding hset:add
         r hset hset:add age 25
-        assert_hashtmpl_encoding hset:add
+        assert_encoding $encoding hset:add
         assert_equal [r hlen hset:add] 3
         assert_equal [r hget hset:add age] 25
     }
@@ -686,14 +686,14 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     test {HSET updates existing field in template-based hash} {
         make_hashtmpl hset:update name alice
         r hset hset:update name bob
-        assert_hashtmpl_encoding hset:update
+        assert_encoding $encoding hset:update
         assert_equal [r hget hset:update name] bob
     }
 
     test {HSET multiple fields on template-based hash} {
         make_hashtmpl hset:multi a 1
         r hset hset:multi b 2 c 3 d 4
-        assert_hashtmpl_encoding hset:multi
+        assert_encoding $encoding hset:multi
         assert_equal [r hlen hset:multi] 4
     }
 
@@ -755,35 +755,46 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     }
 
     # ============================================================
-    # Hash Field Expiration - converts to listpackex
+    # Hash Field Expiration - converts away from template encoding
     # ============================================================
 
-    # HFE deconversion target depends on hash-max-listpack-entries; under the
-    # TMPL_AR iter (entries=0) the target is "hashtable" instead of
-    # "listpackex". Run only in the LP iter to keep the assertion strict.
-    if {$encoding eq "template-listpack"} {
-    test {HPEXPIRE on template-based hash converts to listpackex} {
+    # Applying a field TTL must deconvert the template-encoded hash to a
+    # TTL-capable encoding. The target depends on hash-max-listpack-entries:
+    # "listpackex" under the LP iter, "hashtable" under the AR iter (entries=0).
+    set hfe_target [expr {$encoding eq "template-listpack" ? "listpackex" : "hashtable"}]
+
+    test {HPEXPIRE on template-based hash converts away from template} {
         make_hashtmpl hfe:test name alice email alice@example.com
-        assert_hashtmpl_encoding hfe:test
-        r hpexpire hfe:test 100000 FIELDS 1 name
-        assert_match "*encoding:listpackex*" [r debug object hfe:test]
+        assert_encoding $encoding hfe:test
+        assert_equal [r hpexpire hfe:test 100000 FIELDS 1 name] {1}
+        assert_encoding $hfe_target hfe:test
+        # Field data is preserved across the conversion.
         assert_equal [r hget hfe:test name] alice
         assert_equal [r hget hfe:test email] alice@example.com
+        # The TTL is actually active on the targeted field, and only it.
+        set ttl [lindex [r hpttl hfe:test FIELDS 1 name] 0]
+        assert {$ttl > 0 && $ttl <= 100000}
+        assert_equal [r hpttl hfe:test FIELDS 1 email] {-1}
     }
 
-    test {HEXPIRE on template-based hash converts to listpackex} {
+    test {HEXPIRE on template-based hash converts away from template} {
         make_hashtmpl hfe:expire name bob age 30
-        assert_hashtmpl_encoding hfe:expire
-        r hexpire hfe:expire 100 FIELDS 1 age
-        assert_match "*encoding:listpackex*" [r debug object hfe:expire]
+        assert_encoding $encoding hfe:expire
+        assert_equal [r hexpire hfe:expire 100 FIELDS 1 age] {1}
+        assert_encoding $hfe_target hfe:expire
+        # Field data is preserved, and the TTL behaves correctly afterwards.
+        assert_equal [r hget hfe:expire age] 30
+        assert_equal [r hget hfe:expire name] bob
+        set ttl [lindex [r httl hfe:expire FIELDS 1 age] 0]
+        assert {$ttl > 0 && $ttl <= 100}
+        assert_equal [r httl hfe:expire FIELDS 1 name] {-1}
     }
-    } ;# end if template-listpack
 
     test {HSETEX without expiration keeps template encoding} {
         make_hashtmpl hfe:noexp name alice
         # HSET without expiration should keep template-based encoding
         r hset hfe:noexp email alice@example.com
-        assert_hashtmpl_encoding hfe:noexp
+        assert_encoding $encoding hfe:noexp
     }
 
     # ============================================================
@@ -792,11 +803,11 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 
     test {DUMP/RESTORE preserves template-based hash} {
         make_hashtmpl dump:test name alice email alice@example.com age 25
-        assert_hashtmpl_encoding dump:test
+        assert_encoding $encoding dump:test
         set dump [r dump dump:test]
         r del dump:test
         r restore dump:test 0 $dump
-        assert_hashtmpl_encoding dump:test
+        assert_encoding $encoding dump:test
         # Length-first sort: age (3) < name (4) < email (5)
         assert_equal [r hgetall dump:test] {age 25 name alice email alice@example.com}
     }
@@ -805,7 +816,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         make_hashtmpl dump:src a 1 b 2 c 3
         set dump [r dump dump:src]
         r restore dump:dst 0 $dump
-        assert_hashtmpl_encoding dump:dst
+        assert_encoding $encoding dump:dst
         assert_equal [r hgetall dump:dst] {a 1 b 2 c 3}
     }
 
@@ -819,9 +830,9 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         r himport set shared:2 shared bob bob@example.com 30
         r himport set shared:3 shared charlie charlie@example.com 35
 
-        assert_hashtmpl_encoding shared:1
-        assert_hashtmpl_encoding shared:2
-        assert_hashtmpl_encoding shared:3
+        assert_encoding $encoding shared:1
+        assert_encoding $encoding shared:2
+        assert_encoding $encoding shared:3
 
         assert_equal [r hget shared:1 name] alice
         assert_equal [r hget shared:2 name] bob
@@ -839,9 +850,9 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         r himport set order:key2 order2 vc2 vb2 va2
         r himport set order:key3 order3 vb3 va3 vc3
 
-        assert_hashtmpl_encoding order:key1
-        assert_hashtmpl_encoding order:key2
-        assert_hashtmpl_encoding order:key3
+        assert_encoding $encoding order:key1
+        assert_encoding $encoding order:key2
+        assert_encoding $encoding order:key3
 
         # All should have same sorted field order: a, b, c
         assert_equal [r hget order:key1 a] va1
@@ -909,7 +920,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         # by_id was freed (capacity reset to 0); a fresh template must still be
         # creatable, exercising the grow-from-NULL path in allocateTemplateId.
         make_hashtmpl shrink:k2 a 1 b 2 c 3
-        assert_hashtmpl_encoding shrink:k2
+        assert_encoding $encoding shrink:k2
         assert_equal [r hget shrink:k2 a] 1
 
         r del shrink:k2
@@ -924,19 +935,19 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         make_hashtmpl flush:test1 a 1 b 2 c 3
         make_hashtmpl flush:test2 a 4 b 5 c 6
         make_hashtmpl flush:test3 x 1 y 2
-        assert_hashtmpl_encoding flush:test1
+        assert_encoding $encoding flush:test1
         r flushall
         assert_equal [r dbsize] 0
         # Create new hashes after flush
         make_hashtmpl flush:new a 1 b 2
-        assert_hashtmpl_encoding flush:new
+        assert_encoding $encoding flush:new
         assert_equal [r hget flush:new a] 1
     }
 
     test {FLUSHDB with template-based hashes does not crash} {
         r select 1
         make_hashtmpl flushdb:test a 1 b 2
-        assert_hashtmpl_encoding flushdb:test
+        assert_encoding $encoding flushdb:test
         r flushdb
         assert_equal [r dbsize] 0
         r select 0
@@ -956,12 +967,12 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 
     test {DEL on template-based hash releases template ref} {
         make_hashtmpl del:test name alice email bob
-        assert_hashtmpl_encoding del:test
+        assert_encoding $encoding del:test
         r del del:test
         assert_equal [r exists del:test] 0
         # Should be able to create new hash with same template
         make_hashtmpl del:new name charlie email dave
-        assert_hashtmpl_encoding del:new
+        assert_encoding $encoding del:new
     }
 
     # ============================================================
@@ -977,7 +988,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     test {HSETNX on new field in template-based hash} {
         make_hashtmpl hsetnx:new name alice
         assert_equal [r hsetnx hsetnx:new email alice@example.com] 1
-        assert_hashtmpl_encoding hsetnx:new
+        assert_encoding $encoding hsetnx:new
         assert_equal [r hget hsetnx:new email] alice@example.com
     }
 
@@ -990,7 +1001,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         r expire expire:test 100
         set ttl [r ttl expire:test]
         assert {$ttl > 0 && $ttl <= 100}
-        assert_hashtmpl_encoding expire:test
+        assert_encoding $encoding expire:test
     }
 
     # ============================================================
@@ -999,9 +1010,9 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 
     test {COPY template-based hash to new key} {
         make_hashtmpl copy:src name alice email bob
-        assert_hashtmpl_encoding copy:src
+        assert_encoding $encoding copy:src
         r copy copy:src copy:dst
-        assert_hashtmpl_encoding copy:dst
+        assert_encoding $encoding copy:dst
         assert_equal [r hgetall copy:dst] [r hgetall copy:src]
     }
 
@@ -1010,7 +1021,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         r set copy:replace:dst "string"
         r copy copy:replace:src copy:replace:dst REPLACE
         assert_equal [r type copy:replace:dst] hash
-        assert_hashtmpl_encoding copy:replace:dst
+        assert_encoding $encoding copy:replace:dst
     }
 
 }
@@ -1021,14 +1032,17 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 
 start_server {tags {"hash" "hinted-hash-templates" "rdb" "needs:debug"}
               overrides {hash-min-template-entries 0}} {
+    if {$encoding eq "template-array"} {
+        r config set hash-max-listpack-entries 0
+    }
 
     test {RDB save and load preserves template-based hash} {
         make_hashtmpl rdb:test name alice email alice@example.com age 25
-        assert_hashtmpl_encoding rdb:test
+        assert_encoding $encoding rdb:test
 
         r debug reload
 
-        assert_hashtmpl_encoding rdb:test
+        assert_encoding $encoding rdb:test
         # Length-first sort: age (3) < name (4) < email (5)
         assert_equal [r hgetall rdb:test] {age 25 name alice email alice@example.com}
     }
@@ -1041,9 +1055,9 @@ start_server {tags {"hash" "hinted-hash-templates" "rdb" "needs:debug"}
 
         r debug reload
 
-        assert_hashtmpl_encoding rdb:multi1
-        assert_hashtmpl_encoding rdb:multi2
-        assert_hashtmpl_encoding rdb:multi3
+        assert_encoding $encoding rdb:multi1
+        assert_encoding $encoding rdb:multi2
+        assert_encoding $encoding rdb:multi3
         assert_equal [r hget rdb:multi1 a] 1
         assert_equal [r hget rdb:multi2 b] 5
     }
