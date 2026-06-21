@@ -2301,6 +2301,56 @@ void hashTypeCurrentFromHashTable(hashTypeIterator *hi, int what, char **str, si
         *expireTime = hi->expire_time;
 }
 
+/* Get the field or value at iterator cursor, for an iterator on a hash value
+ * encoded as a template-listpack. Prototype is similar to
+ * `hashTypeCurrentFromListpack`: field name comes from the shared template,
+ * the value from the values listpack. */
+static void hashTypeCurrentFromTmplLp(hashTypeIterator *hi, int what,
+                                      unsigned char **vstr,
+                                      unsigned int *vlen,
+                                      long long *vll,
+                                      uint64_t *expireTime)
+{
+    serverAssert(hi->encoding == OBJ_ENCODING_TMPL_LP);
+
+    if (what & OBJ_HASH_KEY) {
+        sds field = hi->tmpl->fields[hi->tmpl_index];
+        *vstr = (unsigned char*) field;
+        *vlen = sdslen(field);
+    } else {
+        *vstr = lpGetValue(hi->vptr, vlen, vll);
+    }
+
+    if (expireTime)
+        *expireTime = EB_EXPIRE_TIME_INVALID;
+}
+
+/* Get the field or value at iterator cursor, for an iterator on a hash value
+ * encoded as a template-array. Prototype is similar to
+ * `hashTypeCurrentFromHashTable`: field name comes from the shared template,
+ * the value from the sds array. Uses size_t length so large (sds) values are
+ * not truncated. */
+static void hashTypeCurrentFromTmplArray(hashTypeIterator *hi, int what,
+                                         char **str, size_t *len,
+                                         uint64_t *expireTime)
+{
+    serverAssert(hi->encoding == OBJ_ENCODING_TMPL_ARRAY);
+
+    if (what & OBJ_HASH_KEY) {
+        sds field = hi->tmpl->fields[hi->tmpl_index];
+        *str = field;
+        *len = sdslen(field);
+    } else {
+        hashTemplateArray *hta = hi->subject->ptr;
+        sds val = hta->values[hi->tmpl_index];
+        *str = val;
+        *len = sdslen(val);
+    }
+
+    if (expireTime)
+        *expireTime = EB_EXPIRE_TIME_INVALID;
+}
+
 /* Higher level function of hashTypeCurrent*() that returns the hash value
  * at current iterator position.
  *
@@ -2330,30 +2380,13 @@ void hashTypeCurrentObject(hashTypeIterator *hi,
         *vstr = (unsigned char*) ele;
         *vlen = eleLen;
     } else if (hi->encoding == OBJ_ENCODING_TMPL_LP) {
-        if (what & OBJ_HASH_KEY) {
-            /* Return field name from tmpl. */
-            sds field = hi->tmpl->fields[hi->tmpl_index];
-            *vstr = (unsigned char*) field;
-            *vlen = sdslen(field);
-        } else {
-            /* Return value from listpack. */
-            *vstr = lpGetValue(hi->vptr, vlen, vll);
-        }
-        if (expireTime) *expireTime = EB_EXPIRE_TIME_INVALID;
+        hashTypeCurrentFromTmplLp(hi, what, vstr, vlen, vll, expireTime);
     } else if (hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
-        hashTemplateArray *hta = hi->subject->ptr;
-        if (what & OBJ_HASH_KEY) {
-            /* Return field name from tmpl. */
-            sds field = hi->tmpl->fields[hi->tmpl_index];
-            *vstr = (unsigned char*) field;
-            *vlen = sdslen(field);
-        } else {
-            /* Return value from array. */
-            sds val = hta->values[hi->tmpl_index];
-            *vstr = (unsigned char*) val;
-            *vlen = sdslen(val);
-        }
-        if (expireTime) *expireTime = EB_EXPIRE_TIME_INVALID;
+        char *ele;
+        size_t eleLen;
+        hashTypeCurrentFromTmplArray(hi, what, &ele, &eleLen, expireTime);
+        *vstr = (unsigned char*) ele;
+        *vlen = eleLen;
     } else {
         serverPanic("Unknown hash encoding");
     }
@@ -3541,10 +3574,10 @@ static int himportCmpFieldIdx(const void *a, const void *b) {
  * Register a named fieldset on this client so subsequent HIMPORT SET calls
  * only have to pass values (not field names). Sorts the fields in sdscmplen
  * order (by length, then bytes) and looks up / creates the matching template
- * in the registry, taking a
- * hold reference on it. The original user-provided field order is preserved
- * as field_order[] so HIMPORT SET can map its positional values back into
- * template-sorted order. Rejects duplicate field names in the fieldset. */
+ * in the registry, taking a hold reference on it. The original user-provided 
+ * field order is preserved as field_order[] so HIMPORT SET can map its
+ * positional values back into template-sorted order. Rejects duplicate field
+ * names in the fieldset. */
 void himportPrepareCommand(client *c) {
     sds fieldset_name = c->argv[2]->ptr;
     int field_count = c->argc - 3;
@@ -4704,17 +4737,21 @@ static void addHashIteratorCursorToReply(client *c, hashTypeIterator *hi, int wh
         size_t len;
         hashTypeCurrentFromHashTable(hi, what, &value, &len, NULL);
         addReplyBulkCBuffer(c, value, len);
-    } else if (hi->encoding == OBJ_ENCODING_TMPL_LP ||
-               hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_LP) {
         unsigned char *vstr = NULL;
         unsigned int vlen = UINT_MAX;
         long long vll = LLONG_MAX;
 
-        hashTypeCurrentObject(hi, what, &vstr, &vlen, &vll, NULL);
+        hashTypeCurrentFromTmplLp(hi, what, &vstr, &vlen, &vll, NULL);
         if (vstr)
             addReplyBulkCBuffer(c, vstr, vlen);
         else
             addReplyBulkLongLong(c, vll);
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        char *value;
+        size_t len;
+        hashTypeCurrentFromTmplArray(hi, what, &value, &len, NULL);
+        addReplyBulkCBuffer(c, value, len);
     } else {
         serverPanic("Unknown hash encoding");
     }

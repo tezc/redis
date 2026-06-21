@@ -754,6 +754,15 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         assert_equal [llength $result] 4
     }
 
+    test {HRANDFIELD WITHVALUES RESP3 shape on template-based hash} {
+        make_hashtmpl hrand:resp3 a 1 b 2 c 3
+        r hello 3
+        set res [r hrandfield hrand:resp3 3 withvalues]
+        assert_equal [llength $res] 3
+        assert_equal [llength [lindex $res 0]] 2
+        r hello 2
+    }
+
     test {HRANDFIELD negative count on template-based hash} {
         make_hashtmpl hrand:neg a 1 b 2
         set result [r hrandfield hrand:neg -5]
