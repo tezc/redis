@@ -58,15 +58,6 @@ static inline vec *fieldvecInit(fieldvec *fv, size_t cap) {
     return &fv->v;
 }
 
-/* Return the shared template of a template-encoded hash (TMPL_LP or TMPL_ARRAY) */
-hashTemplate *hashTypeGetTemplate(robj *o) {
-    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP ||
-                 o->encoding == OBJ_ENCODING_TMPL_ARRAY);
-    return (o->encoding == OBJ_ENCODING_TMPL_LP) ?
-        hashTemplateLpGetTemplate(o->ptr) :
-        ((hashTemplateArray *)o->ptr)->tmpl;
-}
-
 /* hash field expiration (HFE) funcs */
 static ExpireAction onFieldExpire(eItem item, void *ctx);
 static ExpireMeta* hentryGetExpireMeta(const eItem field);
@@ -712,6 +703,15 @@ hashTemplate *hashTemplateLpGetTemplate(unsigned char *lp) {
     return tmpl;
 }
 
+/* Return the shared template of a template-encoded hash (TMPL_LP or TMPL_ARRAY). */
+hashTemplate *hashTypeGetTemplate(robj *o) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP ||
+                 o->encoding == OBJ_ENCODING_TMPL_ARRAY);
+    return (o->encoding == OBJ_ENCODING_TMPL_LP) ?
+        hashTemplateLpGetTemplate(o->ptr) :
+        ((hashTemplateArray *)o->ptr)->tmpl;
+}
+
 /* Replace template ID in listpack. Does NOT update refcounts. */
 unsigned char *hashTemplateLpSetTemplate(unsigned char *lp, hashTemplate *tmpl) {
     unsigned char *p = lpFirst(lp);
@@ -793,6 +793,40 @@ void hashTemplateArrayFree(hashTemplateArray *hta) {
         sdsfree(hta->values[i]);
     hashTemplateDecrKeyRef(hta->tmpl);
     zfree(hta);
+}
+
+int hashTypeCanCreateTmplLp(unsigned long long count, sds *values) {
+    if ((size_t)count > server.hash_max_listpack_entries)
+        return 0;
+
+    size_t sum = 0;
+    for (unsigned long long i = 0; i < count; i++) {
+        size_t len = sdslen(values[i]);
+        if (len > server.hash_max_listpack_value)
+            return 0;
+        sum += len;
+    }
+
+    return lpSafeToAdd(NULL, sum);
+}
+
+/* Build a hash object that shares `tmpl` and stores the given values.
+ * Two template-backed encodings exist:
+ *   TMPL_LP    - values packed in a listpack (compact, small hashes).
+ *   TMPL_ARRAY - values stored as an sds array (used when listpack limits
+ *                would be exceeded, or when many fields make per-field
+ *                listpack walks expensive). */
+robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values) {
+    robj *o;
+
+    if (hashTypeCanCreateTmplLp(tmpl->field_count, values)) {
+        o = createObject(OBJ_HASH, hashTemplateLpCreate(tmpl, values));
+        o->encoding = OBJ_ENCODING_TMPL_LP;
+    } else {
+        o = createObject(OBJ_HASH, hashTemplateArrayCreate(tmpl, values, 0));
+        o->encoding = OBJ_ENCODING_TMPL_ARRAY;
+    }
+    return o;
 }
 
 struct lpFingArgs {
@@ -1102,41 +1136,6 @@ unsigned char *hashTypeListpackGetLp(robj *o) {
  * Hash type API
  *----------------------------------------------------------------------------*/
 
-int hashTypeCanCreateTmplLp(unsigned long long count, sds *values) {
-    if ((size_t)count > server.hash_max_listpack_entries)
-        return 0;
-
-    size_t sum = 0;
-    for (unsigned long long i = 0; i < count; i++) {
-        size_t len = sdslen(values[i]);
-        if (len > server.hash_max_listpack_value)
-            return 0;
-        sum += len;
-    }
-
-    return lpSafeToAdd(NULL, sum);
-}
-
-
-/* Build a hash object that shares `tmpl` and stores the given values.
- * Two template-backed encodings exist:
- *   TMPL_LP    - values packed in a listpack (compact, small hashes).
- *   TMPL_ARRAY - values stored as an sds array (used when listpack limits
- *                would be exceeded, or when many fields make per-field
- *                listpack walks expensive). */
-robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values) {
-    robj *o;
-
-    if (hashTypeCanCreateTmplLp(tmpl->field_count, values)) {
-        o = createObject(OBJ_HASH, hashTemplateLpCreate(tmpl, values));
-        o->encoding = OBJ_ENCODING_TMPL_LP;
-    } else {
-        o = createObject(OBJ_HASH, hashTemplateArrayCreate(tmpl, values, 0));
-        o->encoding = OBJ_ENCODING_TMPL_ARRAY;
-    }
-    return o;
-}
-
 /* Check the length of a number of objects to see if we need to convert a
  * listpack to a real hash. Note that we only check string encoded objects
  * as their string length can be queried in constant time. */
@@ -1168,7 +1167,7 @@ void hashTypeTryConversion(redisDb *db, kvobj *o, robj **argv, int start, int en
     for (int i = start; i <= end; i++) {
         if (tmpl_lp && ((i - start) % 2 == 0))
             continue;
-        if (!sdsEncodedObject(argv[i])) 
+        if (!sdsEncodedObject(argv[i]))
             continue;
         size_t len = sdslen(argv[i]->ptr);
         if (len > server.hash_max_listpack_value) {
@@ -3381,8 +3380,8 @@ typedef struct himportFieldset {
 
 /* Container for client's HIMPORT fieldsets (sorted by name). */
 typedef struct himportFieldsetList {
-    int count;
-    int cap;
+    int64_t count;
+    int64_t cap;
     himportFieldset *arr;
 } himportFieldsetList;
 
@@ -3396,10 +3395,10 @@ static void himportFieldsetFree(himportFieldset *fs) {
 
 /* Binary search for fieldset by name. Returns index if found,
  * or -(insertion_point + 1) if not found. */
-static int himportFieldsetSearch(himportFieldsetList *list, sds name) {
-    int lo = 0, hi = list->count - 1;
+static int64_t himportFieldsetSearch(himportFieldsetList *list, sds name) {
+    int64_t lo = 0, hi = list->count - 1;
     while (lo <= hi) {
-        int mid = lo + (hi - lo) / 2;
+        int64_t mid = lo + (hi - lo) / 2;
         int cmp = sdscmplen(list->arr[mid].name, name);
         if (cmp == 0) return mid;
         if (cmp < 0) lo = mid + 1;
@@ -3413,7 +3412,7 @@ static himportFieldset *himportFieldsetGet(client *c, sds name) {
     himportFieldsetList *list = c->himport_fieldsets;
     if (!list) return NULL;
 
-    int idx = himportFieldsetSearch(list, name);
+    int64_t idx = himportFieldsetSearch(list, name);
     return (idx >= 0) ? &list->arr[idx] : NULL;
 }
 
@@ -3435,7 +3434,7 @@ static void himportFieldsetAdd(client *c, sds name,
         return;
     }
 
-    int idx = himportFieldsetSearch(list, name);
+    int64_t idx = himportFieldsetSearch(list, name);
     if (idx >= 0) {
         /* Overwrite existing. */
         himportFieldsetFree(&list->arr[idx]);
@@ -3444,7 +3443,7 @@ static void himportFieldsetAdd(client *c, sds name,
     }
 
     /* Insert at sorted position. */
-    int pos = -(idx + 1);
+    int64_t pos = -(idx + 1);
     if (list->count >= list->cap) {
         list->cap *= 2;
         list->arr = zrealloc(list->arr, sizeof(himportFieldset) * list->cap);
@@ -3459,7 +3458,7 @@ static void himportFieldsetAdd(client *c, sds name,
 
 /* Remove a fieldset by name. Returns 1 if removed, 0 if not found. */
 static int himportFieldsetRemove(client *c, sds name) {
-    int idx = -1;
+    int64_t idx = -1;
     himportFieldsetList *list = c->himport_fieldsets;
 
     if (!list || (idx = himportFieldsetSearch(list, name)) < 0)
@@ -3482,12 +3481,12 @@ static int himportFieldsetRemove(client *c, sds name) {
 
 /* Free client's fieldset list. Called from freeClient().
  * Returns the number of fieldsets that were removed. */
-int himportFieldsetFreeList(client *c) {
+int64_t himportFieldsetFreeList(client *c) {
     himportFieldsetList *list = c->himport_fieldsets;
     if (!list) return 0;
 
-    int removed = list->count;
-    for (int i = 0; i < list->count; i++)
+    int64_t removed = list->count;
+    for (int64_t i = 0; i < list->count; i++)
         himportFieldsetFree(&list->arr[i]);
 
     zfree(list->arr);
@@ -3511,7 +3510,7 @@ size_t himportFieldsetMemOverhead(client *c) {
 
     size_t mem = sizeof(himportFieldsetList);
     mem += (size_t)list->cap * sizeof(himportFieldset);
-    for (int i = 0; i < list->count; i++) {
+    for (int64_t i = 0; i < list->count; i++) {
         himportFieldset *fs = &list->arr[i];
         if (fs->name) mem += sdsZmallocSize(fs->name);
         if (fs->tmpl) {
@@ -5509,8 +5508,7 @@ static void httlGenericCommand(client *c, const char *cmd, long long basetime, i
         return;
     }
 
-    /* Template encodings don't support HFE. Report field presence
-     * with no TTL, or missing field. */
+    /* Template encodings don't support HFE. */
     if (hashObj->encoding == OBJ_ENCODING_TMPL_LP ||
         hashObj->encoding == OBJ_ENCODING_TMPL_ARRAY) {
         hashTemplate *tmpl = hashTypeGetTemplate(hashObj);

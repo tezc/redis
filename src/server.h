@@ -3993,7 +3993,7 @@ int hashTypeSet(redisDb *db, kvobj *kv, sds field, sds value, int flags);
 robj *hashTypeDup(kvobj *kv, uint64_t *minHashExpire);
 uint64_t hashTypeExpire(redisDb *db, kvobj *o, uint32_t *quota, int updateSubexpires, int activeEx);
 void hashTypeFree(robj *o);
-int himportFieldsetFreeList(client *c);
+int64_t himportFieldsetFreeList(client *c);
 size_t himportFieldsetMemOverhead(client *c);
 void hsetcCacheFree(client *c);
 int hashTypeIsExpired(const robj *o, uint64_t expireAt);
