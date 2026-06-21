@@ -183,7 +183,6 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi);
 ssize_t rdbSaveFunctions(rio *rdb);
 ssize_t rdbSaveHashTemplates(rio *rdb);
 int rdbLoadHashTemplates(rio *rdb);
-struct hashTemplate *rdbGetHashTemplateById(uint64_t rdb_id);
 void rdbClearHashTemplates(void);
 rdbSaveInfo *rdbPopulateSaveInfo(rdbSaveInfo *rsi);
 

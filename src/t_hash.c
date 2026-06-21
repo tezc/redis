@@ -58,7 +58,10 @@ static inline vec *fieldvecInit(fieldvec *fv, size_t cap) {
     return &fv->v;
 }
 
-static inline hashTemplate *hashTypeGetTemplate(robj *o) {
+/* Return the shared template of a template-encoded hash (TMPL_LP or TMPL_ARRAY) */
+hashTemplate *hashTypeGetTemplate(robj *o) {
+    serverAssert(o->encoding == OBJ_ENCODING_TMPL_LP ||
+                 o->encoding == OBJ_ENCODING_TMPL_ARRAY);
     return (o->encoding == OBJ_ENCODING_TMPL_LP) ?
         hashTemplateLpGetTemplate(o->ptr) :
         ((hashTemplateArray *)o->ptr)->tmpl;
@@ -2133,16 +2136,12 @@ void hashTypeInitIterator(hashTypeIterator *hi, robj *subject) {
         hi->expire_time = EB_EXPIRE_TIME_INVALID;
     } else if (hi->encoding == OBJ_ENCODING_HT) {
         dictInitIterator(&hi->di, subject->ptr);
-    } else if (hi->encoding == OBJ_ENCODING_TMPL_LP) {
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_LP ||
+               hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
         hi->tmpl_index = -1;  /* Not started yet. */
         hi->vptr = NULL;
         hi->expire_time = EB_EXPIRE_TIME_INVALID;
-        hi->tmpl = hashTemplateLpGetTemplate(subject->ptr);
-    } else if (hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
-        hi->tmpl_index = -1;  /* Not started yet. */
-        hi->vptr = NULL;
-        hi->expire_time = EB_EXPIRE_TIME_INVALID;
-        hi->tmpl = ((hashTemplateArray *)subject->ptr)->tmpl;
+        hi->tmpl = hashTypeGetTemplate(subject);
     } else {
         serverPanic("Unknown hash encoding");
     }
@@ -5858,9 +5857,7 @@ void hpersistCommand(client *c) {
     /* Template encodings don't support HFE. */
     if (hashObj->encoding == OBJ_ENCODING_TMPL_LP ||
         hashObj->encoding == OBJ_ENCODING_TMPL_ARRAY) {
-        hashTemplate *tmpl = (hashObj->encoding == OBJ_ENCODING_TMPL_LP) ?
-            hashTemplateLpGetTemplate(hashObj->ptr) :
-            ((hashTemplateArray *)hashObj->ptr)->tmpl;
+        hashTemplate *tmpl = hashTypeGetTemplate(hashObj);
 
         addReplyArrayLen(c, numFields);
         for (int i = 0; i < numFields; i++) {

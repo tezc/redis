@@ -52,8 +52,8 @@ proc generate_collections {suffix elements} {
         lappend fields f$j
         lappend vals $j
     }
-    r himport prepare tmplfs$suffix {*}$fields
-    r himport set htmpl$suffix tmplfs$suffix {*}$vals
+    r himport prepare fieldset$suffix {*}$fields
+    r himport set htmpl$suffix fieldset$suffix {*}$vals
 }
 
 # generate keys with various types and encodings

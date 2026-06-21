@@ -697,11 +697,11 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         set lp_key [slot_key 0 htmpllp]
         set ar_key [slot_key 0 htmplar]
-        R 1 himport prepare migtpl name email age
-        R 1 himport set $lp_key migtpl alice alice@example.com 25
+        R 1 himport prepare fieldset1 name email age
+        R 1 himport set $lp_key fieldset1 alice alice@example.com 25
         # A large value keeps the array encoding a persistent property.
-        R 1 himport prepare migtpl_ar f1 f2 f3
-        R 1 himport set $ar_key migtpl_ar v1 [string repeat x 100] v3
+        R 1 himport prepare fieldset2 f1 f2 f3
+        R 1 himport set $ar_key fieldset2 v1 [string repeat x 100] v3
         assert_equal {template-listpack} [R 1 object encoding $lp_key]
         assert_equal {template-array} [R 1 object encoding $ar_key]
 

@@ -14,9 +14,9 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
             lappend fields $f
             lappend values $v
         }
-        set tplname "tpl_[join $fields _]"
-        r himport prepare $tplname {*}$fields
-        r himport set $key $tplname {*}$values
+        set fsname "fieldset_[join $fields _]"
+        r himport prepare $fsname {*}$fields
+        r himport set $key $fsname {*}$values
     }
 
     # Helper to get hash template stats from INFO
@@ -1899,8 +1899,8 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:de
                     set expected [lsort $flat]
 
                     # HIMPORT PREPARE + SET (reaches the replica as one HSETC).
-                    r himport prepare t {*}$fields
-                    r himport set k t {*}$vals
+                    r himport prepare fieldset {*}$fields
+                    r himport set k fieldset {*}$vals
 
                     # HRANDFIELD returns all fields with their correct values.
                     set rand [r hrandfield k $field_count WITHVALUES]
@@ -2036,9 +2036,9 @@ set ::bulk_n 2000
 # suffix in the field names makes every field set unique -> a distinct template.
 proc bulk_populate_distinct {clnt n} {
     for {set i 0} {$i < $n} {incr i} {
-        $clnt himport prepare bt$i \
+        $clnt himport prepare fieldset$i \
             f${i}_user_id f${i}_email f${i}_score f${i}_status f${i}_country
-        $clnt himport set bulk:$i bt$i \
+        $clnt himport set bulk:$i fieldset$i \
             [expr {100000 + $i}] "user$i@example.com" [expr {$i % 1000}] \
             [expr {$i % 2 == 0 ? "active" : "inactive"}] "Country[expr {$i % 195}]"
     }

@@ -488,8 +488,8 @@ start_server {tags {"hash"}} {
 
     test {Is a ziplist encoded Hash promoted on big payload?} {
         r hset smallhash foo [string repeat a 1024]
-        r object encoding smallhash
-    } {hashtable} {needs:debug}
+        r debug object smallhash
+    } {*hashtable*} {needs:debug}
 
     test {HINCRBY against non existing database key} {
         r del htest

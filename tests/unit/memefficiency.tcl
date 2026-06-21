@@ -1251,24 +1251,24 @@ run_solo {defrag} {
             r config set hash-max-listpack-entries 16
 
             # Two shared schemas: small -> template-listpack, big -> template-array.
-            set big {}
-            for {set f 0} {$f < 40} {incr f} { lappend big field_[format %02d $f] }
+            set big_fields {}
+            for {set f 0} {$f < 40} {incr f} { lappend big_fields field_[format %02d $f] }
             set bigval [string repeat x 80]
 
             set n 20000
             # HIMPORT fieldsets are per-client, so prepare on the same
             # (deferring) connection that issues the HIMPORT SETs.
             set rd [redis_deferring_client]
-            $rd himport prepare sm a b c   ; $rd read
-            $rd himport prepare bg {*}$big  ; $rd read
+            $rd himport prepare small a b c       ; $rd read
+            $rd himport prepare big {*}$big_fields ; $rd read
             set batch 200
             for {set j 0} {$j < $n} {incr j} {
                 if {$j % 2 == 0} {
-                    $rd himport set k:$j sm v${j}a v${j}b v${j}c
+                    $rd himport set k:$j small v${j}a v${j}b v${j}c
                 } else {
                     set vals {}
                     for {set f 0} {$f < 40} {incr f} { lappend vals $bigval }
-                    $rd himport set k:$j bg {*}$vals
+                    $rd himport set k:$j big {*}$vals
                 }
                 discard_replies_every $rd [expr {$j + 1}] $batch $batch
             }
@@ -1302,7 +1302,7 @@ run_solo {defrag} {
 
             # Data byte-identical after defrag moved the allocations.
             assert_equal $digest [debug_digest]
-            # Survivors of both encodings still resolve (k:2 sm, k:3 bg).
+            # Survivors of both encodings still resolve (k:2 small, k:3 big).
             assert_equal template-listpack [r object encoding k:2]
             assert_equal template-array    [r object encoding k:3]
             assert_equal v2a    [r hget k:2 a]

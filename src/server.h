@@ -4011,6 +4011,7 @@ int hashTemplateValidateFields(sds *fields, unsigned long long field_count);
 hashTemplate *hashTemplateGetById(uint64_t id);
 void hashTemplatesInit(void);
 hashTemplate *hashTemplateLpGetTemplate(unsigned char *lp);
+hashTemplate *hashTypeGetTemplate(robj *o);
 uint64_t hashTemplateLpGetTemplateId(unsigned char *lp);
 char *hashTemplateEquivalentEncoding(robj *o);
 unsigned char *hashTemplateLpCreate(hashTemplate *tmpl, sds *values);

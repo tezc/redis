@@ -69,8 +69,8 @@ start_server {tags {"modules external:skip"}} {
         r config set hash-min-template-entries 0
         r config set hash-max-listpack-entries 128
         r del th
-        r himport prepare tmpl_lp fa fb fc
-        r himport set th tmpl_lp hello 123 world
+        r himport prepare fieldset fa fb fc
+        r himport set th fieldset hello 123 world
         assert_encoding template-listpack th
         lsort [r scan.scan_key th]
     } {{fa hello} {fb 123} {fc world}}
@@ -79,10 +79,14 @@ start_server {tags {"modules external:skip"}} {
         r config set hash-min-template-entries 0
         r config set hash-max-listpack-entries 0
         r del ta
-        r himport prepare tmpl_arr fa fb fc
-        r himport set ta tmpl_arr hello 123 world
+        r himport prepare fieldset fa fb fc
+        r himport set ta fieldset hello 123 world
         assert_encoding template-array ta
-        lsort [r scan.scan_key ta]
+        set res [lsort [r scan.scan_key ta]]
+        # cleanup
+        r config set hash-max-listpack-entries 512
+        r config set hash-min-template-entries 0
+        set res
     } {{fa hello} {fb 123} {fc world}}
 
     test {Module scan zset listpack} {
