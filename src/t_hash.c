@@ -614,10 +614,10 @@ static robj **hashTemplateGetPropargvFields(hashTemplate *tmpl) {
 /* Find field index in tmpl using binary search (fields are sorted).
  * Returns the index (>= 0) if found, otherwise -(insert_pos + 1) where
  * insert_pos is the position to splice field into to keep fields sorted. */
-int hashTemplateFieldIndex(hashTemplate *tmpl, sds field) {
-    int lo = 0, hi = (int)tmpl->field_count - 1;
+long long hashTemplateFieldIndex(hashTemplate *tmpl, sds field) {
+    long long lo = 0, hi = (long long)tmpl->field_count - 1;
     while (lo <= hi) {
-        int mid = (lo + hi) / 2;
+        long long mid = lo + (hi - lo) / 2;
         int cmp = sdscmplen(field, tmpl->fields[mid]);
         if (cmp == 0) return mid;
         if (cmp < 0) hi = mid - 1;
@@ -1299,7 +1299,7 @@ GetFieldRes hashTypeGetValue(redisDb *db, kvobj *o, sds field, unsigned char **v
     } else if (o->encoding == OBJ_ENCODING_TMPL_LP) {
         unsigned char *lp = o->ptr;
         hashTemplate *tmpl = hashTemplateLpGetTemplate(lp);
-        int idx = hashTemplateFieldIndex(tmpl, field);
+        long long idx = hashTemplateFieldIndex(tmpl, field);
         if (idx < 0) return GETF_NOT_FOUND;
 
         /* Get value at index (idx+1 to skip template ID entry). */
@@ -1311,7 +1311,7 @@ GetFieldRes hashTypeGetValue(redisDb *db, kvobj *o, sds field, unsigned char **v
         res = GETF_OK;
     } else if (o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
         hashTemplateArray *hta = o->ptr;
-        int idx = hashTemplateFieldIndex(hta->tmpl, field);
+        long long idx = hashTemplateFieldIndex(hta->tmpl, field);
         if (idx < 0) return GETF_NOT_FOUND;
 
         sds value = hta->values[idx];
@@ -1485,7 +1485,7 @@ int hashTypeSet(redisDb *db, kvobj *o, sds field, sds value, int flags) {
         hashTemplate *tmpl = hashTypeGetTemplate(o);
 
         /* Check if field exists in tmpl; on miss, decode sorted insert position. */
-        int field_idx = hashTemplateFieldIndex(tmpl, field);
+        long long field_idx = hashTemplateFieldIndex(tmpl, field);
         int is_new = field_idx < 0;
 
         /* Single pre-mutation conversion decision: a TMPL_LP can't hold this
@@ -1519,7 +1519,7 @@ int hashTypeSet(redisDb *db, kvobj *o, sds field, sds value, int flags) {
         }
 
         /* Field not in tmpl - build sorted new_fields by splicing at insert_pos. */
-        int insert_pos = -field_idx - 1;
+        long long insert_pos = -field_idx - 1;
         unsigned long long new_field_count = tmpl->field_count + 1;
         sds stack_fields[HASH_TMPL_STACK_ENTRIES];
         sds *new_fields = (new_field_count <= HASH_TMPL_STACK_ENTRIES) ?
@@ -1978,10 +1978,10 @@ int hashTypeDelete(robj *o, void *field) {
     } else if (o->encoding == OBJ_ENCODING_TMPL_LP ||
                o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
         hashTemplate *tmpl = hashTypeGetTemplate(o);
-        int idx = hashTemplateFieldIndex(tmpl, field);
+        long long idx = hashTemplateFieldIndex(tmpl, field);
         if (idx >= 0) {
-            int old_count = tmpl->field_count;
-            int new_count = old_count - 1;
+            long long old_count = tmpl->field_count;
+            long long new_count = old_count - 1;
 
             if (new_count == 0) {
                 /* Last field deleted - convert to empty listpack. */
@@ -1999,8 +1999,8 @@ int hashTypeDelete(robj *o, void *field) {
                 sds stack_fields[HASH_TMPL_STACK_ENTRIES];
                 sds *new_fields = (new_count <= HASH_TMPL_STACK_ENTRIES) ?
                     stack_fields : zmalloc(sizeof(sds) * new_count);
-                int j = 0;
-                for (int i = 0; i < old_count; i++) {
+                long long j = 0;
+                for (long long i = 0; i < old_count; i++) {
                     if (i != idx) new_fields[j++] = tmpl->fields[i];
                 }
 
@@ -2977,7 +2977,7 @@ void hashTypeRandomElement(robj *hashobj, unsigned long hashsize, CommonEntry *k
     } else if (hashobj->encoding == OBJ_ENCODING_TMPL_LP) {
         unsigned char *lp = hashobj->ptr;
         hashTemplate *tmpl = hashTemplateLpGetTemplate(lp);
-        int idx = rand() % tmpl->field_count;
+        unsigned long long idx = randomULong() % tmpl->field_count;
 
         /* Get field from tmpl. */
         sds field = tmpl->fields[idx];
@@ -2998,7 +2998,7 @@ void hashTypeRandomElement(robj *hashobj, unsigned long hashsize, CommonEntry *k
         }
     } else if (hashobj->encoding == OBJ_ENCODING_TMPL_ARRAY) {
         hashTemplateArray *hta = hashobj->ptr;
-        int idx = rand() % hta->tmpl->field_count;
+        unsigned long long idx = randomULong() % hta->tmpl->field_count;
 
         /* Get field from tmpl. */
         sds field = hta->tmpl->fields[idx];
@@ -3144,7 +3144,7 @@ static int hashTypeExpireIfNeeded(redisDb *db, kvobj *o) {
 uint64_t hashTypeGetMinExpire(robj *o, int accurate) {
     ExpireMeta *expireMeta = NULL;
 
-    /* TMPL_* encodings don't support field expiration. */
+    /* TMPL_* encodings don't support hash field expiration. */
     if (o->encoding == OBJ_ENCODING_TMPL_LP ||
         o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
         return EB_EXPIRE_TIME_INVALID;
@@ -5027,21 +5027,23 @@ void hrandfieldWithCountCommand(client *c, long l, int withvalues) {
         hash->encoding == OBJ_ENCODING_TMPL_ARRAY)
     {
         hashTemplate *tmpl = hashTypeGetTemplate(hash);
-        int fc = (int)tmpl->field_count;
-        if (count > (unsigned long)fc) count = fc;
+        unsigned long long field_count = tmpl->field_count;
+        if (count > field_count) count = field_count;
 
         /* Pick unique random indexes using Fisher-Yates partial shuffle. */
-        int stack_idx[HASH_TMPL_STACK_ENTRIES];
-        int *idx = (fc <= HASH_TMPL_STACK_ENTRIES) ?
-                   stack_idx : zmalloc(sizeof(int) * fc);
-        for (int i = 0; i < fc; i++) idx[i] = i;
-        for (unsigned long i = 0; i < count; i++) {
-            int j = i + (rand() % (fc - i));
-            int tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
+        unsigned long long stack_idx[HASH_TMPL_STACK_ENTRIES];
+        unsigned long long *idx = (field_count <= HASH_TMPL_STACK_ENTRIES) ?
+                   stack_idx : zmalloc(sizeof(*idx) * field_count);
+        for (unsigned long long i = 0; i < field_count; i++) idx[i] = i;
+        for (unsigned long long i = 0; i < count; i++) {
+            unsigned long long j = i + (randomULong() % (field_count - i));
+            unsigned long long tmp = idx[i];
+            idx[i] = idx[j];
+            idx[j] = tmp;
         }
 
-        for (unsigned long i = 0; i < count; i++) {
-            int fi = idx[i];
+        for (unsigned long long i = 0; i < count; i++) {
+            unsigned long long fi = idx[i];
             if (withvalues && c->resp > 2)
                 addReplyArrayLen(c, 2);
             addReplyBulkCBuffer(c, tmpl->fields[fi], sdslen(tmpl->fields[fi]));
