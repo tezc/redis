@@ -2489,11 +2489,10 @@ struct redisServer {
     size_t hash_max_listpack_entries;
     size_t hash_max_listpack_value;
     /* Hash template config */
-    size_t hash_min_template_entries; /* Auto-convert regular hashes (HSET, RDB
-                                       * load) to template encoding at this
-                                       * field count. 0 disables auto-convert;
-                                       * templates are created only via HIMPORT
-                                       * SET. */
+    size_t hash_min_template_entries; /* Field-count threshold at which regular
+                                       * hashes (from HSET or RDB load) are
+                                       * auto-converted to template encoding.
+                                       * 0 disables auto-convert. */
     int hash_template_mask_encoding; /* TEMPORARY (remove before merge): when set,
                                       * OBJECT ENCODING / DEBUG OBJECT report the
                                       * legacy listpack/hashtable name for
@@ -3983,6 +3982,14 @@ void hashTypeCurrentFromListpack(hashTypeIterator *hi, int what,
                                  uint64_t *expireTime);
 void hashTypeCurrentFromHashTable(hashTypeIterator *hi, int what, char **str,
                                   size_t *len, uint64_t *expireTime);
+void hashTypeCurrentFromTmplLp(hashTypeIterator *hi, int what,
+                               unsigned char **vstr,
+                               unsigned int *vlen,
+                               long long *vll,
+                               uint64_t *expireTime);
+void hashTypeCurrentFromTmplArray(hashTypeIterator *hi, int what,
+                                  char **str, size_t *len,
+                                  uint64_t *expireTime);
 void hashTypeCurrentObject(hashTypeIterator *hi, int what, unsigned char **vstr,
                            unsigned int *vlen, long long *vll, uint64_t *expireTime);
 sds hashTypeCurrentObjectNewSds(hashTypeIterator *hi, int what);

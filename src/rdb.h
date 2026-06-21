@@ -82,9 +82,9 @@
 #define RDB_TYPE_STREAM_LISTPACKS_5 27        /* Stream with XNACK support (NACKed entries) */
 #define RDB_TYPE_ARRAY 28                     /* Array data type */
 #define RDB_TYPE_HASH_TMPL_LP 29              /* TMPL_LP, self-contained (DUMP): [count][f0]...[fN-1][lp_blob] */
-#define RDB_TYPE_HASH_TMPL_REF_LP 30          /* TMPL_LP, with template ref (RDB save): raw lp blob, first entry is tid */
+#define RDB_TYPE_HASH_TMPL_LP_REF 30          /* TMPL_LP, with template ref (RDB save): raw lp blob, first entry is tid */
 #define RDB_TYPE_HASH_TMPL_ARRAY 31           /* TMPL_ARRAY, self-contained (DUMP): [count][f0][v0]...[fN-1][vN-1] */
-#define RDB_TYPE_HASH_TMPL_REF_ARRAY 32       /* TMPL_ARRAY, with template ref (RDB save): [tid][v0]...[vN-1] */
+#define RDB_TYPE_HASH_TMPL_ARRAY_REF 32       /* TMPL_ARRAY, with template ref (RDB save): [tid][v0]...[vN-1] */
 #ifdef ENABLE_GCRA
 #define RDB_TYPE_GCRA 33                      /* GCRA object */
 #endif

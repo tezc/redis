@@ -2305,11 +2305,11 @@ void hashTypeCurrentFromHashTable(hashTypeIterator *hi, int what, char **str, si
  * encoded as a template-listpack. Prototype is similar to
  * `hashTypeCurrentFromListpack`: field name comes from the shared template,
  * the value from the values listpack. */
-static void hashTypeCurrentFromTmplLp(hashTypeIterator *hi, int what,
-                                      unsigned char **vstr,
-                                      unsigned int *vlen,
-                                      long long *vll,
-                                      uint64_t *expireTime)
+void hashTypeCurrentFromTmplLp(hashTypeIterator *hi, int what,
+                               unsigned char **vstr,
+                               unsigned int *vlen,
+                               long long *vll,
+                               uint64_t *expireTime)
 {
     serverAssert(hi->encoding == OBJ_ENCODING_TMPL_LP);
 
@@ -2330,9 +2330,9 @@ static void hashTypeCurrentFromTmplLp(hashTypeIterator *hi, int what,
  * `hashTypeCurrentFromHashTable`: field name comes from the shared template,
  * the value from the sds array. Uses size_t length so large (sds) values are
  * not truncated. */
-static void hashTypeCurrentFromTmplArray(hashTypeIterator *hi, int what,
-                                         char **str, size_t *len,
-                                         uint64_t *expireTime)
+void hashTypeCurrentFromTmplArray(hashTypeIterator *hi, int what,
+                                  char **str, size_t *len,
+                                  uint64_t *expireTime)
 {
     serverAssert(hi->encoding == OBJ_ENCODING_TMPL_ARRAY);
 

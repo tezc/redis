@@ -339,11 +339,13 @@ start_server {tags {"dump"}} {
             assert {$ret eq {OK}}
             assert {[$first exists lp_key] == 0}
             assert {[$first exists array_key] == 0}
-            # Both keys arrive with every field/value intact (sorted field order).
+            
+            # verify both keys are migrated with the correct content and encoding
             assert_equal {age 25 name alice email alice@example.com} [$second hgetall lp_key]
             assert_equal "f1 v1 f2 [string repeat x 100] f3 v3" [$second hgetall array_key]
             assert_equal {template-listpack} [$second object encoding lp_key]
             assert_equal {template-array} [$second object encoding array_key]
+            
             # The two distinct field sets must rebuild as two templates holding
             # one key each on the destination registry.
             assert_equal 2 [status $second hash_templates]

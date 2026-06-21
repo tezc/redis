@@ -2088,15 +2088,40 @@ int rewriteSortedSetObject(rio *r, robj *key, robj *o) {
  *
  * The function returns 0 on error, non-zero on success. */
 static int rioWriteHashIteratorCursor(rio *r, hashTypeIterator *hi, int what) {
-    unsigned char *vstr = NULL;
-    unsigned int vlen = UINT_MAX;
-    long long vll = LLONG_MAX;
+    if ((hi->encoding == OBJ_ENCODING_LISTPACK) || (hi->encoding == OBJ_ENCODING_LISTPACK_EX)) {
+        unsigned char *vstr = NULL;
+        unsigned int vlen = UINT_MAX;
+        long long vll = LLONG_MAX;
 
-    hashTypeCurrentObject(hi, what, &vstr, &vlen, &vll, NULL);
-    if (vstr)
-        return rioWriteBulkString(r, (char*)vstr, vlen);
-    else
-        return rioWriteBulkLongLong(r, vll);
+        hashTypeCurrentFromListpack(hi, what, &vstr, &vlen, &vll, NULL);
+        if (vstr)
+            return rioWriteBulkString(r, (char*)vstr, vlen);
+        else
+            return rioWriteBulkLongLong(r, vll);
+    } else if (hi->encoding == OBJ_ENCODING_HT) {
+        char *str;
+        size_t len;
+        hashTypeCurrentFromHashTable(hi, what, &str, &len, NULL);
+        return rioWriteBulkString(r, str, len);
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_LP) {
+        unsigned char *vstr = NULL;
+        unsigned int vlen = UINT_MAX;
+        long long vll = LLONG_MAX;
+
+        hashTypeCurrentFromTmplLp(hi, what, &vstr, &vlen, &vll, NULL);
+        if (vstr)
+            return rioWriteBulkString(r, (char*)vstr, vlen);
+        else
+            return rioWriteBulkLongLong(r, vll);
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        char *str;
+        size_t len;
+        hashTypeCurrentFromTmplArray(hi, what, &str, &len, NULL);
+        return rioWriteBulkString(r, str, len);
+    }
+
+    serverPanic("Unknown hash encoding");
+    return 0;
 }
 
 /* Emit the commands needed to rebuild a hash object.

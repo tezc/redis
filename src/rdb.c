@@ -725,8 +725,8 @@ int rdbSaveObjectType(rio *rdb, robj *o) {
              * field names. */
             if (server.htemplates->rdb_saving) {
                 return rdbSaveType(rdb, o->encoding == OBJ_ENCODING_TMPL_LP ?
-                                                            RDB_TYPE_HASH_TMPL_REF_LP :
-                                                            RDB_TYPE_HASH_TMPL_REF_ARRAY);
+                                                            RDB_TYPE_HASH_TMPL_LP_REF :
+                                                            RDB_TYPE_HASH_TMPL_ARRAY_REF);
             } else {
                 return rdbSaveType(rdb, o->encoding == OBJ_ENCODING_TMPL_LP ?
                                                             RDB_TYPE_HASH_TMPL_LP :
@@ -3126,7 +3126,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         hashTemplate *tmpl = hashTemplateGetOrCreate(fields, len);
         rdbFreeSdsArray(fields, len);
         o = rdbFinalizeTmplLp(lp, tmpl);
-    } else if (rdbtype == RDB_TYPE_HASH_TMPL_REF_LP) {
+    } else if (rdbtype == RDB_TYPE_HASH_TMPL_LP_REF) {
         /* TMPL_LP compact: raw listpack blob. The first listpack entry is the
          * source-side template ID, which we map to our local registry and
          * swap in-place. */
@@ -3199,7 +3199,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         o = createHashObjectFromTemplate(tmpl, values);
         rdbFreeSdsArray(fields, len);
         rdbFreeSdsArray(values, len);
-    } else if (rdbtype == RDB_TYPE_HASH_TMPL_REF_ARRAY) {
+    } else if (rdbtype == RDB_TYPE_HASH_TMPL_ARRAY_REF) {
         /* TMPL_ARRAY REF form: [template_id][value1][value2]... */
         uint64_t template_id;
         if ((template_id = rdbLoadLen(rdb, NULL)) == RDB_LENERR)
@@ -4954,13 +4954,10 @@ eoferr:
     return C_ERR;
 }
 
-/* Public entry point: load the RDB, then always release the load-time hash
- * template registry (rdb_tmpls) regardless of success or failure. Every load
- * path funnels through here -- disk load and AOF preamble via rdbLoadRio(),
- * diskless replication by calling this directly -- so doing the cleanup here
- * (rather than in any single caller) guarantees rdb_tmpls never leaks. If it
- * leaks, the stale entries hold template hold-refs forever and the next full
- * resync aborts with "Duplicate hash template ID", terminating the replica. */
+/* Public entry point for all load paths, so the load-time template registry
+ * (rdb_tmpls) is always released here regardless of success or failure. A leak
+ * would keep stale hold-refs and abort the next resync with "Duplicate hash
+ * template ID". */
 int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadingCtx *rdb_loading_ctx) {
     int retval = rdbLoadRioWithLoadingCtxInternal(rdb, rdbflags, rsi, rdb_loading_ctx);
     rdbClearHashTemplates();

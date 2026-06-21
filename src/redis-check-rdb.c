@@ -90,9 +90,9 @@ char *rdb_type_string[] = {
     "stream-v5",
     "array",
     "hash-tmpl-lp",
-    "hash-tmpl-ref-lp",
+    "hash-tmpl-lp-ref",
     "hash-tmpl-array",
-    "hash-tmpl-ref-array",
+    "hash-tmpl-array-ref",
 #ifdef ENABLE_GCRA
     "gcra",
 #endif
@@ -456,7 +456,7 @@ int redis_check_rdb_main(int argc, char **argv, FILE *fp) {
     if (shared.integers[0] == NULL)
         createSharedObjects();
     /* The hash template registry must exist so that template-referencing
-     * keys can be loaded. Idempotent if already initialized. */
+     * keys can be loaded. */
     hashTemplatesInit();
     server.loading_process_events_interval_bytes = 0;
     server.sanitize_dump_payload = SANITIZE_DUMP_YES;
