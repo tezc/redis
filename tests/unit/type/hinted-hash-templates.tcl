@@ -1075,7 +1075,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 # RDB SAVE/LOAD tests (require server restart)
 # ============================================================
 
-start_server {tags {"hash" "hinted-hash-templates" "rdb" "needs:debug"}
+start_server {tags {"hash" "hinted-hash-templates" "rdb" "needs:debug" "cluster:skip"}
               overrides {hash-min-template-entries 0}} {
     if {$encoding eq "template-array"} {
         r config set hash-max-listpack-entries 0
@@ -1819,7 +1819,7 @@ start_server {tags {"hash" "hinted-hash-templates" "memory" "needs:debug" "clust
 # illegal, mirroring the duplicate-field checks done for regular
 # hashes. Out-of-order or duplicate fields must be rejected.
 # ============================================================
-start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
+start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0
                          sanitize-dump-payload yes
                          loglevel debug}} {

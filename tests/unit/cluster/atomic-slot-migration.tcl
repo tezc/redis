@@ -715,7 +715,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         
         # verify the encoding and data of template-array
         assert_equal {template-array} [R 0 object encoding $ar_key]
-        assert_equal {f1 v1 f2 [string repeat x 100] f3 v3} [R 0 hgetall $ar_key]
+        assert_equal "f1 v1 f2 [string repeat x 100] f3 v3" [R 0 hgetall $ar_key]
 
         # migrate slot 0-100 back to R 1
         R 1 CLUSTER MIGRATION IMPORT 0 100

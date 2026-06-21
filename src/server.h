@@ -2500,7 +2500,7 @@ struct redisServer {
                                       * template-*, so the existing hash test
                                       * suite passes with templates enabled. */
 
-    struct hashTemplates *htemplates;               /* Global template registry */
+    struct hashTemplates *htemplates;   /* Global template registry */
     size_t set_max_intset_entries;
     size_t set_max_listpack_entries;
     size_t set_max_listpack_value;
@@ -3856,10 +3856,10 @@ typedef struct listpackEx {
 } listpackEx;
 
 /*-----------------------------------------------------------------------------
- * Hash with shared template (Hinted Hash Templates) - OBJ_ENCODING_TMPL_LP/AR
+ * Hash with shared template (Hinted Hash Templates) - OBJ_ENCODING_TMPL_LP/ARRAY
  *
  * These encodings store hash values without repeating field names. Instead,
- * field names are stored once in a shared template structure, and multiple
+ * field names are stored once in a shared template structure and multiple
  * hash keys can reference the same template.
  *----------------------------------------------------------------------------*/
 
@@ -3870,12 +3870,15 @@ typedef struct hashTemplate {
                           * entry in TMPL_LP (varint, ~1-2 bytes) instead of an
                           * 8-byte template pointer, and written by RDB save
                           * to identify the template. */
-    uint64_t hash;       /* Pre-computed hash of sorted field names. */
+    uint64_t hash;       /* Pre-computed commutative hash of the field-name set
+                          * (order-independent; see computeFieldsHash). */
     redisAtomic unsigned long long key_refcount; /* Number of hash keys. Atomic:
                           * a BIO lazyfree thread may decrement it directly. Only
                           * the zero-transition enqueues the template id for the
-                          * main thread to reclaim (see hashTemplates.reclaim_ids). */
-    unsigned long long hold_refcount; /* Non-key holders: clients and RDB load. */
+                          * main thread to reclaim. */
+    unsigned long long hold_refcount; /* Non-key holders (a client's HIMPORT
+                          * PREPARE fieldset, RDB load); keeps a template alive
+                          * while it has no keys yet but is still referenced. */
     unsigned long long field_count; /* Number of fields in the template. */
     size_t mem_size;     /* Cached own allocation footprint: the struct, the
                           * fields array, and the duplicated field-name SDS.
@@ -3883,11 +3886,10 @@ typedef struct hashTemplate {
                           * a changed field set creates a new template). Used to
                           * attribute a holder's share to client memory. */
     sds *fields;         /* Ordered array of field names (sorted, owned). */
-    robj **propargv;     /* Lazy-built propagation array, layout:
-                            [hsetc, NULL_key, f0, f1, ..., fN-1,
-                                              NULL_v0, NULL_v1, ..., NULL_vN-1].
-                            Field slots own field robjs; key and value slots
-                            are filled per HIMPORT SET / HSETC call.  */
+    robj **propargv;     /* Lazy-built argv used only to propagate HIMPORT SET
+                          * (as HSETC). Layout: [hsetc, NULL_key, <fields>,
+                          * <null-values>]; field slots own field robjs, key and
+                          * value slots are filled per call. */
 } hashTemplate;
 
 /* Global registry for hash templates. */
@@ -3895,17 +3897,13 @@ typedef struct hashTemplates {
     dict *registry;             /* field set -> template lookup */
     hashTemplate **by_id;       /* ID -> template lookup */
     size_t by_id_cap;           /* Allocated slots in by_id array. */
-    uint64_t *reclaim_ids;      /* Queue of template IDs whose key_refcount hit
-                                 * zero in a BIO lazyfree thread (the main thread
-                                 * frees inline). The main thread drains it in
-                                 * hashTemplateDrainPendingFree, re-validates that
-                                 * the template is still unreferenced, and only
-                                 * then removes it from the registry. Bounded by
-                                 * the number of distinct templates reaching zero
-                                 * between drains, not by the number of keys. */
-    size_t reclaim_count;       /* Used slots in reclaim_ids. */
-    size_t reclaim_cap;         /* Allocated slots in reclaim_ids. */
-    pthread_mutex_t lock;       /* Sole cross-thread point: guards the reclaim_ids
+    uint64_t *pending_free_ids; /* Ids of templates that hit zero refs on a BIO
+                                 * lazyfree thread which can't touch the registry
+                                 * itself. The main thread later drains this in
+                                 * hashTemplateDrainPendingFree and frees them. */
+    size_t pending_free_count;  /* Used slots in pending_free_ids. */
+    size_t pending_free_cap;    /* Allocated slots in pending_free_ids. */
+    pthread_mutex_t lock;       /* Sole cross-thread point: guards the pending_free_ids
                                  * queue and the by_id array (BIO resolves ids to
                                  * templates under it; the main thread grows/recycles
                                  * by_id under it). The registry, hold_refcount and

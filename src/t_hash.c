@@ -268,46 +268,67 @@ static void hashDictWithExpireOnRelease(dict *d) {
 }
 
 /*-----------------------------------------------------------------------------
- * listpackEx functions
- *----------------------------------------------------------------------------*/
-/*
- * If any of hash field expiration command is called on a listpack hash object
- * for the first time, we convert it to OBJ_ENCODING_LISTPACK_EX encoding.
- * We allocate "struct listpackEx" which holds listpack pointer and expiry
- * metadata. In the listpack string, we append another TTL entry for each field
- * value pair. From now on, listpack will have triplets in it: field-value-ttl.
- * If TTL is not set for a field, we store 'zero' as the TTL value. 'zero' is
- * encoded as two bytes in the listpack. Memory overhead of a non-existing TTL
- * will be two bytes per field.
+ * Hash template registry (Hinted Hash Templates) - OBJ_ENCODING_TMPL_LP / TMPL_ARRAY
  *
- * Fields in the listpack will be ordered by TTL. Field with the smallest expiry
- * time will be the first item. Fields without TTL will be at the end of the
- * listpack. This way, it is easier/faster to find expired items.
- */
-
-#define HASH_LP_NO_TTL 0
-
-struct listpackEx *listpackExCreate(void) {
-    listpackEx *lpt = zcalloc(sizeof(*lpt));
-    lpt->meta.trash = 1;
-    lpt->lp = NULL;
-    return lpt;
-}
-
-static void listpackExFree(listpackEx *lpt) {
-    lpFree(lpt->lp);
-    zfree(lpt);
-}
+ * Many hashes often share the exact same set of field names (e.g. rows of one
+ * "schema"). Instead of repeating the field names in every key, a single
+ * immutable template stores the names once and every matching hash references
+ * it, keeping only its own values. This is a memory optimization aimed at large
+ * populations of hashes with a stable, identical field set.
+ *
+ * A template is identified by its exact set of field names, and is never
+ * changed once created. So adding a field (HSET) or removing one (HDEL) does
+ * not edit the template: the hash just switches to the template for the new
+ * field set, reusing it if it already exists or creating it otherwise (see
+ * hashTemplateGetOrCreateWithHash). This makes changing the field set more
+ * costly than on a plain hash, so the feature is meant for many hashes that
+ * keep the same fields mostly stable.
+ *
+ * Fields are kept sorted inside the template by sdscmplen (length, then bytes;
+ * see hashTemplateValidateFields). A field lookup binary-searches the sorted
+ * names for its index (hashTemplateFieldIndex), then reads the value stored at
+ * that same index.
+ *
+ * Two value encodings reference a template:
+ *   OBJ_ENCODING_TMPL_LP    - o->ptr is a listpack laid out as
+ *                             [template_id (varint)][v0][v1]...[vN-1]. Values
+ *                             are packed inline and the leading id maps back to
+ *                             the template. Compact, used for small hashes.
+ *                             Lookup: lpSeek(lp, idx + 1) (the +1 skips the id).
+ *   OBJ_ENCODING_TMPL_ARRAY - o->ptr is a hashTemplateArray { tmpl; sds
+ *                             values[] } holding the values in template field
+ *                             order. Used once listpack limits are exceeded (or
+ *                             there are many fields). Lookup: values[idx].
+ *
+ * Registry: htemplates->registry maps a sorted field set to its template, and
+ * htemplates->by_id maps a small integer id to the template. TMPL_LP stores
+ * this id inline rather than an 8-byte pointer, so a key's reference to its
+ * template can be as little as ~2 bytes. RDB save uses it the same way: each
+ * template is written once and every key just references it by this id.
+ *
+ * Lifetime and threading: each referencing key holds a key_refcount to its
+ * template and a client can also hold a hold_refcount (e.g. a fieldset
+ * registered with HIMPORT PREPARE). A single template may back a huge number of
+ * keys and those keys are often freed in bulk in the background by a BIO
+ * lazyfree thread (e.g. background trim after ASM). The whole refcount scheme
+ * exists to make that safe: key_refcount is atomic so a background thread can
+ * drop a key's ref directly and, since a BIO thread must not touch the registry,
+ * the decrement that brings it to zero does not free the template inline - it parks
+ * the id on the pending_free_ids queue (under the registry lock) for the main thread
+ * to drain (hashTemplateDrainPendingFree). A template's id, fields and
+ * field_count are immutable for its lifetime, so they are safe to read off the
+ * main thread while a key-ref is held.
+ *----------------------------------------------------------------------------*/
 
 #define HASH_TMPL_STACK_ENTRIES 128
 
-/* Global template registry - also accessible via htemplates */
+/* Global template registry; file-local alias of server.htemplates. */
 static hashTemplates *htemplates = NULL;
 
 /* Allocate the smallest available template ID and register in by_id.
  * Main-thread only (template creation), but a BIO lazyfree thread may read by_id
  * concurrently (hashTemplateLpFree), so the array is grown/written under the
- * lock that also guards reclaim_ids. */
+ * lock that also guards pending_free_ids. */
 static uint64_t allocateTemplateId(hashTemplate *tmpl) {
     pthread_mutex_lock(&htemplates->lock);
     /* Scan for first free slot. TODO: need a faster way? */
@@ -375,8 +396,10 @@ static uint64_t templateRegistryHashFunc(const void *key) {
     return tmpl->hash;
 }
 
-static int templateRegistryKeyCompare(dictCmpCache *cache, const void *k1,
-                                       const void *k2) {
+static int templateRegistryKeyCompare(dictCmpCache *cache, 
+                                      const void *k1,
+                                      const void *k2)
+{
     UNUSED(cache);
     const hashTemplate *t1 = k1;
     const hashTemplate *t2 = k2;
@@ -423,8 +446,7 @@ void hashTemplatesInit(void) {
     server.htemplates = htemplates;
 }
 
-/* Create a new hash tmpl (internal, not from registry).
- * fields must be pre-sorted. */
+/* Create a new hash tmpl, fields must be pre-sorted. */
 static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsigned long long field_count) {
     hashTemplate *tmpl = zmalloc(sizeof(*tmpl));
     tmpl->hash = hash;
@@ -432,8 +454,9 @@ static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsi
     atomicSet(tmpl->key_refcount, 0);
     tmpl->field_count = field_count;
     tmpl->fields = zmalloc(sizeof(sds) * field_count);
-    tmpl->propargv = NULL; /* Lazy: built on first HIMPORT SET / HSETC. */
+    tmpl->propargv = NULL; /* Lazy built on first HIMPORT SET. */
     tmpl->mem_size = sizeof(*tmpl) + sizeof(sds) * field_count;
+
     for (unsigned long long i = 0; i < field_count; i++) {
         tmpl->fields[i] = sdsdup(fields[i]);
         tmpl->mem_size += sdsZmallocSize(tmpl->fields[i]);
@@ -443,15 +466,16 @@ static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsi
     return tmpl;
 }
 
-/* Get or create a tmpl. fields must be pre-sorted.
- * If hash is 0, it will be computed from fields. */
+/* Get or create a template (computes the fields-hash). fields must be pre-sorted. */
 hashTemplate *hashTemplateGetOrCreate(sds *fields, unsigned long long field_count) {
     return hashTemplateGetOrCreateWithHash(
         computeFieldsHash(fields, field_count), fields, field_count);
 }
 
-/* Get or create a tmpl with pre-computed hash.
- * Used for incremental hash updates (HDEL/HSET). */
+/* Get or create a template, reusing a fields-hash the caller already has. The
+ * fields-hash is commutative (a sum of per-field hashes), so an HSET/HDEL that
+ * adds or removes one field can update it in O(1) (hash +/- that field's hash)
+ * and pass it here instead of rescanning every field. fields must be pre-sorted. */
 hashTemplate *hashTemplateGetOrCreateWithHash(uint64_t hash, sds *fields,
                                               unsigned long long field_count) {
     /* Fields must be strictly ascending; catch unsorted/dup sets in test builds. */
@@ -475,31 +499,28 @@ hashTemplate *hashTemplateGetOrCreateWithHash(uint64_t hash, sds *fields,
  * thread, but the counter is atomic because a BIO lazyfree thread may decrement
  * a (different key of the) same template concurrently. */
 void hashTemplateIncrKeyRef(hashTemplate *tmpl) {
-    serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
+    debugServerAssert(pthread_equal(pthread_self(), server.main_thread_id));
     atomicIncr(tmpl->key_refcount, 1);
     atomicIncr(htemplates->total_key_refs, 1);
 }
 
 /* Increment hold_refcount while non-key state references the template. */
 void hashTemplateIncrHoldRef(hashTemplate *tmpl) {
-    serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
+    debugServerAssert(pthread_equal(pthread_self(), server.main_thread_id));
     tmpl->hold_refcount++;
 }
 
-/* Enqueue a template id for the main thread to reclaim. Pushed by whichever
- * thread brought the template to a fully-unreferenced state; the actual removal
- * happens in hashTemplateDrainPendingFree after re-validating the refcounts. The
- * queue holds at most one live id per template between drains, so it is bounded
- * by the number of templates, not the number of keys freed. */
-static void hashTemplateEnqueueReclaim(uint64_t id) {
+/* Queue a template id whose refcount just hit zero, so the main thread can free
+ * it later in hashTemplateDrainPendingFree. */
+static void hashTemplateEnqueuePendingFree(uint64_t id) {
     pthread_mutex_lock(&htemplates->lock);
-    if (htemplates->reclaim_count == htemplates->reclaim_cap) {
-        htemplates->reclaim_cap = htemplates->reclaim_cap ?
-            htemplates->reclaim_cap * 2 : 16;
-        htemplates->reclaim_ids = zrealloc(htemplates->reclaim_ids,
-            sizeof(*htemplates->reclaim_ids) * htemplates->reclaim_cap);
+    if (htemplates->pending_free_count == htemplates->pending_free_cap) {
+        htemplates->pending_free_cap = htemplates->pending_free_cap ?
+            htemplates->pending_free_cap * 2 : 16;
+        htemplates->pending_free_ids = zrealloc(htemplates->pending_free_ids,
+            sizeof(*htemplates->pending_free_ids) * htemplates->pending_free_cap);
     }
-    htemplates->reclaim_ids[htemplates->reclaim_count++] = id;
+    htemplates->pending_free_ids[htemplates->pending_free_count++] = id;
     pthread_mutex_unlock(&htemplates->lock);
 }
 
@@ -507,7 +528,7 @@ static void hashTemplateEnqueueReclaim(uint64_t id) {
  * hold_refcount and propargv need no locking. When the last non-key holder is
  * gone and no key references remain either, free the template inline. */
 void hashTemplateDecrHoldRef(hashTemplate *tmpl) {
-    serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
+    debugServerAssert(pthread_equal(pthread_self(), server.main_thread_id));
     serverAssert(tmpl->hold_refcount > 0);
     tmpl->hold_refcount--;
     if (tmpl->hold_refcount > 0) return;
@@ -526,47 +547,39 @@ void hashTemplateDecrHoldRef(hashTemplate *tmpl) {
     if (key_refs == 0) dictDelete(htemplates->registry, tmpl);
 }
 
-/* Decrement key_refcount. Thread-safe: called from the hash object-free paths,
- * which may run on the main thread or in a BIO lazyfree thread.
- *
- * On the main thread the template is freed inline once it is fully unreferenced,
- * exactly like before, so transient templates produced by incremental field
- * updates never accumulate in the registry. In a BIO lazyfree thread the registry
- * must not be mutated, so only the decrement that brings key_refcount to zero
- * enqueues the template id for the main thread to reclaim - bounding the queue by
- * the number of templates, not the number of keys freed.
- *
- * tmpl->id is read before the decrement: once key_refcount hits zero the main
- * thread may free the struct concurrently (via DecrHoldRef), so the BIO path must
- * not dereference tmpl afterwards. */
+/* Decrement key_refcount when freeing a hash (main thread or BIO lazyfree
+ * thread). When it reaches zero the main thread frees the template inline, while
+ * a BIO thread just queues the id to reclaim later (it must not touch the
+ * registry). We grab tmpl->id before the decrement because once the count hits
+ * zero another thread may already have freed tmpl, so we can't read it after. */
 void hashTemplateDecrKeyRef(hashTemplate *tmpl) {
     uint64_t id = tmpl->id;
     unsigned long long new_count;
+    
     atomicDecr(htemplates->total_key_refs, 1);
     atomicIncrGet(tmpl->key_refcount, new_count, -1);
     serverAssert(new_count != (unsigned long long)-1); /* underflow guard */
+    
     if (new_count != 0) return;
-
     if (pthread_equal(pthread_self(), server.main_thread_id)) {
         /* Safe to touch tmpl: only the main thread frees templates, and no key
          * ref remains for a BIO thread to be racing on. */
         if (tmpl->hold_refcount == 0) dictDelete(htemplates->registry, tmpl);
     } else {
-        hashTemplateEnqueueReclaim(id);
+        hashTemplateEnqueuePendingFree(id);
     }
 }
 
-/* Drain queued template reclaims. Main-thread only (serverCron). Each queued id
- * is re-validated: a template is removed from the registry only if it is still
- * fully unreferenced. Duplicate or stale ids (already freed, or revived) resolve
- * to NULL or fail the re-check and are skipped, so the pass is idempotent. */
+/* Free the templates queued by BIO threads. Main-thread only (serverCron). An id
+ * is freed only if its template still has no references; anything already freed
+ * or referenced again in the meantime is skipped. */
 void hashTemplateDrainPendingFree(void) {
     pthread_mutex_lock(&htemplates->lock);
-    uint64_t *queue = htemplates->reclaim_ids;
-    size_t count = htemplates->reclaim_count;
-    htemplates->reclaim_ids = NULL;
-    htemplates->reclaim_count = 0;
-    htemplates->reclaim_cap = 0;
+    uint64_t *queue = htemplates->pending_free_ids;
+    size_t count = htemplates->pending_free_count;
+    htemplates->pending_free_ids = NULL;
+    htemplates->pending_free_count = 0;
+    htemplates->pending_free_cap = 0;
     pthread_mutex_unlock(&htemplates->lock);
 
     for (size_t i = 0; i < count; i++) {
@@ -827,6 +840,38 @@ robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values) {
         o->encoding = OBJ_ENCODING_TMPL_ARRAY;
     }
     return o;
+}
+
+/*-----------------------------------------------------------------------------
+ * listpackEx functions
+ *----------------------------------------------------------------------------*/
+/*
+ * If any of hash field expiration command is called on a listpack hash object
+ * for the first time, we convert it to OBJ_ENCODING_LISTPACK_EX encoding.
+ * We allocate "struct listpackEx" which holds listpack pointer and expiry
+ * metadata. In the listpack string, we append another TTL entry for each field
+ * value pair. From now on, listpack will have triplets in it: field-value-ttl.
+ * If TTL is not set for a field, we store 'zero' as the TTL value. 'zero' is
+ * encoded as two bytes in the listpack. Memory overhead of a non-existing TTL
+ * will be two bytes per field.
+ *
+ * Fields in the listpack will be ordered by TTL. Field with the smallest expiry
+ * time will be the first item. Fields without TTL will be at the end of the
+ * listpack. This way, it is easier/faster to find expired items.
+ */
+
+#define HASH_LP_NO_TTL 0
+
+struct listpackEx *listpackExCreate(void) {
+    listpackEx *lpt = zcalloc(sizeof(*lpt));
+    lpt->meta.trash = 1;
+    lpt->lp = NULL;
+    return lpt;
+}
+
+static void listpackExFree(listpackEx *lpt) {
+    lpFree(lpt->lp);
+    zfree(lpt);
 }
 
 struct lpFingArgs {
@@ -1481,11 +1526,10 @@ int hashTypeExists(redisDb *db, kvobj *o, sds field, int hfeFlags, int *isHashDe
 #define HASH_SET_TAKE_FIELD  (1<<0)
 #define HASH_SET_TAKE_VALUE  (1<<1)
 #define HASH_SET_KEEP_TTL (1<<2)
-/* Suppress the per-field auto-conversion to template in hashTypeSet's cleanup.
- * Multi-field callers set this and instead call hashTypeTryConvertToTemplate
- * once after their loop, avoiding O(N^2) churn from rebuilding the template on
- * every field added past the threshold. */
-#define HASH_SET_NO_CONVERT (1<<3)
+/* Skip hashTypeSet's auto-conversion to template. A command adding N fields sets
+ * this and converts once at the end instead, so the template is created a single
+ * time rather than rebuilt on every field added past the threshold. */
+#define HASH_SET_NO_TEMPLATE_CONVERT (1<<3)
 
 static_assert(HASH_SET_TAKE_VALUE == ENTRY_TAKE_VALUE, "ENTRY_TAKE_VALUE must match HASH_SET_TAKE_VALUE");
 
@@ -1718,9 +1762,9 @@ cleanup:
     if (flags & HASH_SET_TAKE_VALUE && value) sdsfree(value);
 
     /* Auto-convert to template if threshold met and not already template.
-     * Skipped when HASH_SET_NO_CONVERT is set: multi-field callers defer this
-     * to a single post-loop conversion to avoid per-field churn. */
-    if (!update && !(flags & HASH_SET_NO_CONVERT) &&
+     * Skipped when HASH_SET_NO_TEMPLATE_CONVERT is set: multi-field callers defer
+     * this to a single post-loop conversion to avoid per-field churn. */
+    if (!update && !(flags & HASH_SET_NO_TEMPLATE_CONVERT) &&
         server.hash_min_template_entries > 0 &&
         (o->encoding == OBJ_ENCODING_LISTPACK || o->encoding == OBJ_ENCODING_HT))
     {
@@ -2301,10 +2345,7 @@ void hashTypeCurrentFromHashTable(hashTypeIterator *hi, int what, char **str, si
         *expireTime = hi->expire_time;
 }
 
-/* Get the field or value at iterator cursor, for an iterator on a hash value
- * encoded as a template-listpack. Prototype is similar to
- * `hashTypeCurrentFromListpack`: field name comes from the shared template,
- * the value from the values listpack. */
+/* Get the field or value at iterator cursor */
 void hashTypeCurrentFromTmplLp(hashTypeIterator *hi, int what,
                                unsigned char **vstr,
                                unsigned int *vlen,
@@ -2325,11 +2366,7 @@ void hashTypeCurrentFromTmplLp(hashTypeIterator *hi, int what,
         *expireTime = EB_EXPIRE_TIME_INVALID;
 }
 
-/* Get the field or value at iterator cursor, for an iterator on a hash value
- * encoded as a template-array. Prototype is similar to
- * `hashTypeCurrentFromHashTable`: field name comes from the shared template,
- * the value from the sds array. Uses size_t length so large (sds) values are
- * not truncated. */
+/* Get the field or value at iterator cursor */
 void hashTypeCurrentFromTmplArray(hashTypeIterator *hi, int what,
                                   char **str, size_t *len,
                                   uint64_t *expireTime)
@@ -2570,10 +2607,8 @@ static void hashTypeConvertTmplGeneric(robj *o, int target_enc, int with_hfe) {
  * 'with_hfe' applies HFE metadata to the HT fallback (LISTPACK_EX carries TTL
  * slots inline, so the listpack path needs no extra flag). */
 static void hashTypeConvertTmplToListpackOrHT(robj *o, int lp_enc, int with_hfe) {
-    if (hashTypeCanConvertTmplToListpack(o))
-        hashTypeConvertTmplGeneric(o, lp_enc, 0);
-    else
-        hashTypeConvertTmplGeneric(o, OBJ_ENCODING_HT, with_hfe);
+    int target_enc = hashTypeCanConvertTmplToListpack(o) ? lp_enc : OBJ_ENCODING_HT;
+    hashTypeConvertTmplGeneric(o, target_enc, with_hfe);
 }
 
 /* TMPL_LP -> TMPL_ARRAY */
@@ -3349,10 +3384,10 @@ void hsetCommand(client *c) {
 
     for (i = 2; i < c->argc; i += 2)
         created += !hashTypeSet(c->db, kv, c->argv[i]->ptr, c->argv[i+1]->ptr,
-                               HASH_SET_COPY | HASH_SET_NO_CONVERT);
+                               HASH_SET_COPY | HASH_SET_NO_TEMPLATE_CONVERT);
 
     /* Convert to template once after all fields are set, rather than per-field,
-     * to keep multi-field HSET/HMSET O(N) instead of O(N^2). */
+     * to avoid template lookup for each field set. */
     if (server.hash_min_template_entries > 0 &&
         (kv->encoding == OBJ_ENCODING_LISTPACK || kv->encoding == OBJ_ENCODING_HT))
     {
@@ -3390,6 +3425,10 @@ void hsetCommand(client *c) {
 /* Per-client fieldset: a session-local binding from a user-chosen name to a
  * shared hashTemplate, populated by HIMPORT PREPARE and consumed by HIMPORT
  * SET. Exists to make HIMPORT SET cheap on the hot write path.
+ *
+ * With HIMPORT PREPARE the user hints that many keys with this same field set
+ * are coming, so the server resolves them to one shared template up front and
+ * stores every such key in template encoding automatically.
  *
  * HIMPORT PREPARE does the expensive work once:
  *   - sorts the field names
@@ -3528,15 +3567,11 @@ int64_t himportFieldsetFreeList(client *c) {
     return removed;
 }
 
-/* Per-client memory overhead of this client's HIMPORT fieldset bindings.
- * Accounts client-owned allocations (the list, its reserved array, and each
- * fieldset's name and value_order map) plus this client's share of the shared
- * templates it pins via hold-ref. The template's own footprint (mem_size) is
- * split across all its current holders (hold-refs and key-refs): a template
- * referenced only by this client's PREPARE is attributed in full, while one
- * also backed by hash keys or shared with other clients contributes only a
- * fraction. This keeps HIMPORT PREPARE from pinning global registry memory
- * that escapes maxmemory-clients accounting. */
+/* Memory used by this client's HIMPORT fieldset bindings, for maxmemory-clients.
+ * Counts the client-owned allocations (the list, its array, and each fieldset's
+ * name and value_order map) plus a share of each pinned template's mem_size,
+ * divided across all its holders so the cost is split fairly between clients and
+ * keys that share the template. */
 size_t himportFieldsetMemOverhead(client *c) {
     himportFieldsetList *list = c->himport_fieldsets;
     if (!list) return 0;
@@ -3617,7 +3652,11 @@ void himportPrepareCommand(client *c) {
     addReply(c, shared.ok);
 }
 
-/* HIMPORT SET <key> <fieldset> <value1> [value2 ...] */
+/* HIMPORT SET <key> <fieldset> <value1> [value2 ...]
+ *
+ * Create a hash from a fieldset prepared earlier (HIMPORT PREPARE): the values
+ * map positionally onto the fieldset's fields, and the key is stored directly in
+ * template encoding using the fieldset's shared template. */
 void himportSetCommand(client *c) {
     /* Lookup fieldset. */
     sds fieldset_name = c->argv[3]->ptr;
@@ -3644,7 +3683,10 @@ void himportSetCommand(client *c) {
     sds *values = (field_count <= HASH_TMPL_STACK_ENTRIES) ?
                   stack_values : zmalloc(sizeof(sds) * field_count);
 
-    /* Ensure propargv is built; field robjs live at propargv[2 .. 2+N). */
+    /* propargv is the HSETC propagation array "HSETC <key> <fields> <values>",
+     * cached on the template (built once) so we don't allocate it per call. The
+     * fields are fixed; here we only fill the key and value slots. Field robjs
+     * live at propargv[2 .. 2+N), values at propargv[2+N .. 2+2N). */
     robj **fields_robj = hashTemplateGetPropargvFields(tmpl);
     robj **propargv = tmpl->propargv;
     propargv[1] = c->argv[2];
@@ -3687,10 +3729,10 @@ void himportDiscardallCommand(client *c) {
     addReplyLongLong(c, himportFieldsetFreeList(c));
 }
 
-/* Per-client cache of the last HSETC template — when consecutive calls share
- * the same field schema (the common case during replication/AOF replay) we
- * skip computeFieldsHash + dictFind. The cached tmpl holds a reference,
- * so tmpl->fields stays alive and serves as the comparison snapshot. */
+/* Per-client cache of the last HSETC template. A replica replaying HSETC usually
+ * gets the same field set call after call, so caching the last template lets it
+ * reuse it and skip the registry lookup. The cached tmpl holds a reference, so
+ * its fields stay alive to compare the next call against. */
 void hsetcCacheFree(client *c) {
     hashTemplate *tmpl = c->hsetc_cache;
     if (!tmpl) return;
@@ -3709,10 +3751,11 @@ static int hsetcCacheMatch(hashTemplate *tmpl, client *c, unsigned long long fie
 
 /* HSETC key f0 f1 ... fN-1 v0 v1 ... vN-1
  *
- * Internal command (CMD_INTERNAL) used to replicate template-encoded hashes:
- * resolves the template for the given fields, builds the value object and
- * overwrites key in one shot. The per-client hsetc_cache fast-paths the
- * common case where consecutive calls share the same field set. */
+ * Internal command (CMD_INTERNAL) sent master->replica (and to the AOF) to
+ * replicate template-encoded hashes: resolves the template for the given fields,
+ * builds the value object and overwrites key in one shot. The per-client
+ * hsetc_cache fast-paths the common case where consecutive calls share the same
+ * field set. */
 void hsetcCommand(client *c) {
     if (c->argc < 4 || (c->argc % 2) != 0) {
         addReplyErrorArity(c);
