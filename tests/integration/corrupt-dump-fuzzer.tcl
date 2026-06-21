@@ -46,7 +46,6 @@ proc generate_collections {suffix elements} {
         $rd read ; # Discard replies
     }
     $rd close
-    
     set fields {}
     set vals {}
     for {set j 0} {$j < $elements} {incr j} {

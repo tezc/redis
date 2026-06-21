@@ -3521,8 +3521,9 @@ static int himportCmpFieldIdx(const void *a, const void *b) {
 /* HIMPORT PREPARE <fieldset_name> <field1> [field2 ...]
  *
  * Register a named fieldset on this client so subsequent HIMPORT SET calls
- * only have to pass values (not field names). Sorts the fields alphabetically
- * and looks up / creates the matching template in the registry, taking a
+ * only have to pass values (not field names). Sorts the fields in sdscmplen
+ * order (by length, then bytes) and looks up / creates the matching template
+ * in the registry, taking a
  * hold reference on it. The original user-provided field order is preserved
  * as field_order[] so HIMPORT SET can map its positional values back into
  * template-sorted order. Rejects duplicate field names in the fieldset. */
@@ -3532,8 +3533,8 @@ void himportPrepareCommand(client *c) {
     robj **field_argv = &c->argv[3];  /* Fields start at argv[3]. */
 
     /* Create field_order: maps 'field index in fieldset' -> 'user argv index'.
-     * Fieldset fields are sorted alphabetically, so we sort indexes by
-     * field name and store the mapping. */
+     * Fieldset fields are sorted in sdscmplen order (length, then bytes), so we
+     * sort indexes by field name and store the mapping. */
     int *field_order = zmalloc(sizeof(int) * field_count);
     for (int i = 0; i < field_count; i++)
         field_order[i] = i;
