@@ -460,6 +460,9 @@ hashTemplate *hashTemplateGetOrCreate(sds *fields, unsigned long long field_coun
  * Used for incremental hash updates (HDEL/HSET). */
 hashTemplate *hashTemplateGetOrCreateWithHash(uint64_t hash, sds *fields,
                                               unsigned long long field_count) {
+    /* Fields must be strictly ascending; catch unsorted/dup sets in test builds. */
+    debugServerAssert(hashTemplateValidateFields(fields, field_count));
+
     hashTemplate query = {
         .hash = hash,
         .field_count = field_count,
@@ -1476,6 +1479,11 @@ int hashTypeExists(redisDb *db, kvobj *o, sds field, int hfeFlags, int *isHashDe
 #define HASH_SET_TAKE_FIELD  (1<<0)
 #define HASH_SET_TAKE_VALUE  (1<<1)
 #define HASH_SET_KEEP_TTL (1<<2)
+/* Suppress the per-field auto-conversion to template in hashTypeSet's cleanup.
+ * Multi-field callers set this and instead call hashTypeTryConvertToTemplate
+ * once after their loop, avoiding O(N^2) churn from rebuilding the template on
+ * every field added past the threshold. */
+#define HASH_SET_NO_CONVERT (1<<3)
 
 static_assert(HASH_SET_TAKE_VALUE == ENTRY_TAKE_VALUE, "ENTRY_TAKE_VALUE must match HASH_SET_TAKE_VALUE");
 
@@ -1707,8 +1715,11 @@ cleanup:
     if (flags & HASH_SET_TAKE_FIELD && field) sdsfree(field);
     if (flags & HASH_SET_TAKE_VALUE && value) sdsfree(value);
 
-    /* Auto-convert to template if threshold met and not already template. */
-    if (!update && server.hash_min_template_entries > 0 &&
+    /* Auto-convert to template if threshold met and not already template.
+     * Skipped when HASH_SET_NO_CONVERT is set: multi-field callers defer this
+     * to a single post-loop conversion to avoid per-field churn. */
+    if (!update && !(flags & HASH_SET_NO_CONVERT) &&
+        server.hash_min_template_entries > 0 &&
         (o->encoding == OBJ_ENCODING_LISTPACK || o->encoding == OBJ_ENCODING_HT))
     {
         hashTypeTryConvertToTemplate(o);
@@ -3306,7 +3317,16 @@ void hsetCommand(client *c) {
     hashTypeTryConversion(c->db, kv, c->argv, 2, c->argc-1);
 
     for (i = 2; i < c->argc; i += 2)
-        created += !hashTypeSet(c->db, kv, c->argv[i]->ptr, c->argv[i+1]->ptr, HASH_SET_COPY);
+        created += !hashTypeSet(c->db, kv, c->argv[i]->ptr, c->argv[i+1]->ptr,
+                               HASH_SET_COPY | HASH_SET_NO_CONVERT);
+
+    /* Convert to template once after all fields are set, rather than per-field,
+     * to keep multi-field HSET/HMSET O(N) instead of O(N^2). */
+    if (server.hash_min_template_entries > 0 &&
+        (kv->encoding == OBJ_ENCODING_LISTPACK || kv->encoding == OBJ_ENCODING_HT))
+    {
+        hashTypeTryConvertToTemplate(kv);
+    }
 
     /* HMSET (deprecated) and HSET return value is different. */
     char *cmdname = c->argv[0]->ptr;

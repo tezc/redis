@@ -1547,6 +1547,25 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
         assert_equal [r hgetall aof:1] {a 1 b 2 c 3}
         assert_equal [r object encoding aof:1] "template-listpack"
     }
+
+    test {threshold=1: every convert-triggering write path auto-converts} {
+        r flushall
+        wait_tmpl_drain
+        # Each entry creates a fresh key whose single field crosses the
+        # threshold; every write path that runs the conversion guard must end
+        # up template-encoded (HSET is covered separately above).
+        foreach {name cmd} {
+            hsetnx       {hsetnx conv:hsetnx f v}
+            hsetex       {hsetex conv:hsetex FIELDS 1 f v}
+            hincrby      {hincrby conv:hincrby f 5}
+            hincrbyfloat {hincrbyfloat conv:hincrbyfloat f 1.5}
+        } {
+            r {*}$cmd
+            set key [lindex $cmd 1]
+            assert_equal [r object encoding $key] "template-listpack" \
+                "$name should auto-convert $key to template-listpack"
+        }
+    }
 }
 
 
