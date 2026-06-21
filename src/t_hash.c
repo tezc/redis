@@ -2035,19 +2035,6 @@ int hashTypeDelete(robj *o, void *field) {
         serverPanic("Unknown hash encoding");
     }
 
-    /* Auto-convert from template to regular if below threshold. */
-    if (deleted && server.hash_min_template_entries > 0 &&
-        (o->encoding == OBJ_ENCODING_TMPL_LP ||
-         o->encoding == OBJ_ENCODING_TMPL_ARRAY))
-    {
-        size_t fc = hashTypeLength(o, 0);
-        if (fc < server.hash_min_template_entries) {
-            /* No db in scope here, but the template->listpack path never touches
-             * subexpires, so NULL is safe (same as the RDB-load call sites). */
-            hashTypeConvert(NULL, o, OBJ_ENCODING_LISTPACK);
-        }
-    }
-
     return deleted;
 }
 

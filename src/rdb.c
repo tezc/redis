@@ -724,7 +724,7 @@ int rdbSaveObjectType(rio *rdb, robj *o) {
              * use full format for DUMP command. */
             if (server.htemplates->rdb_saving) {
                 return rdbSaveType(rdb, o->encoding == OBJ_ENCODING_TMPL_LP ?
-                                                            RDB_TYPE_HASH_TMPL_REF_LP : 
+                                                            RDB_TYPE_HASH_TMPL_REF_LP :
                                                             RDB_TYPE_HASH_TMPL_REF_ARRAY);
             } else {
                 return rdbSaveType(rdb, o->encoding == OBJ_ENCODING_TMPL_LP ?

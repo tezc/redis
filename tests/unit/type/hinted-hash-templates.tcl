@@ -1397,10 +1397,7 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
 
 # ============================================================
 # Tests under hash-min-template-entries=1 (production default).
-# In this mode plain HSET auto-converts to a template encoding, which
-# OBJECT ENCODING / DEBUG OBJECT report as template-listpack / template-array
-# (the legacy listpack/hashtable name is only reported when the
-# hash-template-mask-encoding compat config is set).
+# In this mode plain HSET auto-converts to a template encoding.
 # ============================================================
 start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
               overrides {hash-min-template-entries 1}} {
@@ -1660,89 +1657,6 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
         r del t9
         r himport discard fieldset
         r config set hash-max-listpack-entries $prev_e
-    }
-
-    test {convert: TMPL_LP -> LISTPACK via auto-trim (fits)} {
-        set prev_m [lindex [r config get hash-min-template-entries] 1]
-        r himport prepare fieldset a b c d
-        r himport set t10 fieldset 1 2 3 4
-        assert_equal [r object encoding t10] template-listpack
-
-        # Raise threshold so HDEL drops count below min and triggers trim.
-        r config set hash-min-template-entries 4
-        r hdel t10 a
-        assert_equal [r object encoding t10] listpack
-        assert_equal [r hget t10 b] 2
-
-        r del t10
-        r himport discard fieldset
-        r config set hash-min-template-entries $prev_m
-    }
-
-    test {convert: TMPL_LP -> HT via auto-trim (count > listpack-entries)} {
-        set prev_e [lindex [r config get hash-max-listpack-entries] 1]
-        set prev_m [lindex [r config get hash-min-template-entries] 1]
-        r config set hash-max-listpack-entries 32
-
-        set fields {}; set values {}
-        for {set i 0} {$i < 8} {incr i} {
-            lappend fields "f$i"; lappend values "v$i"
-        }
-        r himport prepare fieldset {*}$fields
-        r himport set t11 fieldset {*}$values
-        assert_equal [r object encoding t11] template-listpack
-
-        # Tighten limit and raise trim threshold; HDEL fails CanConvert -> HT.
-        r config set hash-max-listpack-entries 4
-        r config set hash-min-template-entries 10
-        r hdel t11 f0
-        assert_equal [r object encoding t11] hashtable
-        assert_equal [r hget t11 f3] v3
-
-        r del t11
-        r himport discard fieldset
-        r config set hash-max-listpack-entries $prev_e
-        r config set hash-min-template-entries $prev_m
-    }
-
-    test {convert: TMPL_AR -> LISTPACK via auto-trim (fits)} {
-        set prev_e [lindex [r config get hash-max-listpack-entries] 1]
-        set prev_m [lindex [r config get hash-min-template-entries] 1]
-        r config set hash-max-listpack-entries 0
-        r himport prepare fieldset a b c d
-        r himport set t12 fieldset 1 2 3 4
-        r config set hash-max-listpack-entries $prev_e
-        assert_equal [r object encoding t12] template-array
-
-        # HDEL one field -> count(3) < min(4) -> trim; values fit -> LP.
-        r config set hash-min-template-entries 4
-        r hdel t12 a
-        assert_equal [r object encoding t12] listpack
-        assert_equal [r hget t12 c] 3
-
-        r del t12
-        r himport discard fieldset
-        r config set hash-min-template-entries $prev_m
-    }
-
-    test {convert: TMPL_AR -> HT via auto-trim (value > listpack-value)} {
-        set prev_v [lindex [r config get hash-max-listpack-value] 1]
-        set prev_m [lindex [r config get hash-min-template-entries] 1]
-        r config set hash-max-listpack-value 10
-        # 50-char value forces TMPL_AR at create and fails the trim CanConvert.
-        r himport prepare fieldset a b c d
-        r himport set t13 fieldset 1 2 3 [string repeat y 50]
-        assert_equal [r object encoding t13] template-array
-
-        r config set hash-min-template-entries 4
-        r hdel t13 a
-        assert_equal [r object encoding t13] hashtable
-        assert_equal [r hget t13 d] [string repeat y 50]
-
-        r del t13
-        r himport discard fieldset
-        r config set hash-max-listpack-value $prev_v
-        r config set hash-min-template-entries $prev_m
     }
 }
 
