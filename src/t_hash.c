@@ -439,8 +439,11 @@ static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsi
     tmpl->field_count = field_count;
     tmpl->fields = zmalloc(sizeof(sds) * field_count);
     tmpl->propargv = NULL; /* Lazy: built on first HIMPORT SET / HSETC. */
-    for (unsigned long long i = 0; i < field_count; i++)
+    tmpl->mem_size = sizeof(*tmpl) + sizeof(sds) * field_count;
+    for (unsigned long long i = 0; i < field_count; i++) {
         tmpl->fields[i] = sdsdup(fields[i]);
+        tmpl->mem_size += sdsZmallocSize(tmpl->fields[i]);
+    }
 
     tmpl->id = allocateTemplateId(tmpl);
     return tmpl;
@@ -3475,10 +3478,14 @@ int himportFieldsetFreeList(client *c) {
 }
 
 /* Per-client memory overhead of this client's HIMPORT fieldset bindings.
- * Accounts only client-owned allocations: the list, its reserved array, and
- * each fieldset's name and value_order map. The templates referenced via
- * hold-ref are shared state in the global registry and are not attributed
- * here (mirrors multiStateMemOverhead's treatment of watched keys). */
+ * Accounts client-owned allocations (the list, its reserved array, and each
+ * fieldset's name and value_order map) plus this client's share of the shared
+ * templates it pins via hold-ref. The template's own footprint (mem_size) is
+ * split across all its current holders (hold-refs and key-refs): a template
+ * referenced only by this client's PREPARE is attributed in full, while one
+ * also backed by hash keys or shared with other clients contributes only a
+ * fraction. This keeps HIMPORT PREPARE from pinning global registry memory
+ * that escapes maxmemory-clients accounting. */
 size_t himportFieldsetMemOverhead(client *c) {
     himportFieldsetList *list = c->himport_fieldsets;
     if (!list) return 0;
@@ -3488,7 +3495,14 @@ size_t himportFieldsetMemOverhead(client *c) {
     for (int i = 0; i < list->count; i++) {
         himportFieldset *fs = &list->arr[i];
         if (fs->name) mem += sdsZmallocSize(fs->name);
-        if (fs->tmpl) mem += fs->tmpl->field_count * sizeof(int);
+        if (fs->tmpl) {
+            mem += fs->tmpl->field_count * sizeof(int);
+            unsigned long long key_refs;
+            atomicGet(fs->tmpl->key_refcount, key_refs);
+            unsigned long long holders = fs->tmpl->hold_refcount + key_refs;
+            if (holders < 1) holders = 1; /* This fieldset is a holder. */
+            mem += fs->tmpl->mem_size / holders;
+        }
     }
     return mem;
 }

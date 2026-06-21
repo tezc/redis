@@ -3878,6 +3878,11 @@ typedef struct hashTemplate {
                           * main thread to reclaim (see hashTemplates.reclaim_ids). */
     unsigned long long hold_refcount; /* Non-key holders: clients and RDB load. */
     unsigned long long field_count; /* Number of fields in the template. */
+    size_t mem_size;     /* Cached own allocation footprint: the struct, the
+                          * fields array, and the duplicated field-name SDS.
+                          * Constant after creation (templates are immutable;
+                          * a changed field set creates a new template). Used to
+                          * attribute a holder's share to client memory. */
     sds *fields;         /* Ordered array of field names (sorted, owned). */
     robj **propargv;     /* Lazy-built propagation array, layout:
                             [hsetc, NULL_key, f0, f1, ..., fN-1,

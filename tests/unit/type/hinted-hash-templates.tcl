@@ -236,6 +236,44 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         assert {$discarded < $after}
     }
 
+    test {HIMPORT PREPARE attributes pinned template memory to client} {
+        proc cur_tot_mem {} {
+            regexp {tot-mem=(\d+)} [r client info] -> m
+            return $m
+        }
+
+        # Case A: 100 fieldsets that all share ONE template (same field names).
+        # Holder-proportional attribution splits the single template's footprint
+        # across its 100 holders, so its total contribution is ~one template.
+        r himport discardall
+        set base [cur_tot_mem]
+        set shared_fields {}
+        for {set f 0} {$f < 64} {incr f} { lappend shared_fields "sf_$f" }
+        for {set i 0} {$i < 100} {incr i} {
+            r himport prepare shared$i {*}$shared_fields
+        }
+        set shared_mem [expr {[cur_tot_mem] - $base}]
+        r himport discardall
+
+        # Case B: same count/size, but each fieldset pins a UNIQUE template
+        # (distinct field names). Each template has a single holder, so its full
+        # footprint is attributed -> ~100 templates worth of memory.
+        set base [cur_tot_mem]
+        for {set i 0} {$i < 100} {incr i} {
+            set fields {}
+            for {set f 0} {$f < 64} {incr f} { lappend fields "uf_${i}_$f" }
+            r himport prepare uniq$i {*}$fields
+        }
+        set unique_mem [expr {[cur_tot_mem] - $base}]
+        r himport discardall
+
+        # Both cases pay the same name + value_order cost; the only difference is
+        # the pinned template footprint. If template memory were not attributed
+        # (or were multiplied per holder), the two would be comparable. With the
+        # fix, the unique case accounts far more memory.
+        assert {$unique_mem > $shared_mem * 2}
+    }
+
     test {HIMPORT PREPARE state can trigger maxmemory-clients eviction} {
         # Returns the CLIENT LIST entry for $name, or "" if not connected.
         proc himport_client_line {name} {
@@ -1963,4 +2001,3 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
         assert_equal PONG [r ping]
     }
 }
-

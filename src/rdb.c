@@ -2050,6 +2050,12 @@ int rdbLoadHashTemplates(rio *rdb) {
     if ((field_count = rdbLoadLen(rdb, NULL)) == RDB_LENERR)
         return C_ERR;
 
+    /* A zero-field template is invalid. */
+    if (field_count == 0) {
+        rdbReportCorruptRDB("Hash template ID %llu has zero fields", (unsigned long long)id);
+        return C_ERR;
+    }
+
     if (rdbEnsureHashTemplatesCap(id) != C_OK)
         return C_ERR;
     if (rdb_tmpls[id] != NULL) {

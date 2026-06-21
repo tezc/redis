@@ -7,9 +7,6 @@
         "arity": 2,
         "container": "HIMPORT",
         "function": "himportDiscardallCommand",
-        "command_flags": [
-            "FAST"
-        ],
         "acl_categories": [
             "HASH"
         ],

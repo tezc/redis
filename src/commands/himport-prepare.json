@@ -8,8 +8,7 @@
         "container": "HIMPORT",
         "function": "himportPrepareCommand",
         "command_flags": [
-            "DENYOOM",
-            "FAST"
+            "DENYOOM"
         ],
         "acl_categories": [
             "HASH"
