@@ -116,6 +116,10 @@
     assert((p) >= (lp)+LP_HDR_SIZE && (p)+(len) < (lp)+lpGetTotalBytes((lp))); \
 } while (0)
 
+/* lpBatchInsert encodes up to this many entries on a stack buffer before
+ * falling back to the heap. */
+#define LP_BATCH_STACK_ENTRIES 64
+
 static inline void lpAssertValidEntry(unsigned char* lp, size_t lpbytes, unsigned char *p);
 
 /* Don't let listpacks grow over 1GB in any case, don't wanna risk overflow in
@@ -1164,7 +1168,7 @@ unsigned char *lpBatchInsert(unsigned char *lp, unsigned char *p, int where,
     };
 
     uint64_t addedlen = 0;       /* The encoded length of the added elements. */
-    struct listpackInsertEntry tmp[64]; /* Encoded entries (stack buffer). */
+    struct listpackInsertEntry tmp[LP_BATCH_STACK_ENTRIES]; /* Encoded entries (stack buffer). */
     struct listpackInsertEntry *enc = tmp;
 
     if (len > sizeof(tmp) / sizeof(struct listpackInsertEntry)) {
@@ -1206,7 +1210,7 @@ unsigned char *lpBatchInsert(unsigned char *lp, unsigned char *p, int where,
     uint64_t new_listpack_bytes;
 
     if (new_lp) {
-        /* new listpack: single exact-size allocation, no memmove. */
+        /* new listpack: single exact-size allocation. */
         new_listpack_bytes = LP_HDR_SIZE + addedlen + 1; /* +1 for EOF */
         if (new_listpack_bytes > UINT32_MAX) {
             if (enc != tmp) lp_free(enc);
@@ -1278,7 +1282,7 @@ unsigned char *lpBatchInsert(unsigned char *lp, unsigned char *p, int where,
     if (new_lp) *dst = LP_EOF;
     uint32_t cur = new_lp ? 0 : lpGetNumElements(lp);
     uint32_t num_elements = (len >= LP_HDR_NUMELE_UNKNOWN - cur) ? 
-                                LP_HDR_NUMELE_UNKNOWN : cur + len;
+                                        LP_HDR_NUMELE_UNKNOWN : cur + len;
     lpSetNumElements(lp,num_elements);
     lpSetTotalBytes(lp,new_listpack_bytes);
     if (enc != tmp) lp_free(enc);
@@ -2626,12 +2630,12 @@ int listpackTest(int argc, char *argv[], int flags) {
     }
 
     TEST("Batch insert stack/heap buffer boundary") {
-        /* The encoding pre-pass uses a 64-slot stack buffer; len > 64 switches
-         * to a heap allocation. Walk both sides of the boundary. */
-        listpackEntry ent[66];
+        /* The encoding pre-pass uses a stack buffer of LP_BATCH_STACK_ENTRIES;
+         * larger 'len' switches to a heap allocation. Walk both sides. */
+        listpackEntry ent[LP_BATCH_STACK_ENTRIES + 2];
 
-        /* New-listpack path across the 64-entry boundary (63..66). */
-        for (int n = 63; n <= 66; n++) {
+        /* New-listpack path across the stack/heap boundary. */
+        for (int n = LP_BATCH_STACK_ENTRIES - 1; n <= LP_BATCH_STACK_ENTRIES + 2; n++) {
             for (int j = 0; j < n; j++) {
                 ent[j].sval = NULL;
                 ent[j].lval = j;
@@ -2648,18 +2652,19 @@ int listpackTest(int argc, char *argv[], int flags) {
             lpFree(lp);
         }
 
-        /* Heap path (len > 64) inserting into an existing listpack. */
-        for (int j = 0; j < 65; j++) {
+        /* Heap path (len > stack buffer) inserting into an existing listpack. */
+        int heaplen = LP_BATCH_STACK_ENTRIES + 1;
+        for (int j = 0; j < heaplen; j++) {
             ent[j].sval = NULL;
             ent[j].lval = j;
         }
         lp = lpNew(0);
         lp = lpAppend(lp, (unsigned char*)"head", 4);
         p = lpSeek(lp, 0);
-        lp = lpBatchInsert(lp, p, LP_AFTER, ent, 65, NULL);
-        assert(lpLength(lp) == 66);
+        lp = lpBatchInsert(lp, p, LP_AFTER, ent, heaplen, NULL);
+        assert((int)lpLength(lp) == heaplen + 1);
         verifyEntry(lpSeek(lp, 0), (unsigned char*)"head", 4);
-        for (int j = 0; j < 65; j++) {
+        for (int j = 0; j < heaplen; j++) {
             char buf[LP_INTBUF_SIZE];
             int blen = snprintf(buf, sizeof(buf), "%d", j);
             verifyEntry(lpSeek(lp, j + 1), (unsigned char*)buf, blen);

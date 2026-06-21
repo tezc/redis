@@ -2094,7 +2094,7 @@ static int rioWriteHashIteratorCursor(rio *r, hashTypeIterator *hi, int what) {
 
     hashTypeCurrentObject(hi, what, &vstr, &vlen, &vll, NULL);
     if (vstr)
-        return rioWriteBulkString(r, (char *)vstr, vlen);
+        return rioWriteBulkString(r, (char*)vstr, vlen);
     else
         return rioWriteBulkLongLong(r, vll);
 }

@@ -2020,3 +2020,113 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
         assert_equal PONG [r ping]
     }
 }
+
+
+# ============================================================
+# Bulk registry: a large number of DISTINCT templates must round-trip through
+# full sync, AOF restart and RDB restart without loss or corruption. Each key
+# pins its own template (field names carry a per-key suffix), so the registry
+# holds ~$bulk_n entries -- this stresses the registry (de)serialization and the
+# load-time rdb_tmpls cleanup far more than the single-template tests above.
+# Correctness is checked end-to-end with DEBUG DIGEST plus the INFO counters.
+# ============================================================
+set ::bulk_n 2000
+
+# Populate 'n' keys on 'clnt', each with its own 5-field template. The per-key
+# suffix in the field names makes every field set unique -> a distinct template.
+proc bulk_populate_distinct {clnt n} {
+    for {set i 0} {$i < $n} {incr i} {
+        $clnt himport prepare bt$i \
+            f${i}_user_id f${i}_email f${i}_score f${i}_status f${i}_country
+        $clnt himport set bulk:$i bt$i \
+            [expr {100000 + $i}] "user$i@example.com" [expr {$i % 1000}] \
+            [expr {$i % 2 == 0 ? "active" : "inactive"}] "Country[expr {$i % 195}]"
+    }
+}
+
+start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
+              overrides {hash-min-template-entries 0 save {}}} {
+    start_server {overrides {hash-min-template-entries 0}} {
+        test "Full sync replicates $::bulk_n distinct templates" {
+            set master [srv -1 client]
+            set master_host [srv -1 host]
+            set master_port [srv -1 port]
+            set replica [srv 0 client]
+
+            $master flushall
+            wait_hashtmpl_keys 0 -1
+            bulk_populate_distinct $master $::bulk_n
+
+            set T [s -1 hash_templates]
+            set K [s -1 hash_template_keys]
+            assert_equal $T $::bulk_n
+            assert_equal $K $::bulk_n
+            set digest [$master debug digest]
+            set sync_full_before [s -1 sync_full]
+
+            # Replica attaches now, so the whole dataset arrives via a full sync.
+            $replica replicaof $master_host $master_port
+            wait_for_sync $replica
+            assert {[s -1 sync_full] > $sync_full_before}
+
+            # INFO must show the registry was actually rebuilt on the replica...
+            wait_hashtmpl_templates $T 0
+            wait_hashtmpl_keys $K 0
+            # ...and the full keyspace must be byte-identical to the master.
+            assert_equal $digest [$replica debug digest]
+            assert_equal [lsort [$replica hgetall bulk:0]] \
+                         [lsort [$master hgetall bulk:0]]
+        }
+    }
+}
+
+start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" "external:skip"}
+              overrides {hash-min-template-entries 0 appendonly yes
+                         auto-aof-rewrite-percentage 0 save {}}} {
+    test "AOF restart preserves $::bulk_n distinct templates" {
+        r flushall
+        wait_hashtmpl_keys 0
+        waitForBgrewriteaof r
+        bulk_populate_distinct r $::bulk_n
+
+        lassign [get_template_stats] T K
+        set digest [r debug digest]
+
+        # Fold everything into a fresh base AOF, then restart off disk.
+        r bgrewriteaof
+        waitForBgrewriteaof r
+        restart_server 0 true false
+
+        wait_hashtmpl_templates $T
+        wait_hashtmpl_keys $K
+        assert_equal $digest [r debug digest]
+        assert_equal [r hget bulk:0 f0_user_id] 100000
+    }
+}
+
+start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" "external:skip"}
+              overrides {hash-min-template-entries 0 appendonly no save {900 1}}} {
+    test "RDB restart preserves $::bulk_n distinct templates" {
+        r flushall
+        wait_hashtmpl_keys 0
+        bulk_populate_distinct r $::bulk_n
+
+        lassign [get_template_stats] T K
+        set digest [r debug digest]
+
+        # Self-contained DUMP/RESTORE of one key exercises the full TMPL format
+        # and its (now unconditional) field-order validation on load.
+        set blob [r dump bulk:1]
+        r restore bulk:copy 0 $blob
+        assert_equal [lsort [r hgetall bulk:1]] [lsort [r hgetall bulk:copy]]
+        r del bulk:copy
+
+        r save
+        restart_server 0 true false
+
+        wait_hashtmpl_templates $T
+        wait_hashtmpl_keys $K
+        assert_equal $digest [r debug digest]
+        assert_equal [r hget bulk:0 f0_email] "user0@example.com"
+    }
+}

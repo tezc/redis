@@ -86,8 +86,7 @@
 #define RDB_TYPE_HASH_TMPL_ARRAY 31           /* TMPL_ARRAY, self-contained (DUMP): [count][f0][v0]...[fN-1][vN-1] */
 #define RDB_TYPE_HASH_TMPL_REF_ARRAY 32       /* TMPL_ARRAY, with template ref (RDB save): [tid][v0]...[vN-1] */
 #ifdef ENABLE_GCRA
-#define RDB_TYPE_GCRA 33                      /* GCRA object (experimental: kept last so the
-                                                always-present types stay contiguous) */
+#define RDB_TYPE_GCRA 33                      /* GCRA object */
 #endif
 /* NOTE: WHEN ADDING NEW RDB TYPE, UPDATE rdbIsObjectType(), and rdb_type_string[] */
 

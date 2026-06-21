@@ -684,10 +684,7 @@ NULL
             addReplyErrorObject(c,shared.nokeyerr);
             return;
         }
-        /* Report the real encoding (template-listpack/template-array). The
-         * TEMPORARY hash-template-mask-encoding shim (remove before merge) makes
-         * us report the legacy listpack/hashtable name instead, so the existing
-         * hash test suite passes with templates enabled. */
+        /* Mask shim (remove before merge): report legacy encoding name. */
         if (server.hash_template_mask_encoding &&
             (kv->encoding == OBJ_ENCODING_TMPL_LP ||
              kv->encoding == OBJ_ENCODING_TMPL_ARRAY))

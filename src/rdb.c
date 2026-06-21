@@ -720,8 +720,9 @@ int rdbSaveObjectType(rio *rdb, robj *o) {
                 return rdbSaveType(rdb,RDB_TYPE_HASH_METADATA);
         } else if (o->encoding == OBJ_ENCODING_TMPL_LP ||
                    o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
-            /* Template encodings: use compact ref if this is RDB save,
-             * use full format for DUMP command. */
+            /* Template encodings. RDB save: compact "ref" form storing only the
+             * template id + values. DUMP/RESTORE: "full" form that includes 
+             * field names. */
             if (server.htemplates->rdb_saving) {
                 return rdbSaveType(rdb, o->encoding == OBJ_ENCODING_TMPL_LP ?
                                                             RDB_TYPE_HASH_TMPL_REF_LP :
@@ -1248,8 +1249,7 @@ ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key, int dbid) {
         /* Save a hash value */
         if (o->encoding == OBJ_ENCODING_TMPL_LP ||
             o->encoding == OBJ_ENCODING_TMPL_ARRAY) {
-            
-            /* Template encodings: use compact or full format. */
+
             hashTemplate *tmpl;
             unsigned long long field_count;
             
@@ -3758,7 +3758,6 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                  * hashTypeTryConvertToTemplate() is a no-op for HFE encodings
                  * and when the feature is disabled, so no extra gate is needed. */
                 hashTypeTryConvertToTemplate(o);
-
                 break;
             default:
                 /* totally unreachable */
