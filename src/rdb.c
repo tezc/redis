@@ -3128,8 +3128,8 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         sds *fields = rdbLoadSdsVector(rdb, len, "TMPL_LP full");
         if (fields == NULL) return NULL;
 
-        /* Under deep validation reject out-of-order or duplicate fields. */
-        if (deep_integrity_validation && !hashTemplateValidateFields(fields, len)) {
+        /* Reject out-of-order or duplicate fields. */
+        if (!hashTemplateValidateFields(fields, len)) {
             rdbReportCorruptRDB("TMPL_LP full fields not strictly sorted");
             rdbFreeSdsVector(fields, len);
             return NULL;
@@ -3208,9 +3208,8 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
             }
         }
 
-        /* Under deep validation reject out-of-order or duplicate fields. */
-        if (deep_integrity_validation &&
-            !hashTemplateValidateFields(fields, len)) {
+        /* Reject out-of-order or duplicate fields. */
+        if (!hashTemplateValidateFields(fields, len)) {
             rdbReportCorruptRDB("TMPL_ARRAY fields not strictly sorted");
             rdbFreeSdsVector(fields, len);
             rdbFreeSdsVector(values, len);
