@@ -1091,7 +1091,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
 # RDB save/load round-trip tests (via DEBUG RELOAD)
 # ============================================================
 
-start_server {tags {"hash" "hinted-hash-templates" "rdb" "needs:debug" "cluster:skip"}
+start_server {tags {"hash" "rdb" "needs:debug" "cluster:skip"}
               overrides {hash-min-template-entries 0}} {
     if {$encoding eq "template-array"} {
         r config set hash-max-listpack-entries 0
@@ -1128,12 +1128,12 @@ start_server {tags {"hash" "hinted-hash-templates" "rdb" "needs:debug" "cluster:
 # AOF rewrite tests
 # ============================================================
 
-start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" "external:skip"}
+start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
               overrides {save {} appendonly yes auto-aof-rewrite-percentage 0
                          hash-min-template-entries 0}} {
 
     foreach rdbpre {yes no} {
-        test "AOF rewrite preserves template encoding (rdb-preamble=$rdbpre)" {
+        test "AOF rewrite preserves template and plain hashes (rdb-preamble=$rdbpre)" {
             r config set aof-use-rdb-preamble $rdbpre
             r flushall
             # Drain deferred key-ref releases left by the previous test so the
@@ -1144,6 +1144,9 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
             make_hashtmpl aof:k1 a 1 b 2 c 3
             make_hashtmpl aof:k2 a 4 b 5 c 6
             make_hashtmpl aof:k3 x 7 y 8
+            # Plain hashes alongside the template ones must round-trip unchanged.
+            r hset aof:plain1 x 100 y 200
+            r hset aof:plain2 m 1 n 2 o 3
 
             set enc1 [r object encoding aof:k1]
             assert {$enc1 eq "template-listpack" || $enc1 eq "template-array"}
@@ -1161,6 +1164,8 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
             assert {$enc1r eq "template-listpack" || $enc1r eq "template-array"}
             assert {$enc2r eq "template-listpack" || $enc2r eq "template-array"}
             assert {$enc3r eq "template-listpack" || $enc3r eq "template-array"}
+            assert_equal [r object encoding aof:plain1] "listpack"
+            assert_equal [r object encoding aof:plain2] "listpack"
 
             assert_equal $tmpls_before [s hash_templates]
             wait_hashtmpl_keys $keys_before
@@ -1168,29 +1173,9 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
             assert_equal [r hget aof:k1 a] 1
             assert_equal [r hget aof:k2 b] 5
             assert_equal [r hget aof:k3 y] 8
+            assert_equal [r hget aof:plain1 x] 100
+            assert_equal [r hget aof:plain2 m] 1
         }
-    }
-
-    test {AOF rewrite mixes template and plain hashes correctly} {
-        r config set aof-use-rdb-preamble no
-        r flushall
-        waitForBgrewriteaof r
-
-        make_hashtmpl mix:tmpl1 a 1 b 2 c 3
-        make_hashtmpl mix:tmpl2 a 4 b 5 c 6
-        r hset mix:plain1 x 100 y 200
-        r hset mix:plain2 m 1 n 2 o 3
-
-        r bgrewriteaof
-        waitForBgrewriteaof r
-        r debug loadaof
-
-        set enc_t1 [r object encoding mix:tmpl1]
-        set enc_p1 [r object encoding mix:plain1]
-        assert {$enc_t1 eq "template-listpack" || $enc_t1 eq "template-array"}
-        assert_equal $enc_p1 "listpack"
-        assert_equal [r hget mix:tmpl1 b] 2
-        assert_equal [r hget mix:plain1 x] 100
     }
 }
 
@@ -1198,7 +1183,7 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
 # Replication tests
 # ============================================================
 
-start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
+start_server {tags {"hash" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0}} {
     start_server {overrides {hash-min-template-entries 0}} {
         test {HIMPORT SET replicates as HSETC} {
@@ -1251,7 +1236,7 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:de
 # next one, otherwise a second full resync would try to load the same templates
 # again and fail. Force two back-to-back full resyncs and assert the replica
 # stays intact across both.
-start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
+start_server {tags {"hash" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0 repl-diskless-sync yes repl-diskless-sync-delay 0}} {
     start_server {overrides {hash-min-template-entries 0 repl-diskless-load swapdb}} {
         test "Diskless replica survives repeated full resyncs with templates ($encoding)" {
@@ -1300,7 +1285,7 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:de
 # Tests under hash-min-template-entries=1.
 # In this mode plain HSET auto-converts to a template encoding.
 # ============================================================
-start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
+start_server {tags {"hash" "needs:debug" "cluster:skip"}
               overrides {hash-min-template-entries 1}} {
 
     # Template free is deferred to serverCron (every ~1s). After flushall,
@@ -1442,7 +1427,7 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip"}
 # Each test exercises one specific runtime conversion path
 # between TMPL_LP / TMPL_AR / LISTPACK / LISTPACK_EX / HT.
 # ============================================================
-start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "cluster:skip"}
+start_server {tags {"hash" "convert" "needs:debug" "cluster:skip"}
               overrides {hash-min-template-entries 0
                          hash-max-listpack-entries 8
                          hash-max-listpack-value 64}} {
@@ -1586,13 +1571,13 @@ start_server {tags {"hash" "hinted-hash-templates" "convert" "needs:debug" "clus
 }
 
 # ============================================================
-# Memory savings. Many identical hashes that share one schema must be far
+# Memory savings. Many identical hashes that share one template must be far
 # cheaper as templates, because the field names are stored once in the shared
 # template instead of once per key. Each test creates 20000 identical hashes in
 # both forms and requires the template form to be meaningfully smaller, both for
 # a single key (MEMORY USAGE) and across all keys (used_memory).
 # ============================================================
-start_server {tags {"hash" "hinted-hash-templates" "memory" "needs:debug" "cluster:skip"}
+start_server {tags {"hash" "memory" "needs:debug" "cluster:skip"}
               overrides {hash-min-template-entries 0}} {
     # Every hash holds the same 32 fields. Field names and values are the same
     # length, so in a plain hash exactly half the payload is field-name bytes,
@@ -1624,11 +1609,11 @@ start_server {tags {"hash" "hinted-hash-templates" "memory" "needs:debug" "clust
 
         r flushall
 
-        # 20000 template hashes sharing one schema (PREPARE once, same connection).
+        # 20000 template hashes sharing one template (PREPARE once, same connection).
         set mem_before [s used_memory]
         set rd [redis_deferring_client]
-        $rd himport prepare schema {*}$field_names; $rd read
-        for {set i 0} {$i < 20000} {incr i} { $rd himport set tmpl:$i schema {*}$field_values }
+        $rd himport prepare template {*}$field_names; $rd read
+        for {set i 0} {$i < 20000} {incr i} { $rd himport set tmpl:$i template {*}$field_values }
         for {set i 0} {$i < 20000} {incr i} { $rd read }
         $rd close
         assert_equal [r object encoding tmpl:0] template-listpack
@@ -1657,8 +1642,8 @@ start_server {tags {"hash" "hinted-hash-templates" "memory" "needs:debug" "clust
 
         set mem_before [s used_memory]
         set rd [redis_deferring_client]
-        $rd himport prepare schema {*}$field_names; $rd read
-        for {set i 0} {$i < 20000} {incr i} { $rd himport set tmpl:$i schema {*}$field_values }
+        $rd himport prepare template {*}$field_names; $rd read
+        for {set i 0} {$i < 20000} {incr i} { $rd himport set tmpl:$i template {*}$field_values }
         for {set i 0} {$i < 20000} {incr i} { $rd read }
         $rd close
         assert_equal [r object encoding tmpl:0] template-array
@@ -1673,9 +1658,9 @@ start_server {tags {"hash" "hinted-hash-templates" "memory" "needs:debug" "clust
     }
 }
 
-# Race the BIO key-ref drop (FLUSHALL ASYNC) against the main-thread hold-ref
-# drop (HIMPORT DISCARDALL) on template free. Probabilistic guard for ASan/TSan.
-start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" "external:skip"}
+# Stress freeing template hashes concurrently with async flushing to surface any
+# use-after-free in the cleanup path. Probabilistic guard for ASan/TSan.
+start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0
                          lazyfree-lazy-user-flush yes}} {
     test {template lifecycle fuzzer: BIO free races main-thread hold-ref drop} {
@@ -1706,10 +1691,9 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
     }
 }
 
-# hashTypeTryConvertToTemplate() must honor the disabled (0) sentinel: a plain
-# hash loaded from RDB converts to a template encoding only when the feature is
-# enabled (> 0), never at the default 0.
-start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" "external:skip"}
+# When the feature is disabled (the default 0), a plain hash loaded from RDB must
+# stay a plain hash; it only converts to a template encoding when enabled (> 0).
+start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0 hash-max-listpack-entries 64 appendonly no}} {
     # "small" stays listpack (<= hash-max-listpack-entries), "big" is hashtable.
     test {hash-min-template-entries=0: restart keeps plain hashes unconverted} {
@@ -1776,7 +1760,7 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
 # illegal, mirroring the duplicate-field checks done for regular
 # hashes. Out-of-order or duplicate fields must be rejected.
 # ============================================================
-start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" "external:skip"}
+start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0
                          sanitize-dump-payload yes
                          loglevel debug}} {
@@ -1836,7 +1820,7 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
 # Disk-based replica (repl-diskless-load disabled): the received RDB is written
 # to disk and loaded via rdbLoad(). A second full resync must not leak the
 # load-time template registry (mirrors the diskless test for the disk path).
-start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
+start_server {tags {"hash" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0 repl-diskless-sync no}} {
     start_server {overrides {hash-min-template-entries 0 repl-diskless-load disabled}} {
         test {Disk-based replica survives repeated full resyncs with templates} {
@@ -1877,7 +1861,7 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:de
 
 # Chained replication A->B->C: HSETC (the propagated form of HIMPORT SET) must
 # flow down the chain and reconstruct the template hash on every node.
-start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "cluster:skip" "external:skip"}
+start_server {tags {"hash" "repl" "needs:repl" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0}} {
     start_server {overrides {hash-min-template-entries 0}} {
         start_server {overrides {hash-min-template-entries 0}} {
@@ -1915,7 +1899,7 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "cluster:
 # mutation the entire key (all fields and values) and its template encoding are
 # verified on both the master and the replica. HGETALL is sorted before
 # comparing so the check does not depend on field order.
-start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
+start_server {tags {"hash" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0}} {
     start_server {overrides {hash-min-template-entries 0}} {
         set replica [srv -1 client]
@@ -1989,7 +1973,7 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:de
 # A replica's master client caches the last template seen via HSETC (a template
 # hold-ref). On an idle link that would otherwise pin the template even after
 # its key is gone; replicationCron drops the cache once idle so it is reclaimed.
-start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "cluster:skip" "external:skip"}
+start_server {tags {"hash" "repl" "needs:repl" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0}} {
     start_server {overrides {hash-min-template-entries 0}} {
         test {Replica releases idle HSETC template cache} {
@@ -2032,12 +2016,12 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "cluster:
 
 
 # ============================================================
-# Bulk registry: a large number of DISTINCT templates must round-trip through
-# full sync, AOF restart and RDB restart without loss or corruption. Each key
-# pins its own template (field names carry a per-key suffix), so the registry
-# holds ~$bulk_n entries -- this stresses the registry (de)serialization and the
-# load-time rdb_tmpls cleanup far more than the single-template tests above.
-# Correctness is checked end-to-end with DEBUG DIGEST plus the INFO counters.
+# Bulk template registry: a large number of DISTINCT templates must round-trip
+# through full sync, AOF restart and RDB restart without loss or corruption.
+# Each key has its own unique field set (a per-key suffix in the field names),
+# so the server tracks ~$bulk_n distinct templates at once -- far more than the
+# single-template tests above. Correctness is checked end-to-end with DEBUG
+# DIGEST plus the hash_templates / hash_template_keys INFO counters.
 # ============================================================
 set ::bulk_n 2000
 
@@ -2053,7 +2037,7 @@ proc populate_distinct_templates {clnt n} {
     }
 }
 
-start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
+start_server {tags {"hash" "repl" "needs:repl" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0 save {}}} {
     start_server {overrides {hash-min-template-entries 0}} {
         test "Full sync replicates $::bulk_n distinct templates" {
@@ -2089,7 +2073,7 @@ start_server {tags {"hash" "hinted-hash-templates" "repl" "needs:repl" "needs:de
     }
 }
 
-start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" "external:skip"}
+start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0 appendonly yes
                          auto-aof-rewrite-percentage 0 save {}}} {
     test "AOF restart preserves $::bulk_n distinct templates" {
@@ -2114,7 +2098,7 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
     }
 }
 
-start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" "external:skip"}
+start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0 appendonly no save {900 1}}} {
     test "RDB restart preserves $::bulk_n distinct templates" {
         r flushall
@@ -2125,8 +2109,8 @@ start_server {tags {"hash" "hinted-hash-templates" "needs:debug" "cluster:skip" 
         set K [s hash_template_keys]
         set digest [r debug digest]
 
-        # Self-contained DUMP/RESTORE of one key exercises the full TMPL format
-        # and its (now unconditional) field-order validation on load.
+        # DUMP/RESTORE of one key exercises the full template serialization
+        # format and its field-order validation on load.
         set blob [r dump bulk:1]
         r restore bulk:copy 0 $blob
         assert_equal [lsort [r hgetall bulk:1]] [lsort [r hgetall bulk:copy]]
