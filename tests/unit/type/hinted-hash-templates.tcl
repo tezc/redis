@@ -1423,6 +1423,77 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
 
 
 # ============================================================
+# Tests under hash-max-template-entries (upper bound).
+# Only hashes whose field count is within [min, max] auto-convert;
+# wider hashes are kept out of the shared template registry.
+# ============================================================
+start_server {tags {"hash" "needs:debug" "cluster:skip"}
+              overrides {hash-min-template-entries 2 hash-max-template-entries 4}} {
+
+    proc wait_tmpl_drain {} {
+        wait_for_condition 30 100 {
+            [s hash_templates] == 0
+        } else {
+            fail "hash template registry did not drain"
+        }
+    }
+
+    test {max bound: hash within [min,max] auto-converts} {
+        r flushall
+        wait_tmpl_drain
+        r hset mid a 1 b 2 c 3
+        assert_equal [r object encoding mid] "template-listpack"
+        assert_equal [s hash_templates] 1
+    }
+
+    test {max bound: hash above max stays plain} {
+        r flushall
+        wait_tmpl_drain
+        set cmd [list r hset wide]
+        for {set i 0} {$i < 6} {incr i} { lappend cmd "f$i" "v$i" }
+        {*}$cmd
+        assert_equal [r object encoding wide] "listpack"
+        assert_equal [s hash_templates] 0
+    }
+
+    test {max bound: hash below min stays plain} {
+        r flushall
+        wait_tmpl_drain
+        r hset small a 1
+        assert_equal [r object encoding small] "listpack"
+        assert_equal [s hash_templates] 0
+    }
+
+    test {max bound: max=0 disables the upper bound} {
+        r flushall
+        wait_tmpl_drain
+        r config set hash-max-template-entries 0
+        set cmd [list r hset wide2]
+        for {set i 0} {$i < 6} {incr i} { lappend cmd "f$i" "v$i" }
+        {*}$cmd
+        assert_equal [r object encoding wide2] "template-listpack"
+        r config set hash-max-template-entries 4
+    }
+
+    test {max bound: runtime change is applied lazily on next write} {
+        r flushall
+        wait_tmpl_drain
+        # A 3-field hash converts while max=4.
+        r hset k a 1 b 2 c 3
+        assert_equal [r object encoding k] "template-listpack"
+        # Lowering max below the existing template's field count must not
+        # convert it back.
+        r config set hash-max-template-entries 2
+        assert_equal [r object encoding k] "template-listpack"
+        # A new 3-field hash now exceeds max and stays plain.
+        r hset k2 a 1 b 2 c 3
+        assert_equal [r object encoding k2] "listpack"
+        r config set hash-max-template-entries 4
+    }
+}
+
+
+# ============================================================
 # Encoding conversion path coverage.
 # Each test exercises one specific runtime conversion path
 # between TMPL_LP / TMPL_AR / LISTPACK / LISTPACK_EX / HT.

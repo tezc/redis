@@ -2493,6 +2493,9 @@ struct redisServer {
                                        * hashes (from HSET or RDB load) are
                                        * auto-converted to template encoding.
                                        * 0 disables auto-convert. */
+    size_t hash_max_template_entries; /* Upper field-count bound for auto-convert:
+                                       * hashes with more fields than this are not
+                                       * converted. 0 disables the upper bound. */
     int hash_template_mask_encoding; /* TEMPORARY (remove before merge): when set,
                                       * OBJECT ENCODING / DEBUG OBJECT report the
                                       * legacy listpack/hashtable name for

@@ -2799,6 +2799,7 @@ static int hashTypeTryConvertCmpPair(const void *a, const void *b) {
  * Hashes with field TTLs (LP_EX, HT with HFE) are left as-is. */
 int hashTypeTryConvertToTemplate(robj *o) {
     size_t min_fields = server.hash_min_template_entries;
+    size_t max_fields = server.hash_max_template_entries;
 
     /* min_fields == 0 means the feature is disabled (the default). */
     if (min_fields == 0) return 0;
@@ -2812,6 +2813,9 @@ int hashTypeTryConvertToTemplate(robj *o) {
     /* Check field count threshold. */
     size_t num_fields = hashTypeLength(o, 0);
     if (num_fields < min_fields) return 0;
+
+    /* max_fields == 0 means no upper bound. */
+    if (max_fields > 0 && num_fields > max_fields) return 0;
 
     /* Extract field/value pairs so we can sort them by field name
      * before handing them to hashTemplateGetOrCreate (which requires
