@@ -1753,7 +1753,7 @@ cleanup:
         server.hash_min_template_entries > 0)
     {
         hashTypeTryConvertToTemplate(o, server.hash_min_template_entries,
-                                    server.hash_max_template_entries);
+                                    server.hash_max_template_entries, NULL);
     }
 
     return update;
@@ -2795,10 +2795,147 @@ static int hashTypeTryConvertCmpPair(const void *a, const void *b) {
                      ((const hashTypeFvPair *)b)->field);
 }
 
+/* ------------------------------------------------------------------------- *
+ * Bulk RDB-load template utility guard
+ *
+ * Loading a legacy (template-unaware) RDB, the field-count gate can create a
+ * flood of single-use templates that only waste memory. This guard, active only
+ * for bulk RDB load (not RESTORE/DUMP) when
+ * hash-rdb-load-template-disassembly-threshold > 0 and the RDB carries no
+ * template header, tracks every template still below the threshold key count
+ * ("low-utility") in a reverse map (template -> the hash robjs using it). Once
+ * low-utility templates dominate it stops creating new ones, and at the end of
+ * the load it disassembles whatever stays low-utility back to plain hashes. No
+ * keyspace scan is needed: each low-utility template carries its own key list. */
+#define MIN_REVERSE_LOOKUP 1000
+
+struct rdbLoadTemplateGuard {
+    dict *reverse_lookup;   /* hashTemplate* -> list of hash kvobj* (low-utility
+                             * templates only; entries leave on graduation). */
+    size_t disassembly_threshold; /* Keep templates with >= this many keys. */
+    size_t number_of_templates;   /* Templates created this load (monotonic). */
+    size_t number_of_templates_in_reverse_lookup; /* = dictSize(reverse_lookup). */
+    hashTemplate *pending_tmpl; /* Low-utility template the just-converted object
+                                 * attached to, awaiting commit of its stable
+                                 * keyspace object; NULL when nothing is pending. */
+    int header_has_templates; /* RDB carried a template header -> guard off. */
+    int stop_creating;        /* One-way latch: stop creating new templates. */
+};
+
+static void guardListValDestructor(dict *d, void *val) {
+    UNUSED(d);
+    listRelease(val);
+}
+
+/* Keys are template pointers (registry-owned, so no key destructor); values are
+ * lists of hash kvobjs freed when the entry is dropped/released. */
+static dictType guardReverseDictType = {
+    .hashFunction = dictPtrHash,
+    .valDestructor = guardListValDestructor,
+};
+
+rdbLoadTemplateGuard *hashTemplateGuardCreate(size_t disassembly_threshold) {
+    rdbLoadTemplateGuard *g = zcalloc(sizeof(*g));
+    g->disassembly_threshold = disassembly_threshold;
+    if (disassembly_threshold > 0)
+        g->reverse_lookup = dictCreate(&guardReverseDictType);
+    return g;
+}
+
+void hashTemplateGuardMarkHeaderTemplates(rdbLoadTemplateGuard *g) {
+    if (g) g->header_has_templates = 1;
+}
+
+/* Registry lookup without creating on miss. fields must be pre-sorted. */
+static hashTemplate *hashTemplateLookupByHash(uint64_t hash, sds *fields,
+                                              unsigned long long field_count) {
+    hashTemplate query = { .hash = hash, .field_count = field_count, .fields = fields };
+    dictEntry *de = dictFind(htemplates->registry, &query);
+    return de ? dictGetKey(de) : NULL;
+}
+
+/* Convert-time bookkeeping for the key just attached to tmpl. Called after the
+ * key ref has been taken, so tmpl->key_refcount is current. The key's keyspace
+ * object is not yet stable (dbAddRDBLoad rebuilds it into an embedded-key
+ * kvobj), so we only record the template here and defer adding the object to the
+ * reverse map until hashTemplateGuardCommit() runs with the stable kvobj. A
+ * template that just reached the threshold graduates (leaves the map). */
+static void hashTemplateGuardTrack(rdbLoadTemplateGuard *g, hashTemplate *tmpl) {
+    unsigned long long count;
+    atomicGet(tmpl->key_refcount, count);
+    g->pending_tmpl = NULL;
+    if (count < g->disassembly_threshold) {
+        g->pending_tmpl = tmpl;
+    } else if (count == g->disassembly_threshold) {
+        if (dictDelete(g->reverse_lookup, tmpl) == DICT_OK)
+            g->number_of_templates_in_reverse_lookup--;
+    }
+}
+
+/* Commit the pending low-utility template against kv, the now-stable keyspace
+ * object for the key just loaded. Always clears the pending slot, so it must be
+ * called exactly once after each rdbLoadObject (pass kv==NULL when the loaded
+ * object was discarded, e.g. an already-expired key, to clear without adding). */
+void hashTemplateGuardCommit(rdbLoadTemplateGuard *g, robj *kv) {
+    if (g == NULL) return;
+    hashTemplate *tmpl = g->pending_tmpl;
+    g->pending_tmpl = NULL;
+    if (tmpl == NULL || kv == NULL) return;
+    dictEntry *de = dictFind(g->reverse_lookup, tmpl);
+    list *l;
+    if (de == NULL) {
+        l = listCreate();
+        dictAdd(g->reverse_lookup, tmpl, l);
+        g->number_of_templates_in_reverse_lookup++;
+    } else {
+        l = dictGetVal(de);
+    }
+    listAddNodeTail(l, kv);
+}
+
+int hashTemplateGuardTryConvert(rdbLoadTemplateGuard *g, robj *o) {
+    if (g == NULL) return 0;               /* RESTORE/DUMP/check: no conversion. */
+    if (g->header_has_templates) return 0; /* Template-aware RDB: all configs off. */
+    return hashTypeTryConvertToTemplate(o, server.hash_rdb_load_min_template_entries,
+                                        server.hash_rdb_load_max_template_entries, g);
+}
+
+/* End of load: disassemble every template still low-utility back to a plain
+ * hash. Each disassembly drops a key ref; once a template loses its last key it
+ * is freed from the registry. We never dereference a template key here (only its
+ * value list), so a freed template left as a stale dict key is harmless. */
+void hashTemplateGuardDisassemble(rdbLoadTemplateGuard *g) {
+    if (g == NULL || g->reverse_lookup == NULL) return;
+    dictIterator *di = dictGetIterator(g->reverse_lookup);
+    dictEntry *de;
+    while ((de = dictNext(di)) != NULL) {
+        list *l = dictGetVal(de);
+        listIter li;
+        listNode *ln;
+        listRewind(l, &li);
+        while ((ln = listNext(&li)) != NULL) {
+            robj *o = listNodeValue(ln);
+            if (o->encoding == OBJ_ENCODING_TMPL_LP)
+                hashTypeConvertTmplLp(o, OBJ_ENCODING_LISTPACK);
+            else if (o->encoding == OBJ_ENCODING_TMPL_ARRAY)
+                hashTypeConvertTmplArray(o, OBJ_ENCODING_LISTPACK);
+        }
+    }
+    dictReleaseIterator(di);
+}
+
+void hashTemplateGuardFree(rdbLoadTemplateGuard *g) {
+    if (g == NULL) return;
+    if (g->reverse_lookup) dictRelease(g->reverse_lookup);
+    zfree(g);
+}
+
 /* Convert a hash to template encoding once it reaches hash-min-template-entries
  * fields: LP -> TMPL_LP, HT (no HFE) -> TMPL_ARRAY. Returns 1 if converted.
- * Hashes with field TTLs (LP_EX, HT with HFE) are left as-is. */
-int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields) {
+ * Hashes with field TTLs (LP_EX, HT with HFE) are left as-is. 'guard' is set
+ * only on the bulk RDB-load path and applies the utility throttle/tracking. */
+int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields,
+                                 rdbLoadTemplateGuard *guard) {
     /* min_fields == 0 means the feature is disabled (the default). */
     if (min_fields == 0) return 0;
 
@@ -2841,8 +2978,35 @@ int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields) 
     }
     zfree(pairs);
 
-    /* Get or create template. */
-    hashTemplate *tmpl = hashTemplateGetOrCreate(fields, num_fields);
+    /* Get or create template. With an active utility guard, refuse to create a
+     * brand-new template once the throttle has decided low-utility templates
+     * dominate; such hashes stay plain (matching ones still attach to existing
+     * templates via the lookup below). */
+    hashTemplate *tmpl;
+    if (guard && guard->disassembly_threshold > 0) {
+        uint64_t fhash = computeFieldsHash(fields, num_fields);
+        tmpl = hashTemplateLookupByHash(fhash, fields, num_fields);
+        if (tmpl == NULL) {
+            if (guard->stop_creating ||
+                (guard->number_of_templates_in_reverse_lookup > MIN_REVERSE_LOOKUP &&
+                 guard->number_of_templates_in_reverse_lookup * 2 > guard->number_of_templates))
+            {
+                guard->stop_creating = 1;
+                for (size_t j = 0; j < num_fields; j++) {
+                    sdsfree(fields[j]);
+                    sdsfree(values[j]);
+                }
+                zfree(fields);
+                zfree(values);
+                return 0;
+            }
+            tmpl = hashTemplateCreateInternal(fhash, fields, num_fields);
+            dictAdd(htemplates->registry, tmpl, NULL);
+            guard->number_of_templates++;
+        }
+    } else {
+        tmpl = hashTemplateGetOrCreate(fields, num_fields);
+    }
     int took_values; /* TMPL_ARRAY takes ownership of values; TMPL_LP copies. */
     if (o->encoding == OBJ_ENCODING_LISTPACK) {
         /* LP → TMPL_LP */
@@ -2859,6 +3023,12 @@ int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields) 
         o->encoding = OBJ_ENCODING_TMPL_ARRAY;
         took_values = 1;
     }
+
+    /* Utility guard: record this key's (now referenced) template as pending, or
+     * graduate the template if it just reached the keep threshold. The stable
+     * keyspace object is bound later by hashTemplateGuardCommit(). */
+    if (guard && guard->disassembly_threshold > 0)
+        hashTemplateGuardTrack(guard, tmpl);
 
     /* Free temporary arrays. Fields are always copied by the template; values
      * are taken by TMPL_ARRAY but copied by TMPL_LP, so free them only when the
@@ -3365,7 +3535,7 @@ void hsetCommand(client *c) {
     /* Convert to template once after all fields are set, rather than per-field,
      * to avoid a template lookup for each field set. */
     hashTypeTryConvertToTemplate(kv, server.hash_min_template_entries,
-                                server.hash_max_template_entries);
+                                server.hash_max_template_entries, NULL);
 
     /* HMSET (deprecated) and HSET return value is different. */
     char *cmdname = c->argv[0]->ptr;
@@ -4091,7 +4261,7 @@ void hsetexCommand(client *c) {
         hashTypeSetExDone(&setex);
     
     hashTypeTryConvertToTemplate(o, server.hash_min_template_entries,
-                                server.hash_max_template_entries);
+                                server.hash_max_template_entries, NULL);
     server.dirty += field_count;
 
     if (vecSize(vdeleted)) {

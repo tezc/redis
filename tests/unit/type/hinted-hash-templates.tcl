@@ -1804,9 +1804,10 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
         assert_equal v100 [r hget big f100]
     }
 
-    test {hash-rdb-load-min-template-entries>0: RESTORE converts plain listpack and hashtable hashes} {
-        # Build plain sources (HSET-path conversion off) then convert on RESTORE,
-        # which runs through the RDB-load path governed by the rdb-load config.
+    test {RESTORE ignores hash-rdb-load configs and loads the payload verbatim} {
+        # The rdb-load conversion configs apply only to bulk RDB load (the
+        # restart test above), never to RESTORE. A plain dumped hash must come
+        # back plain even with the rdb-load config enabled.
         r config set hash-min-template-entries 0
         r config set hash-rdb-load-min-template-entries 0
         r flushall
@@ -1819,14 +1820,127 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
         assert_equal hashtable [r object encoding src_ht]
         set lp_payload [r dump src_lp]
         set ht_payload [r dump src_ht]
+        # Enable load-time conversion: RESTORE must still ignore it.
         r config set hash-rdb-load-min-template-entries 4
         r restore dst_lp 0 $lp_payload
         r restore dst_ht 0 $ht_payload
-        assert_equal template-listpack [r object encoding dst_lp]
-        assert_equal template-array    [r object encoding dst_ht]
-        assert_equal 2 [s hash_templates]
+        assert_equal listpack  [r object encoding dst_lp]
+        assert_equal hashtable [r object encoding dst_ht]
+        assert_equal 0 [s hash_templates]
         assert_equal v3   [r hget dst_lp f3]
         assert_equal v100 [r hget dst_ht f100]
+    }
+}
+
+# RDB-load utility guard: when a legacy (template-unaware) RDB is loaded with
+# load-time conversion enabled, hash-rdb-load-template-disassembly-threshold
+# keeps a converted template only if it ends up shared by at least that many
+# keys; low-utility (sub-threshold) templates are disassembled back to plain
+# hashes at the end of the load.
+start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
+              overrides {hash-min-template-entries 0 hash-max-listpack-entries 64 appendonly no}} {
+
+    test {disassembly-threshold prunes single-use templates on legacy RDB load} {
+        r flushall
+        # Plain hashes only (HSET-path conversion off) => the saved RDB carries
+        # no template header, so the utility guard is active on reload.
+        # Field set {a b c d} is shared by two keys; {p q r s} by one.
+        r hset shared1 a 1 b 2 c 3 d 4
+        r hset shared2 a 5 b 6 c 7 d 8
+        r hset lone    p 1 q 2 r 3 s 4
+        assert_equal 0 [s hash_templates]
+        # Convert on load (>= 4 fields) but keep only templates with >= 2 keys.
+        r config set hash-rdb-load-min-template-entries 4
+        r config set hash-rdb-load-template-disassembly-threshold 2
+        r config rewrite
+        r save
+        restart_server 0 true false
+        # The shared field set graduates (2 keys) and survives as a template; the
+        # single-use one is disassembled back to a plain listpack.
+        assert_equal template-listpack [r object encoding shared1]
+        assert_equal template-listpack [r object encoding shared2]
+        assert_equal listpack          [r object encoding lone]
+        assert_equal 1 [s hash_templates]
+        assert_equal 2 [s hash_template_keys]
+        assert_equal 4 [r hget shared1 d]
+        assert_equal 8 [r hget shared2 d]
+        assert_equal 4 [r hget lone s]
+    }
+
+    test {disassembly-threshold=0 keeps every converted template (guard off)} {
+        r flushall
+        wait_for_condition 50 20 { [s hash_templates] == 0 } else {
+            fail "templates not drained after flushall"
+        }
+        # A single-use field set that would be pruned if the guard were on.
+        r hset solo a 1 b 2 c 3 d 4
+        assert_equal 0 [s hash_templates]
+        r config set hash-rdb-load-min-template-entries 4
+        r config set hash-rdb-load-template-disassembly-threshold 0
+        r config rewrite
+        r save
+        restart_server 0 true false
+        # Guard disabled: the single-use template is kept.
+        assert_equal template-listpack [r object encoding solo]
+        assert_equal 1 [s hash_templates]
+        assert_equal 1 [s hash_template_keys]
+        assert_equal 4 [r hget solo d]
+    }
+
+    test {disassembly guard tolerates a throttle-triggering legacy RDB load} {
+        # More than MIN_REVERSE_LOOKUP (1000) distinct single-use field sets:
+        # the creation throttle latches mid-load. The load must still complete
+        # with all data intact and no low-utility templates left behind.
+        r flushall
+        wait_for_condition 50 20 { [s hash_templates] == 0 } else {
+            fail "templates not drained after flushall"
+        }
+        for {set i 0} {$i < 1100} {incr i} {
+            r hset k$i ${i}_a 1 ${i}_b 2 ${i}_c 3 ${i}_d 4
+        }
+        assert_equal 0 [s hash_templates]
+        r config set hash-rdb-load-min-template-entries 4
+        r config set hash-rdb-load-template-disassembly-threshold 2
+        r config rewrite
+        r save
+        restart_server 0 true false
+        # Every field set was single-use, so none survive as templates whether
+        # they were throttled (never created) or disassembled at end of load.
+        assert_equal 0 [s hash_templates]
+        assert_equal 0 [s hash_template_keys]
+        assert_equal listpack [r object encoding k0]
+        assert_equal listpack [r object encoding k1099]
+        assert_equal 4 [r hget k0 0_d]
+        assert_equal 4 [r hget k1099 1099_d]
+    }
+}
+
+# A template-aware RDB (one that carries a template header) must bypass the
+# load-time utility guard entirely: existing templates are restored as-is even
+# when the disassembly threshold would otherwise prune them.
+start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
+              overrides {hash-min-template-entries 4 hash-max-listpack-entries 64 appendonly no}} {
+
+    test {template-aware RDB header bypasses the disassembly guard} {
+        r flushall
+        wait_for_condition 50 20 { [s hash_templates] == 0 } else {
+            fail "templates not drained after flushall"
+        }
+        # HSET-path conversion creates a template referenced by a single key, so
+        # the saved RDB carries a template header.
+        r hset solo a 1 b 2 c 3 d 4
+        assert_equal template-listpack [r object encoding solo]
+        assert_equal 1 [s hash_templates]
+        # A threshold that would prune a single-use template on a legacy RDB.
+        r config set hash-rdb-load-template-disassembly-threshold 100
+        r config rewrite
+        r save
+        restart_server 0 true false
+        # The header gate keeps the template intact regardless of the threshold.
+        assert_equal template-listpack [r object encoding solo]
+        assert_equal 1 [s hash_templates]
+        assert_equal 1 [s hash_template_keys]
+        assert_equal 4 [r hget solo d]
     }
 }
 

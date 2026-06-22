@@ -2504,6 +2504,13 @@ struct redisServer {
                                        * 0 disables. */
     size_t hash_rdb_load_max_template_entries; /* Upper field-count bound for the
                                        * RDB-load path. 0 disables the bound. */
+    size_t hash_rdb_load_template_disassembly_threshold; /* Bulk RDB-load only
+                                       * (not RESTORE/DUMP). A template that ends
+                                       * the load with fewer than this many keys
+                                       * is "low-utility" and is disassembled back
+                                       * to a plain hash. Also drives the throttle
+                                       * that stops creating new templates once
+                                       * most are low-utility. 0 disables. */
     int hash_template_mask_encoding; /* TEMPORARY (remove before merge): when set,
                                       * OBJECT ENCODING / DEBUG OBJECT report the
                                       * legacy listpack/hashtable name for
@@ -3974,8 +3981,19 @@ static inline size_t *htGetMetadataSize(dict *d) {
 #define HFE_LAZY_NO_UPDATE_KEYSIZES  (1<<5) /* If field lazy deleted, avoid updating keysizes histogram */
 #define HFE_LAZY_NO_UPDATE_ALLOCSIZES (1<<6) /* If field lazy deleted, avoid updating slot allocation sizes */
 
+/* Bulk RDB-load-only utility guard for hash templates (see t_hash.c). Opaque
+ * here; rdb.c only holds a pointer and calls the helpers below. */
+typedef struct rdbLoadTemplateGuard rdbLoadTemplateGuard;
+rdbLoadTemplateGuard *hashTemplateGuardCreate(size_t disassembly_threshold);
+void hashTemplateGuardMarkHeaderTemplates(rdbLoadTemplateGuard *g);
+int hashTemplateGuardTryConvert(rdbLoadTemplateGuard *g, robj *o);
+void hashTemplateGuardCommit(rdbLoadTemplateGuard *g, robj *kv);
+void hashTemplateGuardDisassemble(rdbLoadTemplateGuard *g);
+void hashTemplateGuardFree(rdbLoadTemplateGuard *g);
+
 void hashTypeConvert(redisDb *db, robj *o, int enc);
-int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields);
+int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields,
+                                 rdbLoadTemplateGuard *guard);
 void hashTypeTryConversion(redisDb *db, kvobj *kv, robj **argv, int start, int end);
 int hashTypeExists(redisDb *db, kvobj *kv, sds field, int hfeFlags, int *isHashDeleted);
 int hashTypeDelete(robj *o, void *key);
