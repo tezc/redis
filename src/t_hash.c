@@ -1752,7 +1752,8 @@ cleanup:
     if (!update && !(flags & HASH_SET_NO_TEMPLATE_CONVERT) &&
         server.hash_min_template_entries > 0)
     {
-        hashTypeTryConvertToTemplate(o);
+        hashTypeTryConvertToTemplate(o, server.hash_min_template_entries,
+                                    server.hash_max_template_entries);
     }
 
     return update;
@@ -2797,10 +2798,7 @@ static int hashTypeTryConvertCmpPair(const void *a, const void *b) {
 /* Convert a hash to template encoding once it reaches hash-min-template-entries
  * fields: LP -> TMPL_LP, HT (no HFE) -> TMPL_ARRAY. Returns 1 if converted.
  * Hashes with field TTLs (LP_EX, HT with HFE) are left as-is. */
-int hashTypeTryConvertToTemplate(robj *o) {
-    size_t min_fields = server.hash_min_template_entries;
-    size_t max_fields = server.hash_max_template_entries;
-
+int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields) {
     /* min_fields == 0 means the feature is disabled (the default). */
     if (min_fields == 0) return 0;
 
@@ -3366,7 +3364,8 @@ void hsetCommand(client *c) {
 
     /* Convert to template once after all fields are set, rather than per-field,
      * to avoid a template lookup for each field set. */
-    hashTypeTryConvertToTemplate(kv);
+    hashTypeTryConvertToTemplate(kv, server.hash_min_template_entries,
+                                server.hash_max_template_entries);
 
     /* HMSET (deprecated) and HSET return value is different. */
     char *cmdname = c->argv[0]->ptr;
@@ -4091,7 +4090,8 @@ void hsetexCommand(client *c) {
     if (set_expiry)
         hashTypeSetExDone(&setex);
     
-    hashTypeTryConvertToTemplate(o);
+    hashTypeTryConvertToTemplate(o, server.hash_min_template_entries,
+                                server.hash_max_template_entries);
     server.dirty += field_count;
 
     if (vecSize(vdeleted)) {

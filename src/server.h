@@ -2496,6 +2496,14 @@ struct redisServer {
     size_t hash_max_template_entries; /* Upper field-count bound for auto-convert:
                                        * hashes with more fields than this are not
                                        * converted. 0 disables the upper bound. */
+    size_t hash_rdb_load_min_template_entries; /* Like hash_min_template_entries
+                                       * but applied on the RDB-load path (which
+                                       * the AOF RDB preamble also uses). Affects
+                                       * only plain hashes loaded from RDB; REF
+                                       * form templates are restored regardless.
+                                       * 0 disables. */
+    size_t hash_rdb_load_max_template_entries; /* Upper field-count bound for the
+                                       * RDB-load path. 0 disables the bound. */
     int hash_template_mask_encoding; /* TEMPORARY (remove before merge): when set,
                                       * OBJECT ENCODING / DEBUG OBJECT report the
                                       * legacy listpack/hashtable name for
@@ -3967,7 +3975,7 @@ static inline size_t *htGetMetadataSize(dict *d) {
 #define HFE_LAZY_NO_UPDATE_ALLOCSIZES (1<<6) /* If field lazy deleted, avoid updating slot allocation sizes */
 
 void hashTypeConvert(redisDb *db, robj *o, int enc);
-int hashTypeTryConvertToTemplate(robj *o);
+int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields);
 void hashTypeTryConversion(redisDb *db, kvobj *kv, robj **argv, int start, int end);
 int hashTypeExists(redisDb *db, kvobj *kv, sds field, int hfeFlags, int *isHashDeleted);
 int hashTypeDelete(robj *o, void *key);

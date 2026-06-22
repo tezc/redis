@@ -3088,7 +3088,8 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         serverAssert(len == 0);
 
         /* Try to convert to template-based hash if threshold met. */
-        hashTypeTryConvertToTemplate(o);
+        hashTypeTryConvertToTemplate(o, server.hash_rdb_load_min_template_entries,
+                                    server.hash_rdb_load_max_template_entries);
     } else if (rdbtype == RDB_TYPE_HASH_TMPL_LP) {
         /* TMPL_LP full format: [count][f0]...[fN-1][lp_blob].
          * Field names are loaded individually (so the template can be
@@ -3734,7 +3735,8 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                     hashTypeConvert(NULL /*db*/, o, OBJ_ENCODING_HT);
 
                 /* Try to convert to template-based hash if threshold met. */
-                hashTypeTryConvertToTemplate(o);
+                hashTypeTryConvertToTemplate(o, server.hash_rdb_load_min_template_entries,
+                                            server.hash_rdb_load_max_template_entries);
                 break;
             default:
                 /* totally unreachable */

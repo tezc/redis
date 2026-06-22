@@ -1762,8 +1762,10 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
     }
 }
 
-# When the feature is disabled (the default 0), a plain hash loaded from RDB must
-# stay a plain hash; it only converts to a template encoding when enabled (> 0).
+# Load-time conversion of plain hashes is governed by hash-rdb-load-min-template-entries
+# (separate from the HSET-path hash-min-template-entries). With it disabled (the
+# default 0), a plain hash loaded from RDB/RESTORE stays plain; it only converts
+# to a template encoding when that config is enabled (> 0).
 start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0 hash-max-listpack-entries 64 appendonly no}} {
     # "small" stays listpack (<= hash-max-listpack-entries), "big" is hashtable.
@@ -1782,13 +1784,14 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
         assert_equal v100 [r hget big f100]
     }
 
-    test {hash-min-template-entries>0: restart converts listpack to TMPL_LP and hashtable to TMPL_ARRAY} {
+    test {hash-rdb-load-min-template-entries>0: restart converts listpack to TMPL_LP and hashtable to TMPL_ARRAY} {
         r flushall
         for {set i 0} {$i < 5}   {incr i} { r hset small f$i v$i }
         for {set i 0} {$i < 200} {incr i} { r hset big f$i v$i }
         assert_equal 0 [s hash_templates]
-        # Persist config so the restarted server loads with the feature enabled.
-        r config set hash-min-template-entries 4
+        # Load-time conversion of plain hashes is governed by the rdb-load config;
+        # persist it so the restarted server converts on load.
+        r config set hash-rdb-load-min-template-entries 4
         r config rewrite
         r save
         restart_server 0 true false
@@ -1801,8 +1804,11 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
         assert_equal v100 [r hget big f100]
     }
 
-    test {hash-min-template-entries>0: RESTORE converts plain listpack and hashtable hashes} {
+    test {hash-rdb-load-min-template-entries>0: RESTORE converts plain listpack and hashtable hashes} {
+        # Build plain sources (HSET-path conversion off) then convert on RESTORE,
+        # which runs through the RDB-load path governed by the rdb-load config.
         r config set hash-min-template-entries 0
+        r config set hash-rdb-load-min-template-entries 0
         r flushall
         wait_for_condition 50 20 { [s hash_templates] == 0 } else {
             fail "templates not drained after flushall"
@@ -1813,7 +1819,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
         assert_equal hashtable [r object encoding src_ht]
         set lp_payload [r dump src_lp]
         set ht_payload [r dump src_ht]
-        r config set hash-min-template-entries 4
+        r config set hash-rdb-load-min-template-entries 4
         r restore dst_lp 0 $lp_payload
         r restore dst_ht 0 $ht_payload
         assert_equal template-listpack [r object encoding dst_lp]
