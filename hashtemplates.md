@@ -94,8 +94,10 @@ reaches this threshold is converted to a template-based encoding on the fly:
   threshold,
 - on RDB load when the loaded hash already has at least this many fields.
 
-If a template-based hash later drops below the threshold (e.g. via `HDEL`),
-it is automatically converted back to `listpack` or `hashtable`.
+The threshold only triggers conversion **to** a template encoding; it is not
+re-evaluated when a hash shrinks. Removing fields with `HDEL` keeps the hash
+template-encoded (it switches to a smaller shared template) until the last
+field is removed.
 
 Default is `0`, which disables this behavior — hashes only become
 template-based when explicitly created with `HIMPORT SET`.
@@ -109,9 +111,9 @@ template-based when explicitly created with `HIMPORT SET`.
 The `INFO stats` section exposes two server-wide counters:
 
 - `hash_templates` — number of distinct templates currently held in the
-  shared registry. 
+  shared registry.
 - `hash_template_keys` — total number of keys whose hash is backed by a
-  template
+  template.
 
 ---
 
@@ -129,7 +131,7 @@ Reports the underlying hash encoding. The possible values for hashes are:
   most `hash-max-listpack-entries` (default `512`) and every field/value is at
   most `hash-max-listpack-value` bytes (default `64`).
 - `hashtable` — full hash table; used once the hash exceeds either listpack
-  thresholds
+  threshold.
 
 **Template-based hashes** (created with `HIMPORT SET`, or auto-converted via
 `hash-min-template-entries`):
@@ -138,9 +140,4 @@ Reports the underlying hash encoding. The possible values for hashes are:
   most `hash-max-listpack-entries` (default `512`) and every value is at
   most `hash-max-listpack-value` bytes (default `64`).
 - `template-array` — values stored in a plain array, chosen when the listpack constraints above are not met.
-
-
-
-
-
 
