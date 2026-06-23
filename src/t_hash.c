@@ -3183,10 +3183,13 @@ void rdbLoadTemplateCtxFree(rdbLoadTemplateCtx *ctx) {
     zfree(ctx);
 }
 
-/* Convert a hash to template encoding once it reaches hash-min-template-entries
- * fields: LP -> TMPL_LP, HT (no HFE) -> TMPL_ARRAY. Returns 1 if converted.
- * Hashes with field TTLs (LP_EX, HT with HFE) are left as-is. 'ctx' is set
- * only on the RDB-load path and drives the throttle/tracking for disassembly. */
+/* Convert a hash to template encoding when its field count is within
+ * [min_fields, max_fields] (min_fields 0 = disabled, max_fields 0 = no upper
+ * bound). LP -> TMPL_LP, HT (no HFE) -> TMPL_ARRAY. Returns 1 if converted.
+ * Hashes with field TTLs (LP_EX, HT with HFE) are left as-is. The thresholds
+ * come from the caller: the live config on the write path, the hash-rdb-load-*
+ * config on RDB load. 'ctx' is set only on the RDB-load path and drives the
+ * throttle/tracking for disassembly. */
 int hashTypeTryConvertToTemplate(robj *o, 
                                  size_t min_fields,
                                  size_t max_fields,
