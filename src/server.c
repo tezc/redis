@@ -1808,6 +1808,13 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * live template registry from lagging behind. */
     hashTemplateDrainPendingFree();
 
+    /* Clean up fields_lp blobs periodically. These are built lazily during
+     * DUMP/RESTORE/ASM and are dead weight once those operations complete.
+     * Run every 100ms; the function is cheap when there are no blobs to clean. */
+    run_with_period(100) {
+        hashTemplatesCleanupFieldsLpCron();
+    }
+
     /* Resize tracking keys table if needed. This is also done at every
      * command execution, but we want to be sure that if the last command
      * executed changes the value via CONFIG SET, the server will perform

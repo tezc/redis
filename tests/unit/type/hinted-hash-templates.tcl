@@ -2039,6 +2039,41 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
             wait_for_log_messages 0 {"*fields not strictly sorted*"} $loglines 50 100
         }
     }
+
+    # TMPL_LP-specific corruption tests: the format is [fields_lp_blob][values_lp_blob].
+    # We test that corrupted payloads are rejected (exact error messages may vary
+    # depending on where corruption is detected).
+    r config set hash-max-listpack-entries 128
+
+    test "RESTORE deep validation: TMPL_LP rejects corrupt field blob" {
+        # Corrupt a byte inside the fields_lp listpack to break its structure.
+        # With checksum validation disabled, lpValidateIntegrity should catch it.
+        set dump [tmpl_dump template-listpack]
+        set bad [string replace $dump 10 10 "\xFE"]
+        # Expect a generic "Bad data format" error (the specific rdbReportCorruptRDB
+        # message is logged but not always propagated to the client).
+        assert_error "*Bad data format*" {r restore rk 0 $bad}
+        # If the corruption is caught, the key should not exist.
+        assert_equal 0 [r exists rk]
+    }
+
+    # TMPL_ARRAY-specific: oversized field_count (rdbTryAllocSdsArray fail).
+    r config set hash-max-listpack-entries 0
+    test "RESTORE deep validation: TMPL_ARRAY rejects oversized field count" {
+        # The TMPL_ARRAY format is [RDB_len_count][f0][v0][f1][v1]...
+        # We inject a huge count value that triggers the allocation guard.
+        set dump [tmpl_dump template-array]
+        binary scan $dump cu* bytes
+        # Replace byte 1 (count) with a 32-bit RDB encoding of 2^32-1.
+        # RDB 32-bit: 0x80 (marker) + 4 bytes big-endian.
+        set type [lindex $bytes 0]
+        set rest [lrange $bytes 2 end]
+        set huge [list $type 0x80 0xFF 0xFF 0xFF 0xFF]
+        set bad [binary format cu* [concat $huge $rest]]
+        # Expect rejection (the specific error may be "Bad data format" or similar).
+        assert_error "*" {r restore rk 0 $bad}
+        assert_equal 0 [r exists rk]
+    }
 }
 
 # Disk-based replica (repl-diskless-load disabled): the received RDB is written

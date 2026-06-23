@@ -3912,6 +3912,12 @@ typedef struct hashTemplate {
                           * a changed field set creates a new template). Used to
                           * attribute a holder's share to client memory. */
     sds *fields;         /* Ordered array of field names (sorted, owned). */
+    sds fields_lp;       /* Lazily-built listpack blob of the sorted field names
+                          * ([f0][f1]...[fN-1]), wrapped in an sds so it can key
+                          * by_fields_lp. NULL until first needed. Lets the
+                          * self-contained DUMP/RESTORE TMPL_LP form ship one blob
+                          * instead of N strings, and lets RESTORE find the
+                          * template with one O(1) blob lookup. Owned here. */
     robj **propargv;     /* Lazy-built argv used only to propagate HIMPORT SET
                           * (as HSETC). Layout: [hsetc, NULL_key, <fields>,
                           * <null-values>]; field slots own field robjs, key and
@@ -3921,6 +3927,9 @@ typedef struct hashTemplate {
 /* Global registry for hash templates. */
 typedef struct hashTemplates {
     dict *registry;             /* field set -> template lookup */
+    dict *by_fields_lp;         /* fields-listpack blob -> template lookup, used
+                                 * to resolve a self-contained TMPL_LP RESTORE in
+                                 * O(1) without reading field names one by one. */
     hashTemplate **by_id;       /* ID -> template lookup */
     size_t by_id_cap;           /* Allocated slots in by_id array. */
     uint64_t *pending_free_ids; /* Ids of templates that hit zero refs on a BIO
@@ -4049,8 +4058,12 @@ void hashTemplateIncrHoldRef(hashTemplate *tmpl);
 void hashTemplateDecrHoldRef(hashTemplate *tmpl);
 
 void hashTemplateDrainPendingFree(void);
+void hashTemplatesCleanupFieldsLpCron(void);
 int hashTemplateValidateFields(sds *fields, unsigned long long field_count);
 hashTemplate *hashTemplateGetById(uint64_t id);
+sds hashTemplateGetFieldsLp(hashTemplate *tmpl);
+hashTemplate *hashTemplateGetByFieldsLp(sds fields_lp);
+void hashTemplateAttachFieldsLp(hashTemplate *tmpl, sds fields_lp);
 void hashTemplatesInit(void);
 hashTemplate *hashTemplateLpGetTemplate(unsigned char *lp);
 hashTemplate *hashTypeGetTemplate(robj *o);
@@ -4058,7 +4071,7 @@ uint64_t hashTemplateLpGetTemplateId(unsigned char *lp);
 char *hashTemplateEquivalentEncoding(robj *o);
 unsigned char *hashTemplateLpCreate(hashTemplate *tmpl, sds *values);
 hashTemplateArray *hashTemplateArrayCreate(hashTemplate *tmpl, sds *values, int take);
-robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values);
+robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values, int take);
 size_t hashTemplateRegistrySize(void);
 size_t hashTemplateKeyCount(void);
 unsigned char *hashTypeListpackGetLp(robj *o);

@@ -325,6 +325,14 @@ static void hashDictWithExpireOnRelease(dict *d) {
 /* Global template registry; file-local alias of server.htemplates. */
 static hashTemplates *htemplates = NULL;
 
+/* Incremental pending_free drain state (serverCron processes in batches). */
+static uint64_t *pending_free_drain_queue = NULL;
+static size_t pending_free_drain_count = 0;
+static size_t pending_free_drain_pos = 0;
+
+/* Incremental fields_lp cleanup state (serverCron processes in batches). */
+static dictIterator *fields_lp_cleanup_iter = NULL;
+
 /* Allocate the smallest available template ID and register in by_id.
  * Main-thread only (template creation), but a BIO lazyfree thread may read by_id
  * concurrently (hashTemplateLpFree), so the array is grown/written under the
@@ -371,6 +379,36 @@ static void recycleTemplateId(uint64_t id) {
 hashTemplate *hashTemplateGetById(uint64_t id) {
     if (id >= htemplates->by_id_cap) return NULL;
     return htemplates->by_id[id];
+}
+
+/* Index 'tmpl' under its fields-listpack blob (transferring ownership of
+ * 'fields_lp') if it has no blob yet; otherwise free the passed-in blob. */
+void hashTemplateAttachFieldsLp(hashTemplate *tmpl, sds fields_lp) {
+    if (tmpl->fields_lp) {
+        sdsfree(fields_lp);
+        return;
+    }
+    tmpl->fields_lp = fields_lp;
+    dictAdd(htemplates->by_fields_lp, fields_lp, tmpl);
+}
+
+/* Return tmpl's fields-listpack blob ([f0][f1]...[fN-1]), building and indexing
+ * it on first use. Owned by the template; do not free. */
+sds hashTemplateGetFieldsLp(hashTemplate *tmpl) {
+    if (tmpl->fields_lp) return tmpl->fields_lp;
+    unsigned char *lp = lpNew(0);
+    for (unsigned long long i = 0; i < tmpl->field_count; i++)
+        lp = lpAppend(lp, (unsigned char *)tmpl->fields[i], sdslen(tmpl->fields[i]));
+    sds blob = sdsnewlen(lp, lpBytes(lp));
+    lpFree(lp);
+    hashTemplateAttachFieldsLp(tmpl, blob);
+    return blob;
+}
+
+/* Lookup a template by its fields-listpack blob. Returns NULL if not indexed. */
+hashTemplate *hashTemplateGetByFieldsLp(sds fields_lp) {
+    dictEntry *de = dictFind(htemplates->by_fields_lp, fields_lp);
+    return de ? dictGetVal(de) : NULL;
 }
 
 /* Compute SipHash for a single field. */
@@ -421,6 +459,11 @@ static void templateRegistryKeyDestructor(dict *d, void *key) {
      * holder releases the template. */
     serverAssert(tmpl->propargv == NULL);
     recycleTemplateId(tmpl->id);
+    /* Drop the lazy fields-listpack blob and its by_fields_lp index entry. */
+    if (tmpl->fields_lp) {
+        dictDelete(htemplates->by_fields_lp, tmpl->fields_lp);
+        sdsfree(tmpl->fields_lp);
+    }
     for (unsigned long long i = 0; i < tmpl->field_count; i++)
         sdsfree(tmpl->fields[i]);
     zfree(tmpl->fields);
@@ -437,11 +480,36 @@ static dictType templateRegistryDictType = {
     NULL                           /* allow to expand */
 };
 
+/* by_fields_lp dict callbacks: key is the fields-listpack sds blob (binary,
+ * owned by the template), value is the hashTemplate*. */
+static uint64_t templateFieldsLpHashFunc(const void *key) {
+    return dictGenHashFunction(key, sdslen((sds)key));
+}
+
+static int templateFieldsLpKeyCompare(dictCmpCache *cache,
+                                      const void *k1, const void *k2)
+{
+    UNUSED(cache);
+    size_t l1 = sdslen((sds)k1), l2 = sdslen((sds)k2);
+    return (l1 == l2) && (memcmp(k1, k2, l1) == 0);
+}
+
+static dictType templateFieldsLpDictType = {
+    templateFieldsLpHashFunc,      /* hash function */
+    NULL,                          /* key dup */
+    NULL,                          /* val dup */
+    templateFieldsLpKeyCompare,    /* key compare */
+    NULL,                          /* key destructor (blob owned by template) */
+    NULL,                          /* val destructor */
+    NULL                           /* allow to expand */
+};
+
 /* Initialize hash templates registry. */
 void hashTemplatesInit(void) {
     if (htemplates) return;
     htemplates = zcalloc(sizeof(hashTemplates));
     htemplates->registry = dictCreate(&templateRegistryDictType);
+    htemplates->by_fields_lp = dictCreate(&templateFieldsLpDictType);
     pthread_mutex_init(&htemplates->lock, NULL);
     server.htemplates = htemplates;
 }
@@ -454,6 +522,7 @@ static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsi
     atomicSet(tmpl->key_refcount, 0);
     tmpl->field_count = field_count;
     tmpl->fields = zmalloc(sizeof(sds) * field_count);
+    tmpl->fields_lp = NULL; /* Lazy built on first save/lookup. */
     tmpl->propargv = NULL; /* Lazy built on first HIMPORT SET. */
     tmpl->mem_size = sizeof(*tmpl) + sizeof(sds) * field_count;
 
@@ -572,25 +641,91 @@ void hashTemplateDecrKeyRef(hashTemplate *tmpl) {
 
 /* Free the templates queued by BIO threads. Main-thread only (serverCron). An id
  * is freed only if its template still has no references; anything already freed
- * or referenced again in the meantime is skipped. */
+ * or referenced again in the meantime is skipped.
+ *
+ * Processes incrementally with a time limit to avoid blocking the main thread
+ * when draining large batches (e.g. after FLUSHALL). */
 void hashTemplateDrainPendingFree(void) {
-    pthread_mutex_lock(&htemplates->lock);
-    uint64_t *queue = htemplates->pending_free_ids;
-    size_t count = htemplates->pending_free_count;
-    htemplates->pending_free_ids = NULL;
-    htemplates->pending_free_count = 0;
-    htemplates->pending_free_cap = 0;
-    pthread_mutex_unlock(&htemplates->lock);
+    /* Acquire new batch if not already draining. */
+    if (!pending_free_drain_queue) {
+        pthread_mutex_lock(&htemplates->lock);
+        pending_free_drain_queue = htemplates->pending_free_ids;
+        pending_free_drain_count = htemplates->pending_free_count;
+        htemplates->pending_free_ids = NULL;
+        htemplates->pending_free_count = 0;
+        htemplates->pending_free_cap = 0;
+        pthread_mutex_unlock(&htemplates->lock);
 
-    for (size_t i = 0; i < count; i++) {
-        hashTemplate *tmpl = hashTemplateGetById(queue[i]);
-        if (tmpl == NULL) continue; /* already reclaimed (duplicate id) */
-        unsigned long long key_refs;
-        atomicGet(tmpl->key_refcount, key_refs);
-        if (key_refs == 0 && tmpl->hold_refcount == 0)
-            dictDelete(htemplates->registry, tmpl);
+        pending_free_drain_pos = 0;
+        if (pending_free_drain_count == 0) {
+            zfree(pending_free_drain_queue);
+            pending_free_drain_queue = NULL;
+            return;
+        }
     }
-    zfree(queue);
+
+    /* Time limit: spread work across multiple cron cycles to avoid spikes. */
+    long long start = ustime();
+    long long timelimit = 1000000 / server.hz / 10;  // 10% of a hz cycle
+    if (timelimit <= 0) timelimit = 1;
+
+    while (pending_free_drain_pos < pending_free_drain_count) {
+        hashTemplate *tmpl = hashTemplateGetById(pending_free_drain_queue[pending_free_drain_pos]);
+        if (tmpl != NULL) {
+            unsigned long long key_refs;
+            atomicGet(tmpl->key_refcount, key_refs);
+            if (key_refs == 0 && tmpl->hold_refcount == 0)
+                dictDelete(htemplates->registry, tmpl);
+        }
+        pending_free_drain_pos++;
+
+        if (ustime() - start > timelimit) break;
+    }
+
+    /* Done with this batch? */
+    if (pending_free_drain_pos >= pending_free_drain_count) {
+        zfree(pending_free_drain_queue);
+        pending_free_drain_queue = NULL;
+        pending_free_drain_count = 0;
+        pending_free_drain_pos = 0;
+    }
+}
+
+/* Clean up fields_lp blobs that are no longer needed. These blobs are built
+ * lazily during DUMP/RESTORE/ASM for O(1) template lookup and consume memory
+ * proportional to the field names. Once ASM/DUMP is complete, the blobs are
+ * dead weight until the next DUMP operation (at which point they're rebuilt
+ * if needed).
+ *
+ * Processes incrementally with a time limit to avoid blocking the main thread
+ * when cleaning large template registries. Main-thread only (serverCron). */
+void hashTemplatesCleanupFieldsLpCron(void) {
+    /* Start cleanup if not already running and there are blobs to clean. */
+    if (!fields_lp_cleanup_iter) {
+        if (dictSize(htemplates->by_fields_lp) == 0) return;
+        fields_lp_cleanup_iter = dictGetSafeIterator(htemplates->by_fields_lp);
+    }
+
+    /* Time limit: spread work across multiple cron cycles to avoid spikes. */
+    long long start = ustime();
+    long long timelimit = 1000000 / server.hz / 10;  // 10% of a hz cycle
+    if (timelimit <= 0) timelimit = 1;
+
+    dictEntry *de;
+    while ((de = dictNext(fields_lp_cleanup_iter)) != NULL) {
+        hashTemplate *tmpl = dictGetVal(de);
+        dictDelete(htemplates->by_fields_lp, tmpl->fields_lp);
+        sdsfree(tmpl->fields_lp);
+        tmpl->fields_lp = NULL;
+
+        if (ustime() - start > timelimit) break;
+    }
+
+    /* Done with this cleanup cycle? */
+    if (de == NULL) {
+        dictReleaseIterator(fields_lp_cleanup_iter);
+        fields_lp_cleanup_iter = NULL;
+    }
 }
 
 /* Get number of templates in the registry. */
@@ -822,15 +957,23 @@ int hashTypeCanCreateTmplLp(unsigned long long count, sds *values) {
  * Two template-backed encodings exist:
  *   TMPL_LP    - values packed in a listpack (compact, small hashes).
  *   TMPL_ARRAY - values stored as an sds array (used when listpack limits
- *                would be exceeded). */
-robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values) {
+ *                would be exceeded).
+ * If `take` is set, ownership of the value sds strings is transferred here: the
+ * LP path copies their bytes into the listpack and frees them, the ARRAY path
+ * adopts them directly (no sdsdup). The caller then frees only the array shell.
+ * If `take` is clear the values are borrowed and copied. */
+robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values, int take) {
     robj *o;
 
     if (hashTypeCanCreateTmplLp(tmpl->field_count, values)) {
         o = createObject(OBJ_HASH, hashTemplateLpCreate(tmpl, values));
         o->encoding = OBJ_ENCODING_TMPL_LP;
+        /* The listpack copied the value bytes; if we own them, free them now. */
+        if (take)
+            for (unsigned long long i = 0; i < tmpl->field_count; i++)
+                sdsfree(values[i]);
     } else {
-        o = createObject(OBJ_HASH, hashTemplateArrayCreate(tmpl, values, 0));
+        o = createObject(OBJ_HASH, hashTemplateArrayCreate(tmpl, values, take));
         o->encoding = OBJ_ENCODING_TMPL_ARRAY;
     }
     return o;
@@ -3855,7 +3998,7 @@ void himportSetCommand(client *c) {
         propargv[2 + field_count + i] = valobj;
     }
 
-    robj *o = createHashObjectFromTemplate(tmpl, values);
+    robj *o = createHashObjectFromTemplate(tmpl, values, /*take*/ 0);
 
     /* Set key (overwrites existing key of any type). */
     setKey(c, c->db, c->argv[2], &o, 0);
@@ -3949,7 +4092,7 @@ void hsetcCommand(client *c) {
     for (unsigned long long i = 0; i < field_count; i++)
         values[i] = c->argv[2 + field_count + i]->ptr;
 
-    robj *o = createHashObjectFromTemplate(tmpl, values);
+    robj *o = createHashObjectFromTemplate(tmpl, values, /*take*/ 0);
     if (values != stack_values) zfree(values);
 
     setKey(c, c->db, c->argv[1], &o, 0);

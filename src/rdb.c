@@ -1277,24 +1277,26 @@ ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key, int dbid) {
             } else {
                 /* Full format: used for (DUMP/RESTORE).
                  * Layout depends on encoding:
-                 *  - TMPL_LP:    [count][f0]...[fN-1][lp_blob]
-                 *  - TMPL_ARRAY: [count][f0][v0][f1][v1]... */
-                if ((n = rdbSaveLen(rdb, field_count)) == -1) return -1;
-                nwritten += n;
-
+                 *  - TMPL_LP:    [fields_lp_blob][values_lp_blob]
+                 *  - TMPL_ARRAY: [count][f0][v0][f1][v1]...[fN-1][vN-1]
+                 * TMPL_LP packs field names into a single listpack blob so the
+                 * destination resolves the template with one O(1) blob lookup
+                 * instead of reading N field names. TMPL_ARRAY uses the legacy
+                 * interleaved format (same as plain RDB_TYPE_HASH). */
                 if (o->encoding == OBJ_ENCODING_TMPL_LP) {
-                    /* Field names contiguous, then the listpack as a blob. */
-                    for (unsigned long long i = 0; i < field_count; i++) {
-                        sds field = tmpl->fields[i];
-                        if ((n = rdbSaveRawString(rdb, (unsigned char *)field, sdslen(field))) == -1)
-                            return -1;
-                        nwritten += n;
-                    }
+                    /* Field names as one listpack blob, then values listpack blob. */
+                    sds fields_lp = hashTemplateGetFieldsLp(tmpl);
+                    if ((n = rdbSaveRawString(rdb, (unsigned char *)fields_lp, sdslen(fields_lp))) == -1)
+                        return -1;
+                    nwritten += n;
                     unsigned char *lp = o->ptr;
                     if ((n = rdbSaveRawString(rdb, lp, lpBytes(lp))) == -1)
                         return -1;
                     nwritten += n;
                 } else {
+                    /* TMPL_ARRAY: interleaved field-value pairs. */
+                    if ((n = rdbSaveLen(rdb, field_count)) == -1) return -1;
+                    nwritten += n;
                     hashTemplateArray *hta = o->ptr;
                     for (unsigned long long i = 0; i < field_count; i++) {
                         sds field = tmpl->fields[i];
@@ -3097,41 +3099,83 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
          * has templates). */
         hashTemplateGuardTryConvert(rdb_load_tmpl_guard, o);
     } else if (rdbtype == RDB_TYPE_HASH_TMPL_LP) {
-        /* TMPL_LP full format: [count][f0]...[fN-1][lp_blob].
-         * Field names are loaded individually (so the template can be
-         * recreated locally), then the listpack is loaded as a single blob.
-         * The first listpack entry is the source-side template ID, swapped
-         * in-place to our local registry's ID. */
-        uint64_t len = rdbLoadLen(rdb, NULL);
-        if (len == RDB_LENERR) return NULL;
-        if (len == 0) goto emptykey;
+        /* TMPL_LP self-contained format: [fields_lp_blob][values_lp_blob].
+         * The field names travel as one listpack blob, so the template can be
+         * resolved with a single O(1) blob lookup; only the first key of each
+         * template falls back to parsing the names out and registering it. The
+         * first values-listpack entry is the source-side template ID, swapped
+         * in-place to our local registry's ID by rdbFinalizeTmplLp. */
+        sds fields_lp = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
+        if (fields_lp == NULL) return NULL;
 
-        sds *fields = rdbLoadSdsArray(rdb, len, "template-listpack");
-        if (fields == NULL) return NULL;
+        /* Fast path: the field set is already known under this blob. Otherwise
+         * fall back to validating the blob and parsing the field names out; the
+         * template itself is only created after the values blob loads cleanly,
+         * so a failure here never leaves an unreferenced template behind. */
+        hashTemplate *tmpl = hashTemplateGetByFieldsLp(fields_lp);
+        sds *fields = NULL;       /* parsed names, populated only on a miss */
+        uint64_t field_count;
+        if (tmpl != NULL) {
+            sdsfree(fields_lp);
+            fields_lp = NULL;
+            field_count = tmpl->field_count;
+        } else {
+            if (sdslen(fields_lp) == 0 ||
+                !lpValidateIntegrity((unsigned char *)fields_lp, sdslen(fields_lp),
+                                     deep_integrity_validation, NULL, NULL))
+            {
+                rdbReportCorruptRDB("template-listpack field blob integrity check failed.");
+                sdsfree(fields_lp);
+                return NULL;
+            }
+            field_count = lpLength((unsigned char *)fields_lp);
+            if (field_count == 0) { sdsfree(fields_lp); goto emptykey; }
 
-        /* Reject out-of-order or duplicate fields. */
-        if (!hashTemplateValidateFields(fields, len)) {
-            rdbReportCorruptRDB("template-listpack fields not strictly sorted");
-            rdbFreeSdsArray(fields, len);
-            return NULL;
+            fields = rdbTryAllocSdsArray(field_count);
+            if (fields == NULL) {
+                rdbReportCorruptRDB("template-listpack field count %llu too large",
+                    (unsigned long long)field_count);
+                sdsfree(fields_lp);
+                return NULL;
+            }
+            unsigned char *p = lpFirst((unsigned char *)fields_lp);
+            for (uint64_t i = 0; i < field_count; i++) {
+                unsigned int slen;
+                long long lval;
+                unsigned char *s = lpGetValue(p, &slen, &lval);
+                fields[i] = s ? sdsnewlen(s, slen) : sdsfromlonglong(lval);
+                p = lpNext((unsigned char *)fields_lp, p);
+            }
+
+            /* Reject out-of-order or duplicate fields. */
+            if (!hashTemplateValidateFields(fields, field_count)) {
+                rdbReportCorruptRDB("template-listpack fields not strictly sorted");
+                rdbFreeSdsArray(fields, field_count);
+                sdsfree(fields_lp);
+                return NULL;
+            }
         }
 
+        /* Load the values listpack blob (its first entry is the template ID). */
         unsigned char *lp = rdbLoadTmplLpBlob(rdb, deep_integrity_validation, NULL);
-        if (lp == NULL) {
-            rdbFreeSdsArray(fields, len);
-            return NULL;
-        }
-        if (lpLength(lp) != len + 1) {
-            rdbReportCorruptRDB(
-                "template-listpack entry count %lu does not match field count %llu",
-                (unsigned long)lpLength(lp), (unsigned long long)len);
-            rdbFreeSdsArray(fields, len);
-            zfree(lp);
+        if (lp == NULL || lpLength(lp) != field_count + 1) {
+            if (lp != NULL) {
+                rdbReportCorruptRDB(
+                    "template-listpack entry count %lu does not match field count %llu",
+                    (unsigned long)lpLength(lp), (unsigned long long)field_count);
+                zfree(lp);
+            }
+            rdbFreeSdsArray(fields, field_count); /* no-op on a hit */
+            sdsfree(fields_lp);                   /* no-op on a hit */
             return NULL;
         }
 
-        hashTemplate *tmpl = hashTemplateGetOrCreate(fields, len);
-        rdbFreeSdsArray(fields, len);
+        if (tmpl == NULL) {
+            tmpl = hashTemplateGetOrCreate(fields, field_count);
+            rdbFreeSdsArray(fields, field_count);
+            hashTemplateAttachFieldsLp(tmpl, fields_lp); /* transfers ownership */
+        }
+
         o = rdbFinalizeTmplLp(lp, tmpl);
     } else if (rdbtype == RDB_TYPE_HASH_TMPL_LP_REF) {
         /* TMPL_LP compact: raw listpack blob. The first listpack entry is the
@@ -3159,9 +3203,8 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
 
         o = rdbFinalizeTmplLp(lp, tmpl);
     } else if (rdbtype == RDB_TYPE_HASH_TMPL_ARRAY) {
-        /* TMPL_ARRAY self-contained format: same layout as RDB_TYPE_HASH
-         * (len + interleaved field-value pairs). Reconstruct as template-based
-         * hash. */
+        /* TMPL_ARRAY self-contained format: [count][f0][v0][f1][v1]...[fN-1][vN-1]
+         * (same layout as RDB_TYPE_HASH). Reconstruct as template-based hash. */
         uint64_t len = rdbLoadLen(rdb, NULL);
         if (len == RDB_LENERR) return NULL;
         if (len == 0) goto emptykey;
@@ -3203,9 +3246,10 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         }
 
         hashTemplate *tmpl = hashTemplateGetOrCreate(fields, len);
-        o = createHashObjectFromTemplate(tmpl, values);
+        /* Adopt the value sds strings (no sdsdup); free only the array shell. */
+        o = createHashObjectFromTemplate(tmpl, values, /*take*/ 1);
         rdbFreeSdsArray(fields, len);
-        rdbFreeSdsArray(values, len);
+        zfree(values);
     } else if (rdbtype == RDB_TYPE_HASH_TMPL_ARRAY_REF) {
         /* TMPL_ARRAY REF form: [template_id][value1][value2]... */
         uint64_t template_id;
@@ -3222,8 +3266,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         sds *values = rdbLoadSdsArray(rdb, field_count, "template-array");
         if (values == NULL) return NULL;
 
-        o = createHashObjectFromTemplate(tmpl, values);
-        rdbFreeSdsArray(values, field_count);
+        /* Adopt the value sds strings (no sdsdup); free only the array shell. */
+        o = createHashObjectFromTemplate(tmpl, values, /*take*/ 1);
+        zfree(values);
     } else if (rdbtype == RDB_TYPE_HASH_METADATA || rdbtype == RDB_TYPE_HASH_METADATA_PRE_GA) {
         sds value;
         Entry *entry;
