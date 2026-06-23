@@ -285,7 +285,7 @@ revival (0→1) are main-thread-only. A `TMPL_LP` free may run on a BIO thread
 
 ## 14. Tests
 
-`tests/unit/type/hinted-hash-templates.tcl` (multiple `start_server` blocks for
+`tests/unit/type/hash-templates.tcl` (multiple `start_server` blocks for
 the different config regimes) covers both encodings end-to-end, large field
 counts across the stack/heap boundary, HRANDFIELD, DUMP/RESTORE, repeated full
 resyncs and AOF rdb-preamble loads, the BIO-free vs main-thread-drop lifecycle
