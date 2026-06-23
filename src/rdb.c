@@ -1887,10 +1887,12 @@ ssize_t rdbSaveHashTemplates(rio *rdb) {
         }
     }
     dictReleaseIterator(di);
+    server.htemplates->rdb_saving = 0;
     return written;
 
 werr:
     dictReleaseIterator(di);
+    server.htemplates->rdb_saving = 0;
     return -1;
 }
 
@@ -3185,6 +3187,13 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         unsigned char *lp = rdbLoadTmplLpBlob(rdb, deep_integrity_validation, &src_id);
         if (lp == NULL)
             return NULL;
+
+        /* Template IDs must be non-negative (stored as uint64_t in registry) */
+        if (src_id < 0) {
+            rdbReportCorruptRDB("Hash template ID %lld is negative", src_id);
+            zfree(lp);
+            return NULL;
+        }
 
         hashTemplate *tmpl = rdbGetHashTemplateById((uint64_t)src_id);
         if (tmpl == NULL) {
@@ -4884,7 +4893,7 @@ static int rdbLoadRioWithLoadingCtxInternal(rio *rdb, int rdbflags, rdbSaveInfo 
         if (val == NULL) {
             keyMetaSpecCleanup(&keyMeta);
             /* Nothing was loaded; clear any leftover pending template state. */
-            hashTemplateGuardCommit(rdb_load_tmpl_guard, NULL);
+            hashTemplateGuardCommit(rdb_load_tmpl_guard, NULL, NULL);
             /* Since we used to have bug that could lead to empty keys
              * (See #8453), we rather not fail when empty key is encountered
              * in an RDB file, instead we will silently discard it and
@@ -4918,7 +4927,7 @@ static int rdbLoadRioWithLoadingCtxInternal(rio *rdb, int rdbflags, rdbSaveInfo 
             keyMetaSpecCleanup(&keyMeta);
             server.rdb_last_load_keys_expired++;
             /* Discard any template the converted-but-expired value pinned. */
-            hashTemplateGuardCommit(rdb_load_tmpl_guard, NULL);
+            hashTemplateGuardCommit(rdb_load_tmpl_guard, NULL, NULL);
         } else {
             robj keyobj;
             initStaticStringObject(keyobj,key);
@@ -4943,7 +4952,7 @@ static int rdbLoadRioWithLoadingCtxInternal(rio *rdb, int rdbflags, rdbSaveInfo 
 
             /* Bind any pending few-key template to the stable keyspace object
              * (dbAddRDBLoad may have rebuilt val into an embedded-key kvobj). */
-            hashTemplateGuardCommit(rdb_load_tmpl_guard, kv);
+            hashTemplateGuardCommit(rdb_load_tmpl_guard, kv, db);
 
             /* If minExpiredField was set, then the object is hash with expiration
              * on fields and need to register it in global HFE DS */

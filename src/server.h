@@ -4005,7 +4005,7 @@ static inline size_t *htGetMetadataSize(dict *d) {
 typedef struct rdbLoadTemplateGuard rdbLoadTemplateGuard;
 rdbLoadTemplateGuard *hashTemplateGuardCreate(size_t disassembly_threshold);
 int hashTemplateGuardTryConvert(rdbLoadTemplateGuard *g, robj *o);
-void hashTemplateGuardCommit(rdbLoadTemplateGuard *g, robj *kv);
+void hashTemplateGuardCommit(rdbLoadTemplateGuard *g, robj *kv, redisDb *db);
 void hashTemplateGuardDisassemble(rdbLoadTemplateGuard *g);
 void hashTemplateGuardFree(rdbLoadTemplateGuard *g);
 

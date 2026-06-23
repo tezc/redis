@@ -1419,6 +1419,116 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
                 "$name should auto-convert $key to template-listpack"
         }
     }
+
+    # fields_lp cleanup: DUMP builds fields_lp blob, cron cleans it up
+    test {fields_lp blobs are built during DUMP and cleaned by serverCron} {
+        r flushall
+        wait_tmpl_drain
+
+        # Create template hash
+        r hset k1 a 1 b 2 c 3
+        assert_encoding template-listpack k1
+
+        # DUMP triggers fields_lp build for O(1) template lookup
+        set dump1 [r dump k1]
+
+        # Create more keys with same template
+        r hset k2 a 4 b 5 c 6
+        r hset k3 a 7 b 8 c 9
+
+        # Multiple DUMPs should reuse the same blob
+        set dump2 [r dump k2]
+        set dump3 [r dump k3]
+
+        # Verify data integrity (fields_lp cleanup doesn't affect functionality)
+        assert_equal 2 [r hget k1 b]
+        assert_equal 5 [r hget k2 b]
+        assert_equal 8 [r hget k3 b]
+
+        # Next DUMP should work (rebuild blob if cleaned)
+        set dump4 [r dump k1]
+        assert_equal $dump1 $dump4
+    }
+
+    # Template resurrection: BIO queues template for free, main thread recreates it
+    test {Template resurrection: pending_free skips re-referenced template} {
+        r flushall
+        r config set lazyfree-lazy-user-del yes
+        wait_tmpl_drain
+
+        # Create template hash
+        r hset k1 a 1 b 2 c 3
+        assert_equal 1 [s hash_templates]
+
+        # Lazy delete → BIO queues template for free
+        r del k1
+
+        # Immediately recreate with same template (resurrection)
+        r hset k1 a 4 b 5 c 6
+
+        # Wait for pending_free drain
+        after 150
+
+        # Template should still exist (skip in drain loop)
+        assert_equal 1 [s hash_templates]
+        assert_equal 1 [s hash_template_keys]
+        assert_equal 5 [r hget k1 b]
+    }
+
+    # TMPL_LP → TMPL_ARRAY auto-convert when template switch causes LP overflow
+    # Rare scenario: HSET adds field, new template's fields don't fit in listpack blob
+    test {HSET converts TMPL_LP to TMPL_ARRAY if new template fields exceed LP limits} {
+        r flushall
+        wait_tmpl_drain
+
+        # Create TMPL_LP hash with small field names
+        r hset k1 a 1 b 2 c 3
+        assert_encoding template-listpack k1
+
+        # Create a template with a huge field name (>512 bytes)
+        # This template will have can_use_lp=0 because field name exceeds limits
+        set huge_field [string repeat "x" 600]
+        r hset huge_tmpl $huge_field 1 y 2
+        assert_encoding template-array huge_tmpl
+
+        # Now add the huge field to k1 → template switch → new template has can_use_lp=0
+        # Should auto-convert k1 from TMPL_LP to TMPL_ARRAY
+        r hset k1 $huge_field 4
+
+        # Verify conversion happened
+        assert_encoding template-array k1
+        assert_equal 4 [r hlen k1]
+        assert_equal 1 [r hget k1 a]
+        assert_equal 4 [r hget k1 $huge_field]
+    }
+
+    # HDEL variant: TMPL_LP key deletes field, switches to LP-incompatible template
+    test {HDEL converts TMPL_LP to TMPL_ARRAY if new template fields exceed LP limits} {
+        r flushall
+        wait_tmpl_drain
+
+        # Step 1: Pre-create LP-incompatible template (huge field names)
+        set huge_field [string repeat "y" 600]
+        r hset pre a 1 $huge_field 2
+        assert_encoding template-array pre
+        set incompatible_tmpl_id [s hash_templates]
+
+        # Step 2: Create TMPL_LP hash with different fields
+        r hset k1 a 1 b 2 c 3
+        assert_encoding template-listpack k1
+        assert_equal 2 [s hash_templates]
+
+        # Step 3: HDEL field from k1, then add huge_field → switch to incompatible template
+        # k1 is TMPL_LP, new template (a,huge_field) is LP-incompatible → must convert
+        r hdel k1 b c
+        r hset k1 $huge_field 999
+
+        # k1 should auto-convert to TMPL_ARRAY
+        assert_encoding template-array k1
+        assert_equal 2 [r hlen k1]
+        assert_equal 1 [r hget k1 a]
+        assert_equal 999 [r hget k1 $huge_field]
+    }
 }
 
 
@@ -1948,6 +2058,44 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
     }
 }
 
+# End-of-load disassembly converts TMPL_LP/TMPL_ARRAY back to LISTPACK/HT in
+# place. dbAddRDBLoad already recorded the compact TMPL alloc size into the
+# per-slot allocsizes histogram, so the conversion must re-account the size
+# delta or DEBUG ALLOCSIZE-SLOTS-ASSERT panics with a slot expected/actual
+# mismatch. key-memory-histograms can only be enabled at startup, so this
+# needs its own server (with it on for both the save and the reload).
+start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
+              overrides {hash-min-template-entries 0 hash-max-listpack-entries 64
+                         appendonly no key-memory-histograms yes}} {
+
+    test {disassembly keeps the per-slot alloc-size histogram consistent} {
+        r flushall
+        # Sub-threshold field sets (one key each) so both get disassembled:
+        #  - lp4: small => TMPL_LP -> disassembled back to LISTPACK
+        #  - big: many large values => TMPL_ARRAY -> disassembled back to HT
+        r hset lp4 a 1 b 2 c 3 d 4
+        for {set i 0} {$i < 200} {incr i} { r hset big f$i [string repeat x 80] }
+        r config set hash-rdb-load-min-template-entries 4
+        r config set hash-rdb-load-template-disassembly-threshold 2
+        r config rewrite
+        r save
+        restart_server 0 true false
+        # Both single-use templates disassembled back to plain encodings.
+        assert_equal listpack  [r object encoding lp4]
+        assert_equal hashtable [r object encoding big]
+        assert_equal 0 [s hash_templates]
+        # Turn on the per-slot assertion and exercise it: any write triggers
+        # dbgRunAssertions on the touched db. A desynced histogram panics here.
+        r debug allocsize-slots-assert 1
+        r set trigger 1
+        assert_equal 4 [r hget lp4 d]
+        r hset lp4 e 5
+        r hset big f0 [string repeat y 80]
+        assert_equal PONG [r ping]
+        r debug allocsize-slots-assert 0
+    }
+}
+
 # A template-aware RDB (one that carries a template header) must bypass the
 # load-time utility guard entirely: existing templates are restored as-is even
 # when the disassembly threshold would otherwise prune them.
@@ -2382,5 +2530,67 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
         wait_hashtmpl_keys $K
         assert_equal $digest [r debug digest]
         assert_equal [r hget bulk:0 f0_email] "user0@example.com"
+    }
+}
+
+# ============================================================
+# HRANDFIELD batch optimization tests (separate start_server)
+# ============================================================
+start_server {tags {"hash"}} {
+    test {HRANDFIELD large count batching on TMPL_LP} {
+        # Test batch random sampling optimization (avoid O(count·n) lpSeek overhead).
+        r config set hash-min-template-entries 50
+
+        r del h1 h2
+        set fields {}
+        for {set i 0} {$i < 100} {incr i} {
+            lappend fields "f$i" "v$i"
+        }
+        # Two hashes with same fields → triggers template
+        r hset h1 {*}$fields
+        r hset h2 {*}$fields
+
+        set enc [r object encoding h1]
+        assert_equal template-listpack $enc
+
+        # Large count with duplicates (negative count)
+        set result [r hrandfield h1 -500]
+        assert_equal [llength $result] 500
+
+        foreach field $result {
+            assert_match "f*" $field
+        }
+
+        # With WITHVALUES
+        set result [r hrandfield h1 -300 WITHVALUES]
+        assert_equal [llength $result] 600
+        for {set i 0} {$i < 600} {incr i 2} {
+            assert_match "f*" [lindex $result $i]
+            assert_match "v*" [lindex $result [expr {$i + 1}]]
+        }
+    }
+
+    test {HRANDFIELD large count on TMPL_ARRAY} {
+        r config set hash-min-template-entries 50
+
+        r del big1 big2
+        set fields {}
+        # Use 600 fields to definitely exceed listpack limit
+        for {set i 0} {$i < 600} {incr i} {
+            lappend fields "field$i" "value$i"
+        }
+        r hset big1 {*}$fields
+        r hset big2 {*}$fields
+
+        set enc [r object encoding big1]
+        assert_equal template-array $enc
+
+        # TMPL_ARRAY uses simple loop (O(1) array access)
+        set result [r hrandfield big1 -1000]
+        assert_equal [llength $result] 1000
+
+        foreach field $result {
+            assert_match "field*" $field
+        }
     }
 }

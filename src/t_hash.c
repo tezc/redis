@@ -3019,6 +3019,20 @@ struct rdbLoadTemplateGuard {
     int stop_creating;        /* One-way latch: stop creating new templates. */
 };
 
+/* Each tracked few-key template maps to a list of these: the stable keyspace
+ * object plus the db it lives in. Disassembly needs the db to fix the per-slot
+ * allocation-size histogram (the compact TMPL size was recorded by
+ * dbAddRDBLoad against that db's slot). A single guard spans the whole RDB,
+ * which may select multiple dbs, so the db must be tracked per object. */
+typedef struct guardKvRef {
+    kvobj *kv;
+    redisDb *db;
+} guardKvRef;
+
+static void guardKvRefListFree(void *ref) {
+    zfree(ref);
+}
+
 static void guardListValDestructor(dict *d, void *val) {
     UNUSED(d);
     listRelease(val);
@@ -3068,7 +3082,7 @@ static void hashTemplateGuardTrack(rdbLoadTemplateGuard *g, hashTemplate *tmpl) 
  * object for the key just loaded. Always clears the pending slot, so it must be
  * called exactly once after each rdbLoadObject (pass kv==NULL when the loaded
  * object was discarded, e.g. an already-expired key, to clear without adding). */
-void hashTemplateGuardCommit(rdbLoadTemplateGuard *g, robj *kv) {
+void hashTemplateGuardCommit(rdbLoadTemplateGuard *g, robj *kv, redisDb *db) {
     if (g == NULL) return;
     hashTemplate *tmpl = g->pending_tmpl;
     g->pending_tmpl = NULL;
@@ -3077,11 +3091,15 @@ void hashTemplateGuardCommit(rdbLoadTemplateGuard *g, robj *kv) {
     list *l;
     if (de == NULL) {
         l = listCreate();
+        listSetFreeMethod(l, guardKvRefListFree);
         dictAdd(g->reverse_lookup, tmpl, l);
     } else {
         l = dictGetVal(de);
     }
-    listAddNodeTail(l, kv);
+    guardKvRef *ref = zmalloc(sizeof(*ref));
+    ref->kv = kv;
+    ref->db = db;
+    listAddNodeTail(l, ref);
 }
 
 int hashTemplateGuardTryConvert(rdbLoadTemplateGuard *g, robj *o) {
@@ -3104,11 +3122,24 @@ void hashTemplateGuardDisassemble(rdbLoadTemplateGuard *g) {
         listNode *ln;
         listRewind(l, &li);
         while ((ln = listNext(&li)) != NULL) {
-            robj *o = listNodeValue(ln);
+            guardKvRef *ref = listNodeValue(ln);
+            kvobj *o = ref->kv;
+            size_t oldsize = kvobjAllocSize(o);
             if (o->encoding == OBJ_ENCODING_TMPL_LP)
                 hashTypeConvertTmplLp(o, OBJ_ENCODING_LISTPACK);
             else if (o->encoding == OBJ_ENCODING_TMPL_ARRAY)
                 hashTypeConvertTmplArray(o, OBJ_ENCODING_LISTPACK);
+            else
+                continue;
+            /* dbAddRDBLoad recorded the compact TMPL size into the per-slot
+             * allocation-size histogram; the in-place TMPL->LISTPACK conversion
+             * above cannot reach updateSlotAllocSize, so fix the histogram here
+             * to keep it consistent (otherwise dbgAssertAllocSizePerSlot panics
+             * and INFO reports wrong sizes). Field count is unchanged, so the
+             * key-size histogram needs no fixup. */
+            if (server.memory_tracking_enabled)
+                updateSlotAllocSize(ref->db, getKeySlot(kvobjGetKey(o)), o,
+                                    oldsize, kvobjAllocSize(o));
         }
     }
     dictReleaseIterator(di);
