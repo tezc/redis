@@ -3004,7 +3004,7 @@ static int hashTypeTryConvertCmpPair(const void *a, const void *b) {
 }
 
 /* ------------------------------------------------------------------------- *
- * RDB-load template utility guard
+ * RDB-load template load-time context
  *
  * Background: a template holds one shared copy of a hash's field names, so many
  * hashes with the same fields can drop their per-key field-name copies and point
@@ -3020,14 +3020,14 @@ static int hashTypeTryConvertCmpPair(const void *a, const void *b) {
  *     eligible (0 = feature off, nothing is converted).
  *   - hash-rdb-load-max-template-entries: max field count (0 = no upper bound).
  *   - hash-rdb-load-template-disassembly-threshold: how many keys a template
- *     must have to be worth keeping (0 = this guard off; every eligible hash is
+ *     must have to be worth keeping (0 = this context off; every eligible hash is
  *     converted and kept).
  *
  * Goal: keep templates that are shared by many keys and avoid templates that end
  * up with only a few keys -- such a template wastes memory instead of saving it.
  * We call a template "few-key" while its key count is below the threshold.
  *
- * The guard does two things during the load:
+ * The context does two things during the load:
  *   - Throttle: once few-key templates clearly dominate, stop creating new
  *     templates (hashes whose fields match an existing template still attach).
  *   - Disassemble: at end of load, turn every template still below the threshold
@@ -3039,7 +3039,7 @@ static int hashTypeTryConvertCmpPair(const void *a, const void *b) {
  * scanning the whole keyspace. A template that reaches the threshold "graduates"
  * (leaves the map); only few-key templates stay tracked. */
 #define MIN_REVERSE_LOOKUP 1000
-struct rdbLoadTemplateGuard {
+struct rdbLoadTemplateCtx {
     dict *reverse_lookup;   /* hashTemplate* -> list of hash kvobj* (few-key
                              * templates only; entries leave on graduation). */
     size_t disassembly_threshold; /* Keep templates with >= this many keys. */
@@ -3053,34 +3053,34 @@ struct rdbLoadTemplateGuard {
 /* Each tracked few-key template maps to a list of these: the stable keyspace
  * object plus the db it lives in. Disassembly needs the db to fix the per-slot
  * allocation-size histogram (the compact TMPL size was recorded by
- * dbAddRDBLoad against that db's slot). A single guard spans the whole RDB,
+ * dbAddRDBLoad against that db's slot). A single context spans the whole RDB,
  * which may select multiple dbs, so the db must be tracked per object. */
-typedef struct guardKvRef {
+typedef struct rdbLoadTemplateCtxKvRef {
     kvobj *kv;
     redisDb *db;
-} guardKvRef;
+} rdbLoadTemplateCtxKvRef;
 
-static void guardKvRefListFree(void *ref) {
+static void rdbLoadTemplateCtxKvRefListFree(void *ref) {
     zfree(ref);
 }
 
-static void guardListValDestructor(dict *d, void *val) {
+static void rdbLoadTemplateCtxListValDestructor(dict *d, void *val) {
     UNUSED(d);
     listRelease(val);
 }
 
 /* Keys are template pointers (registry-owned, so no key destructor); values are
  * lists of hash kvobjs freed when the entry is dropped/released. */
-static dictType guardReverseDictType = {
+static dictType rdbLoadTemplateCtxReverseDictType = {
     .hashFunction = dictPtrHash,
-    .valDestructor = guardListValDestructor,
+    .valDestructor = rdbLoadTemplateCtxListValDestructor,
 };
 
-rdbLoadTemplateGuard *hashTemplateGuardCreate(size_t disassembly_threshold) {
-    rdbLoadTemplateGuard *g = zcalloc(sizeof(*g));
+rdbLoadTemplateCtx *rdbLoadTemplateCtxCreate(size_t disassembly_threshold) {
+    rdbLoadTemplateCtx *g = zcalloc(sizeof(*g));
     g->disassembly_threshold = disassembly_threshold;
     if (disassembly_threshold > 0)
-        g->reverse_lookup = dictCreate(&guardReverseDictType);
+        g->reverse_lookup = dictCreate(&rdbLoadTemplateCtxReverseDictType);
     return g;
 }
 
@@ -3096,9 +3096,9 @@ static hashTemplate *hashTemplateLookupByHash(uint64_t hash, sds *fields,
  * key ref has been taken, so tmpl->key_refcount is current. The key's keyspace
  * object is not yet stable (dbAddRDBLoad rebuilds it into an embedded-key
  * kvobj), so we only record the template here and defer adding the object to the
- * reverse map until hashTemplateGuardCommit() runs with the stable kvobj. A
+ * reverse map until rdbLoadTemplateCtxCommit() runs with the stable kvobj. A
  * template that just reached the threshold graduates (leaves the map). */
-static void hashTemplateGuardTrack(rdbLoadTemplateGuard *g, hashTemplate *tmpl) {
+static void rdbLoadTemplateCtxTrack(rdbLoadTemplateCtx *g, hashTemplate *tmpl) {
     unsigned long long count;
     atomicGet(tmpl->key_refcount, count);
     g->pending_tmpl = NULL;
@@ -3113,7 +3113,7 @@ static void hashTemplateGuardTrack(rdbLoadTemplateGuard *g, hashTemplate *tmpl) 
  * object for the key just loaded. Always clears the pending slot, so it must be
  * called exactly once after each rdbLoadObject (pass kv==NULL when the loaded
  * object was discarded, e.g. an already-expired key, to clear without adding). */
-void hashTemplateGuardCommit(rdbLoadTemplateGuard *g, robj *kv, redisDb *db) {
+void rdbLoadTemplateCtxCommit(rdbLoadTemplateCtx *g, robj *kv, redisDb *db) {
     if (g == NULL) return;
     hashTemplate *tmpl = g->pending_tmpl;
     g->pending_tmpl = NULL;
@@ -3122,18 +3122,18 @@ void hashTemplateGuardCommit(rdbLoadTemplateGuard *g, robj *kv, redisDb *db) {
     list *l;
     if (de == NULL) {
         l = listCreate();
-        listSetFreeMethod(l, guardKvRefListFree);
+        listSetFreeMethod(l, rdbLoadTemplateCtxKvRefListFree);
         dictAdd(g->reverse_lookup, tmpl, l);
     } else {
         l = dictGetVal(de);
     }
-    guardKvRef *ref = zmalloc(sizeof(*ref));
+    rdbLoadTemplateCtxKvRef *ref = zmalloc(sizeof(*ref));
     ref->kv = kv;
     ref->db = db;
     listAddNodeTail(l, ref);
 }
 
-int hashTemplateGuardTryConvert(rdbLoadTemplateGuard *g, robj *o) {
+int rdbLoadTemplateCtxTryConvert(rdbLoadTemplateCtx *g, robj *o) {
     if (g == NULL) return 0; /* RESTORE/DUMP/check, or template-aware RDB: no convert. */
     return hashTypeTryConvertToTemplate(o, server.hash_rdb_load_min_template_entries,
                                         server.hash_rdb_load_max_template_entries, g);
@@ -3143,7 +3143,7 @@ int hashTemplateGuardTryConvert(rdbLoadTemplateGuard *g, robj *o) {
  * hash. Each disassembly drops a key ref; once a template loses its last key it
  * is freed from the registry. We never dereference a template key here (only its
  * value list), so a freed template left as a stale dict key is harmless. */
-void hashTemplateGuardDisassemble(rdbLoadTemplateGuard *g) {
+void rdbLoadTemplateCtxDisassemble(rdbLoadTemplateCtx *g) {
     if (g == NULL || g->reverse_lookup == NULL) return;
     dictIterator *di = dictGetIterator(g->reverse_lookup);
     dictEntry *de;
@@ -3153,7 +3153,7 @@ void hashTemplateGuardDisassemble(rdbLoadTemplateGuard *g) {
         listNode *ln;
         listRewind(l, &li);
         while ((ln = listNext(&li)) != NULL) {
-            guardKvRef *ref = listNodeValue(ln);
+            rdbLoadTemplateCtxKvRef *ref = listNodeValue(ln);
             kvobj *o = ref->kv;
             size_t oldsize = kvobjAllocSize(o);
             if (o->encoding == OBJ_ENCODING_TMPL_LP)
@@ -3176,7 +3176,7 @@ void hashTemplateGuardDisassemble(rdbLoadTemplateGuard *g) {
     dictReleaseIterator(di);
 }
 
-void hashTemplateGuardFree(rdbLoadTemplateGuard *g) {
+void rdbLoadTemplateCtxFree(rdbLoadTemplateCtx *g) {
     if (g == NULL) return;
     if (g->reverse_lookup) dictRelease(g->reverse_lookup);
     zfree(g);
@@ -3184,10 +3184,13 @@ void hashTemplateGuardFree(rdbLoadTemplateGuard *g) {
 
 /* Convert a hash to template encoding once it reaches hash-min-template-entries
  * fields: LP -> TMPL_LP, HT (no HFE) -> TMPL_ARRAY. Returns 1 if converted.
- * Hashes with field TTLs (LP_EX, HT with HFE) are left as-is. 'guard' is set
+ * Hashes with field TTLs (LP_EX, HT with HFE) are left as-is. 'ctx' is set
  * only on the bulk RDB-load path and applies the utility throttle/tracking. */
-int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields,
-                                 rdbLoadTemplateGuard *guard) {
+int hashTypeTryConvertToTemplate(robj *o, 
+                                 size_t min_fields,
+                                 size_t max_fields,
+                                 rdbLoadTemplateCtx *ctx) 
+{
     /* min_fields == 0 means the feature is disabled (the default). */
     if (min_fields == 0) return 0;
 
@@ -3230,21 +3233,21 @@ int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields,
     }
     zfree(pairs);
 
-    /* Get or create template. With an active utility guard, refuse to create a
+    /* Get or create template. With an active load-time context, refuse to create a
      * brand-new template once the throttle has decided few-key templates
      * dominate; such hashes stay plain (matching ones still attach to existing
      * templates via the lookup below). */
     hashTemplate *tmpl;
-    if (guard && guard->disassembly_threshold > 0) {
+    if (ctx && ctx->disassembly_threshold > 0) {
         uint64_t fhash = computeFieldsHash(fields, num_fields);
         tmpl = hashTemplateLookupByHash(fhash, fields, num_fields);
         if (tmpl == NULL) {
-            size_t few_key_templates = dictSize(guard->reverse_lookup);
-            if (guard->stop_creating ||
+            size_t few_key_templates = dictSize(ctx->reverse_lookup);
+            if (ctx->stop_creating ||
                 (few_key_templates > MIN_REVERSE_LOOKUP &&
-                 few_key_templates * 2 > guard->number_of_templates))
+                 few_key_templates * 2 > ctx->number_of_templates))
             {
-                guard->stop_creating = 1;
+                ctx->stop_creating = 1;
                 for (size_t j = 0; j < num_fields; j++) {
                     sdsfree(fields[j]);
                     sdsfree(values[j]);
@@ -3255,7 +3258,7 @@ int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields,
             }
             tmpl = hashTemplateCreateInternal(fhash, fields, num_fields);
             dictAdd(htemplates->registry, tmpl, NULL);
-            guard->number_of_templates++;
+            ctx->number_of_templates++;
         }
     } else {
         tmpl = hashTemplateGetOrCreate(fields, num_fields);
@@ -3278,11 +3281,11 @@ int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields,
         took_values = 1;
     }
 
-    /* Utility guard: record this key's (now referenced) template as pending, or
+    /* RdbLoadContext: record this key's (now referenced) template as pending, or
      * graduate the template if it just reached the keep threshold. The stable
-     * keyspace object is bound later by hashTemplateGuardCommit(). */
-    if (guard && guard->disassembly_threshold > 0)
-        hashTemplateGuardTrack(guard, tmpl);
+     * keyspace object is bound later by rdbLoadTemplateCtxCommit(). */
+    if (ctx && ctx->disassembly_threshold > 0)
+        rdbLoadTemplateCtxTrack(ctx, tmpl);
 
     /* Free temporary arrays. Fields are always copied by the template; values
      * are taken by TMPL_ARRAY but copied by TMPL_LP, so free them only when the

@@ -4005,18 +4005,18 @@ static inline size_t *htGetMetadataSize(dict *d) {
 #define HFE_LAZY_NO_UPDATE_ALLOCSIZES (1<<6) /* If field lazy deleted, avoid updating slot allocation sizes */
 
 /* Opaque here; rdb.c just holds a pointer and calls the helpers below. See the
- * comment above struct rdbLoadTemplateGuard in t_hash.c for what it does and
+ * comment above struct rdbLoadTemplateCtx in t_hash.c for what it does and
  * when it is active. */
-typedef struct rdbLoadTemplateGuard rdbLoadTemplateGuard;
-rdbLoadTemplateGuard *hashTemplateGuardCreate(size_t disassembly_threshold);
-int hashTemplateGuardTryConvert(rdbLoadTemplateGuard *g, robj *o);
-void hashTemplateGuardCommit(rdbLoadTemplateGuard *g, robj *kv, redisDb *db);
-void hashTemplateGuardDisassemble(rdbLoadTemplateGuard *g);
-void hashTemplateGuardFree(rdbLoadTemplateGuard *g);
+typedef struct rdbLoadTemplateCtx rdbLoadTemplateCtx;
+rdbLoadTemplateCtx *rdbLoadTemplateCtxCreate(size_t disassembly_threshold);
+int rdbLoadTemplateCtxTryConvert(rdbLoadTemplateCtx *g, robj *o);
+void rdbLoadTemplateCtxCommit(rdbLoadTemplateCtx *g, robj *kv, redisDb *db);
+void rdbLoadTemplateCtxDisassemble(rdbLoadTemplateCtx *g);
+void rdbLoadTemplateCtxFree(rdbLoadTemplateCtx *g);
 
 void hashTypeConvert(redisDb *db, robj *o, int enc);
 int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields,
-                                 rdbLoadTemplateGuard *guard);
+                                 rdbLoadTemplateCtx *ctx);
 void hashTypeTryConversion(redisDb *db, kvobj *kv, robj **argv, int start, int end);
 int hashTypeExists(redisDb *db, kvobj *kv, sds field, int hfeFlags, int *isHashDeleted);
 int hashTypeDelete(robj *o, void *key);

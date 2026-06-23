@@ -1,7 +1,3 @@
-# Helper procs shared by every start_server block in this file. They are defined
-# at file scope (not inside a start_server body) so they are always available no
-# matter which blocks run or how the suite is distributed across test clients.
-
 # Build a template-based hash via HIMPORT command.
 proc make_hashtmpl {key args} {
     set fields {}
@@ -91,11 +87,132 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         r himport discard fieldset
     }
 
-    test {HIMPORT PREPARE accepts empty template name} {
+    test {HIMPORT PREPARE accepts empty fieldset name} {
         assert_equal [r himport prepare "" f1 f2] OK
         assert_equal [r himport set key "" v1 v2] OK
         assert_equal [r hgetall key] {f1 v1 f2 v2}
         r himport discard ""
+    }
+
+    test {HIMPORT PREPARE replaces existing fieldset with same name} {
+        # Create template with 2 fields
+        r himport prepare fieldset a b
+        r himport set key1 fieldset val_a val_b
+        assert_equal [r hgetall key1] {a val_a b val_b}
+
+        # Replace with template with 3 fields (same name)
+        r himport prepare fieldset x y z
+        r himport set key2 fieldset val_x val_y val_z
+        assert_equal [r hgetall key2] {x val_x y val_y z val_z}
+
+        # Old template definition should be gone - using with 2 values fails
+        assert_error "*value count does not match*" {r himport set key3 fieldset v1 v2}
+
+        # Cleanup
+        r himport discard fieldset
+    }
+
+    test {Fieldsets are not shared between connections} {
+        set rd [redis_client]
+        $rd himport prepare fieldset a b
+        # The main client cannot see the other connection's fieldset.
+        assert_error "*no such fieldset*" {r himport set key fieldset v1 v2}
+        # The fieldset still works on its owning connection.
+        assert_equal [$rd himport set key fieldset v1 v2] OK
+        $rd close
+        r del key
+    }
+
+    # ============================================================
+    # Fieldset sharing between multiple keys
+    # ============================================================
+
+    test {Multiple keys share the same template} {
+        # Start from an empty registry so the counts below are exact.
+        r flushall
+        r himport discardall
+        wait_hashtmpl_templates 0
+
+        r himport prepare shared name email age
+        r himport set shared:1 shared alice alice@example.com 25
+        r himport set shared:2 shared bob bob@example.com 30
+        r himport set shared:3 shared charlie charlie@example.com 35
+
+        assert_encoding $encoding shared:1
+        assert_encoding $encoding shared:2
+        assert_encoding $encoding shared:3
+
+        # Three keys, but a single template in the registry - that is the sharing.
+        assert_equal [s hash_templates] 1
+        assert_equal [s hash_template_keys] 3
+
+        assert_equal [r hget shared:1 name] alice
+        assert_equal [r hget shared:2 name] bob
+        assert_equal [r hget shared:3 name] charlie
+    }
+
+    test {Different field orders use same template} {
+        # Start from an empty registry so the counts below are exact.
+        r flushall
+        r himport discardall
+        wait_hashtmpl_templates 0
+
+        # Same fields in different orders must resolve to one shared template.
+        r himport prepare order1 a b c
+        r himport prepare order2 c b a
+        r himport prepare order3 b a c
+
+        # Create hashes - values follow each fieldset's declared order.
+        r himport set order:key1 order1 va1 vb1 vc1
+        r himport set order:key2 order2 vc2 vb2 va2
+        r himport set order:key3 order3 vb3 va3 vc3
+
+        assert_encoding $encoding order:key1
+        assert_encoding $encoding order:key2
+        assert_encoding $encoding order:key3
+
+        # Three distinct fieldsets and three keys, yet one template:
+        assert_equal [s hash_templates] 1
+        assert_equal [s hash_template_keys] 3
+
+        # All should have same sorted field order: a, b, c
+        assert_equal [r hget order:key1 a] va1
+        assert_equal [r hget order:key2 a] va2
+        assert_equal [r hget order:key3 a] va3
+
+        assert_equal [r hget order:key1 b] vb1
+        assert_equal [r hget order:key2 b] vb2
+        assert_equal [r hget order:key3 b] vb3
+    }
+
+    test {Template is released only after its last reference is dropped} {
+        # Start from an empty registry so the counts below are exact.
+        r flushall
+        r himport discardall
+        wait_hashtmpl_templates 0
+
+        # One template, pinned by a fieldset (a hold-ref) and two keys (key-refs).
+        r himport prepare fs x y z
+        r himport set rc:1 fs 1 2 3
+        r himport set rc:2 fs 4 5 6
+        assert_equal [s hash_templates] 1
+        assert_equal [s hash_template_keys] 2
+
+        # Deleting every key drops the key-refs to zero, but the still-prepared
+        # fieldset keeps the template alive - it can still create new keys.
+        r del rc:1 rc:2
+        assert_equal [s hash_template_keys] 0
+        assert_equal [s hash_templates] 1
+        r himport set rc:3 fs 7 8 9
+        assert_equal [s hash_template_keys] 1
+        assert_equal [s hash_templates] 1
+
+        # Drop the last key and the fieldset; only with no references left is the
+        # template reclaimed (asynchronously, via the serverCron pending-free drain).
+        r del rc:3
+        assert_equal [r himport discard fs] 1
+        wait_hashtmpl_templates 0
+        assert_equal [s hash_template_keys] 0
     }
 
     test {HIMPORT SET with too many values fails} {
@@ -149,7 +266,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         }
     }
 
-    test {HIMPORT SET creates template-based hash} {
+    test {HIMPORT SET creates template-encoded hash} {
         r del myhash
         r himport prepare user name email age
         r himport set myhash user alice alice@example.com 25
@@ -205,8 +322,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         r himport discardall
         set before [cur_tot_mem]
 
-        # Prepare many large fieldsets; each pins a template and owns a
-        # value_order map plus the fieldset name.
+        # Prepare many large fieldsets; each one owns the fieldset and pins a template
         for {set i 0} {$i < 100} {incr i} {
             set fields {}
             for {set f 0} {$f < 64} {incr f} {
@@ -306,35 +422,6 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         r config set maxmemory-clients $saved_limit
     }
 
-    test {HIMPORT PREPARE replaces existing fieldset with same name} {
-        # Create template with 2 fields
-        r himport prepare fieldset a b
-        r himport set key1 fieldset val_a val_b
-        assert_equal [r hgetall key1] {a val_a b val_b}
-
-        # Replace with template with 3 fields (same name)
-        r himport prepare fieldset x y z
-        r himport set key2 fieldset val_x val_y val_z
-        assert_equal [r hgetall key2] {x val_x y val_y z val_z}
-
-        # Old template definition should be gone - using with 2 values fails
-        assert_error "*value count does not match*" {r himport set key3 fieldset v1 v2}
-
-        # Cleanup
-        r himport discard fieldset
-    }
-
-    test {Fieldsets are not shared between connections} {
-        set rd [redis_client]
-        $rd himport prepare fieldset a b
-        # The main client cannot see the other connection's fieldset.
-        assert_error "*no such fieldset*" {r himport set key fieldset v1 v2}
-        # The fieldset still works on its owning connection.
-        assert_equal [$rd himport set key fieldset v1 v2] OK
-        $rd close
-        r del key
-    }
-
     test {CLIENT RESET clears session-local fieldsets} {
         r himport prepare fieldset a b c
         assert_equal [r himport set key1 fieldset v1 v2 v3] OK
@@ -432,7 +519,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
                 return redis.call('HSETC', keys[1], 'a', 'va')
             end)}
         assert_error "*not allowed from script*" {r fcall hsetc_call 1 hsetc:fcall}
-        # No corrupt template/key created via either path.
+        # No key created via either path.
         assert_equal 0 [r exists hsetc:eval]
         assert_equal 0 [r exists hsetc:fcall]
     }
@@ -514,16 +601,14 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         assert_encoding $encoding hdel:test
         assert_equal [r hdel hdel:test b] 1
         assert_encoding $encoding hdel:test
-        assert_equal [r hlen hdel:test] 3
-        assert_equal [r hexists hdel:test b] 0
-        assert_equal [r hget hdel:test a] 1
+        assert_equal [r hgetall hdel:test] {a 1 c 3 d 4}
     }
 
     test {HDEL multiple fields on template-based hash} {
         make_hashtmpl hdel:multi a 1 b 2 c 3 d 4 e 5
         assert_equal [r hdel hdel:multi b d] 2
         assert_encoding $encoding hdel:multi
-        assert_equal [r hlen hdel:multi] 3
+        assert_equal [r hgetall hdel:multi] {a 1 c 3 e 5}
     }
 
     test {HDEL all fields deletes the key} {
@@ -541,16 +626,14 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         assert_encoding $encoding hgetdel:test
         assert_equal [r hgetdel hgetdel:test FIELDS 1 b] {2}
         assert_encoding $encoding hgetdel:test
-        assert_equal [r hlen hgetdel:test] 3
-        assert_equal [r hexists hgetdel:test b] 0
-        assert_equal [r hget hgetdel:test a] 1
+        assert_equal [r hgetall hgetdel:test] {a 1 c 3 d 4}
     }
 
     test {HGETDEL multiple fields on template-based hash} {
         make_hashtmpl hgetdel:multi a 1 b 2 c 3 d 4 e 5
         assert_equal [r hgetdel hgetdel:multi FIELDS 2 b d] {2 4}
         assert_encoding $encoding hgetdel:multi
-        assert_equal [r hlen hgetdel:multi] 3
+        assert_equal [r hgetall hgetdel:multi] {a 1 c 3 e 5}
     }
 
     test {HGETDEL non-existent field returns nil and keeps encoding} {
@@ -636,6 +719,23 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         r hset hset:multi b 2 c 3 d 4
         assert_encoding $encoding hset:multi
         assert_equal [r hlen hset:multi] 4
+    }
+    
+    # ============================================================
+    # HSETNX on template-based hash
+    # ============================================================
+
+    test {HSETNX on existing field in template-based hash} {
+        make_hashtmpl hsetnx:test name alice
+        assert_equal [r hsetnx hsetnx:test name bob] 0
+        assert_equal [r hget hsetnx:test name] alice
+    }
+
+    test {HSETNX on new field in template-based hash} {
+        make_hashtmpl hsetnx:new name alice
+        assert_equal [r hsetnx hsetnx:new email alice@example.com] 1
+        assert_encoding $encoding hsetnx:new
+        assert_equal [r hget hsetnx:new email] alice@example.com
     }
 
     # ============================================================
@@ -733,20 +833,27 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         make_hashtmpl hrand:count a 1 b 2 c 3 d 4
         set fields [r hrandfield hrand:count 2]
         assert_equal [llength $fields] 2
+        # Positive count returns distinct, real fields of the hash.
+        assert_equal [llength [lsort -unique $fields]] 2
+        foreach f $fields { assert {$f in {a b c d}} }
     }
 
     test {HRANDFIELD with WITHVALUES on template-based hash} {
         make_hashtmpl hrand:withval a 1 b 2
         set result [r hrandfield hrand:withval 2 WITHVALUES]
         assert_equal [llength $result] 4
+        # Each returned field must be paired with its own value.
+        foreach {f v} $result { assert_equal $v [dict get {a 1 b 2} $f] }
     }
 
-    test {HRANDFIELD WITHVALUES RESP3 shape on template-based hash} {
+    test {HRANDFIELD WITHVALUES RESP3 reply on template-based hash} {
         make_hashtmpl hrand:resp3 a 1 b 2 c 3
         r hello 3
         set res [r hrandfield hrand:resp3 3 withvalues]
         assert_equal [llength $res] 3
         assert_equal [llength [lindex $res 0]] 2
+        # RESP3 nests each field/value as a pair; verify the pairing.
+        foreach pair $res { lassign $pair f v; assert_equal $v [dict get {a 1 b 2 c 3} $f] }
         r hello 2
     }
 
@@ -754,11 +861,13 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         make_hashtmpl hrand:neg a 1 b 2
         set result [r hrandfield hrand:neg -5]
         assert_equal [llength $result] 5
+        # Negative count samples with replacement; every draw is a real field.
+        foreach f $result { assert {$f in {a b}} }
     }
 
-    # ============================================================
-    # Hash Field Expiration - converts away from template encoding
-    # ============================================================
+    # =====================================================================
+    # Hash Field Expiration - converts template keys to regular hash keys.
+    # =====================================================================
 
     # Applying a field TTL must deconvert the template-encoded hash to a
     # TTL-capable encoding. The target depends on hash-max-listpack-entries:
@@ -863,77 +972,11 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     }
 
     # ============================================================
-    # Template sharing between multiple keys
-    # ============================================================
-
-    test {Multiple keys share the same template} {
-        # Start from an empty registry so the counts below are exact.
-        r flushall
-        r himport discardall
-        wait_hashtmpl_templates 0
-
-        r himport prepare shared name email age
-        r himport set shared:1 shared alice alice@example.com 25
-        r himport set shared:2 shared bob bob@example.com 30
-        r himport set shared:3 shared charlie charlie@example.com 35
-
-        assert_encoding $encoding shared:1
-        assert_encoding $encoding shared:2
-        assert_encoding $encoding shared:3
-
-        # Three keys, but a single template in the registry - that is the sharing.
-        assert_equal [s hash_templates] 1
-        assert_equal [s hash_template_keys] 3
-
-        assert_equal [r hget shared:1 name] alice
-        assert_equal [r hget shared:2 name] bob
-        assert_equal [r hget shared:3 name] charlie
-    }
-
-    test {Different field orders use same template} {
-        # Start from an empty registry so the counts below are exact.
-        r flushall
-        r himport discardall
-        wait_hashtmpl_templates 0
-
-        # Same fields in different orders must resolve to one shared template.
-        r himport prepare order1 a b c
-        r himport prepare order2 c b a
-        r himport prepare order3 b a c
-
-        # Create hashes - values follow each fieldset's declared order.
-        r himport set order:key1 order1 va1 vb1 vc1
-        r himport set order:key2 order2 vc2 vb2 va2
-        r himport set order:key3 order3 vb3 va3 vc3
-
-        assert_encoding $encoding order:key1
-        assert_encoding $encoding order:key2
-        assert_encoding $encoding order:key3
-
-        # Three distinct fieldsets and three keys, yet one template: the
-        # commutative hash collapses every field ordering onto the same template.
-        assert_equal [s hash_templates] 1
-        assert_equal [s hash_template_keys] 3
-
-        # All should have same sorted field order: a, b, c
-        assert_equal [r hget order:key1 a] va1
-        assert_equal [r hget order:key2 a] va2
-        assert_equal [r hget order:key3 a] va3
-
-        assert_equal [r hget order:key1 b] vb1
-        assert_equal [r hget order:key2 b] vb2
-        assert_equal [r hget order:key3 b] vb3
-    }
-
-    # ============================================================
     # INFO template stats
     # ============================================================
 
     test {INFO stats shows hash template stats} {
         r flushall
-        # Key-refs from a flushall are released on a BIO lazyfree thread, so the
-        # live key count is eventually consistent; poll for the clean baseline
-        # left by prior tests.
         wait_hashtmpl_keys 0
 
         # Create 3 keys with same template
@@ -982,6 +1025,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         make_hashtmpl shrink:k2 a 1 b 2 c 3
         assert_encoding $encoding shrink:k2
         assert_equal [r hget shrink:k2 a] 1
+        assert {[s hash_templates] == 1}
 
         r del shrink:k2
         r himport discardall
@@ -1021,6 +1065,18 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         r flushall
         r ping
     } {PONG}
+    
+    test {Multiple FLUSHALL ASYNC with keys in succession does not crash} {
+        make_hashtmpl multi:flush a 1 b 2
+        r flushall async
+        make_hashtmpl multi:flush1 a 1 b 2
+        r flushall async
+        make_hashtmpl multi:flush2 a 1 b 2
+        r flushall async
+        make_hashtmpl multi:flush3 a 1 b 2 c 3
+        r flushall async
+        r ping
+    } {PONG}
 
     # ============================================================
     # DEL - template refcount management
@@ -1034,23 +1090,6 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
         # Should be able to create new hash with same template
         make_hashtmpl del:new name charlie email dave
         assert_encoding $encoding del:new
-    }
-
-    # ============================================================
-    # HSETNX on template-based hash
-    # ============================================================
-
-    test {HSETNX on existing field in template-based hash} {
-        make_hashtmpl hsetnx:test name alice
-        assert_equal [r hsetnx hsetnx:test name bob] 0
-        assert_equal [r hget hsetnx:test name] alice
-    }
-
-    test {HSETNX on new field in template-based hash} {
-        make_hashtmpl hsetnx:new name alice
-        assert_equal [r hsetnx hsetnx:new email alice@example.com] 1
-        assert_encoding $encoding hsetnx:new
-        assert_equal [r hget hsetnx:new email] alice@example.com
     }
 
     # ============================================================

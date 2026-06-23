@@ -1904,7 +1904,7 @@ static size_t rdb_tmpls_cap = 0;
 /* Used to convert plain hashes into template-encoded hashes while loading a
  * legacy RDB (see t_hash.c). Set only while rdbLoadRioWithLoadingCtx runs;
  * NULL for RESTORE/DUMP/check, which load directly and skip the conversion. */
-static rdbLoadTemplateGuard *rdb_load_tmpl_guard = NULL;
+static rdbLoadTemplateCtx *rdb_load_tmpl_ctx = NULL;
 
 static int rdbEnsureHashTemplatesCap(uint64_t id) {
     size_t maxcap = SIZE_MAX / sizeof(*rdb_tmpls);
@@ -3097,9 +3097,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         serverAssert(len == 0);
 
         /* Try to convert to template-based hash if threshold met. RDB load only 
-         * (the guard is NULL on RESTORE/DUMP and when the RDB header already
+         * (the ctx is NULL on RESTORE/DUMP and when the RDB header already
          * has templates). */
-        hashTemplateGuardTryConvert(rdb_load_tmpl_guard, o);
+        rdbLoadTemplateCtxTryConvert(rdb_load_tmpl_ctx, o);
     } else if (rdbtype == RDB_TYPE_HASH_TMPL_LP) {
         /* TMPL_LP self-contained format: [fields_lp_blob][values_lp_blob].
          * The field names travel as one listpack blob, so the template can be
@@ -3795,9 +3795,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                     hashTypeConvert(NULL /*db*/, o, OBJ_ENCODING_HT);
 
                 /* Try to convert to template-based hash if threshold met. Bulk
-                 * RDB load only (guard NULL on RESTORE/DUMP and when the RDB
+                 * RDB load only (ctx NULL on RESTORE/DUMP and when the RDB
                  * header already carried templates). */
-                hashTemplateGuardTryConvert(rdb_load_tmpl_guard, o);
+                rdbLoadTemplateCtxTryConvert(rdb_load_tmpl_ctx, o);
                 break;
             default:
                 /* totally unreachable */
@@ -4848,11 +4848,11 @@ static int rdbLoadRioWithLoadingCtxInternal(rio *rdb, int rdbflags, rdbSaveInfo 
             continue;
         } else if (type == RDB_OPCODE_HASH_TEMPLATES) {
             /* Load hash template registry. A template header means this is a
-             * template-aware RDB, so the load-time conversion/utility guard must
-             * stay off. These records precede all keys, so the guard has not been
-             * used yet: just free it. A NULL guard is a no-op in every helper. */
-            hashTemplateGuardFree(rdb_load_tmpl_guard);
-            rdb_load_tmpl_guard = NULL;
+             * template-aware RDB, so the load-time conversion/utility context must
+             * stay off. These records precede all keys, so the ctx has not been
+             * used yet: just free it. A NULL ctx is a no-op in every helper. */
+            rdbLoadTemplateCtxFree(rdb_load_tmpl_ctx);
+            rdb_load_tmpl_ctx = NULL;
             if (rdbLoadHashTemplates(rdb) != C_OK) {
                 serverLog(LL_WARNING, "Failed loading hash templates");
                 goto eoferr;
@@ -4893,7 +4893,7 @@ static int rdbLoadRioWithLoadingCtxInternal(rio *rdb, int rdbflags, rdbSaveInfo 
         if (val == NULL) {
             keyMetaSpecCleanup(&keyMeta);
             /* Nothing was loaded; clear any leftover pending template state. */
-            hashTemplateGuardCommit(rdb_load_tmpl_guard, NULL, NULL);
+            rdbLoadTemplateCtxCommit(rdb_load_tmpl_ctx, NULL, NULL);
             /* Since we used to have bug that could lead to empty keys
              * (See #8453), we rather not fail when empty key is encountered
              * in an RDB file, instead we will silently discard it and
@@ -4927,7 +4927,7 @@ static int rdbLoadRioWithLoadingCtxInternal(rio *rdb, int rdbflags, rdbSaveInfo 
             keyMetaSpecCleanup(&keyMeta);
             server.rdb_last_load_keys_expired++;
             /* Discard any template the converted-but-expired value pinned. */
-            hashTemplateGuardCommit(rdb_load_tmpl_guard, NULL, NULL);
+            rdbLoadTemplateCtxCommit(rdb_load_tmpl_ctx, NULL, NULL);
         } else {
             robj keyobj;
             initStaticStringObject(keyobj,key);
@@ -4952,7 +4952,7 @@ static int rdbLoadRioWithLoadingCtxInternal(rio *rdb, int rdbflags, rdbSaveInfo 
 
             /* Bind any pending few-key template to the stable keyspace object
              * (dbAddRDBLoad may have rebuilt val into an embedded-key kvobj). */
-            hashTemplateGuardCommit(rdb_load_tmpl_guard, kv, db);
+            rdbLoadTemplateCtxCommit(rdb_load_tmpl_ctx, kv, db);
 
             /* If minExpiredField was set, then the object is hash with expiration
              * on fields and need to register it in global HFE DS */
@@ -5035,19 +5035,19 @@ eoferr:
  * would keep stale hold-refs and abort the next resync with "Duplicate hash
  * template ID". */
 int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadingCtx *rdb_loading_ctx) {
-    /* Arm the bulk-load utility guard, but only when load-time conversion is
-     * enabled at all (min-entries > 0); otherwise no guard is needed. It is for
+    /* Arm the bulk-load utility context, but only when load-time conversion is
+     * enabled at all (min-entries > 0); otherwise no ctx is needed. It is for
      * legacy/template-unaware RDBs only and is freed if a template header is seen. */
-    rdb_load_tmpl_guard = (server.hash_rdb_load_min_template_entries > 0)
-        ? hashTemplateGuardCreate(server.hash_rdb_load_template_disassembly_threshold)
+    rdb_load_tmpl_ctx = (server.hash_rdb_load_min_template_entries > 0)
+        ? rdbLoadTemplateCtxCreate(server.hash_rdb_load_template_disassembly_threshold)
         : NULL;
     int retval = rdbLoadRioWithLoadingCtxInternal(rdb, rdbflags, rsi, rdb_loading_ctx);
     /* On success, disassemble the templates that stayed few-key back to plain
      * hashes. Skip on failure: the partial dataset is discarded anyway. */
     if (retval == C_OK)
-        hashTemplateGuardDisassemble(rdb_load_tmpl_guard);
-    hashTemplateGuardFree(rdb_load_tmpl_guard);
-    rdb_load_tmpl_guard = NULL;
+        rdbLoadTemplateCtxDisassemble(rdb_load_tmpl_ctx);
+    rdbLoadTemplateCtxFree(rdb_load_tmpl_ctx);
+    rdb_load_tmpl_ctx = NULL;
     rdbClearHashTemplates();
     return retval;
 }
