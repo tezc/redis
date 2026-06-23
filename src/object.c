@@ -815,8 +815,7 @@ void dismissHashObject(robj *o, size_t size_hint) {
             for (unsigned long long i = 0; i < n; i++)
                 dismissSds(hta->values[i]);
         }
-        /* Dismiss the values[] array (analogous to dict bucket dismissal). */
-        dismissMemory(hta->values, n * sizeof(sds));
+        dismissMemory(hta, n * sizeof(sds));
     } else {
         serverPanic("Unknown hash encoding type");
     }

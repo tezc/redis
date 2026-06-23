@@ -12398,16 +12398,25 @@ int RM_ScanKey(RedisModuleKey *key, RedisModuleScanCursor *cursor, RedisModuleSc
         hashTypeIterator hi;
         hashTypeInitIterator(&hi, kv);
         while (hashTypeNext(&hi, 0) != C_ERR) {
-            unsigned char *vstr = NULL;
-            unsigned int vlen;
-            long long vll;
-
-            sds fieldSds = hashTypeCurrentObjectNewSds(&hi, OBJ_HASH_KEY);
-            hashTypeCurrentObject(&hi, OBJ_HASH_VALUE, &vstr, &vlen, &vll,NULL);
-
-            robj *field = createObject(OBJ_STRING, fieldSds);
-            robj *value = (vstr != NULL) ? createStringObject((char *)vstr, vlen) :
-                                           createStringObjectFromLongLongWithSds(vll);
+            sds field_sds = hashTypeCurrentObjectNewSds(&hi, OBJ_HASH_KEY);
+            robj *field = createObject(OBJ_STRING, field_sds);
+            robj *value;
+            if (kv->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+                /* Values are sds; read the size_t length directly so a value
+                 * larger than UINT_MAX is not truncated by the unsigned int in
+                 * hashTypeCurrentObject (matches moduleScanKeyCallback's HT path). */
+                char *ele;
+                size_t elen;
+                hashTypeCurrentFromTmplArray(&hi, OBJ_HASH_VALUE, &ele, &elen, NULL);
+                value = createStringObject(ele, elen);
+            } else { /* TMPL_LP: listpack value, bounded by hash-max-listpack-value. */
+                unsigned char *vstr = NULL;
+                unsigned int vlen;
+                long long vll;
+                hashTypeCurrentFromTmplLp(&hi, OBJ_HASH_VALUE, &vstr, &vlen, &vll, NULL);
+                value = (vstr != NULL) ? createStringObject((char *)vstr, vlen) :
+                                         createStringObjectFromLongLongWithSds(vll);
+            }
             fn(key, field, value, privdata);
 
             decrRefCount(field);

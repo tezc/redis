@@ -3928,7 +3928,7 @@ typedef struct hashTemplate {
 
 /* Global registry for hash templates. */
 typedef struct hashTemplates {
-    dict *registry;             /* field set -> template lookup */
+    dict *by_fields;            /* field set -> template lookup */
     dict *by_fields_lp;         /* fields-listpack blob -> template lookup, used
                                  * to resolve a self-contained TMPL_LP RESTORE in
                                  * O(1) without reading field names one by one. */
@@ -3940,12 +3940,17 @@ typedef struct hashTemplates {
                                  * hashTemplateDrainPendingFree and frees them. */
     size_t pending_free_count;  /* Used slots in pending_free_ids. */
     size_t pending_free_cap;    /* Allocated slots in pending_free_ids. */
-    pthread_mutex_t lock;       /* Sole cross-thread point: guards the pending_free_ids
-                                 * queue and the by_id array (BIO resolves ids to
-                                 * templates under it; the main thread grows/recycles
-                                 * by_id under it). The registry, hold_refcount and
-                                 * propargv stay main-thread only. */
-    int rdb_saving;             /* 1 during RDB save (compact refs). */
+    pthread_mutex_t lock;       /* Guards the only cross-thread state: the
+                                 * pending_free_ids queue and the by_id array
+                                 * (both touched by BIO threads). Everything else
+                                 * (registry, hold_refcount, propargv) is
+                                 * main-thread only. */
+    int rdb_saving;             /* Controls how keys are serialized into RDB or
+                                 * DUMP. If 1, an RDB save is in progress: templates
+                                 * are written once, then keys reference them
+                                 * (compact). If 0 (e.g. DUMP), keys are written in
+                                 * full form (fields included) so RESTORE is
+                                 * self-contained. */
     redisAtomic size_t total_key_refs; /* Sum of key_refcount across all templates. */
     size_t total_mem_size;      /* Sum of every live template's mem_size. Tracked
                                  * incrementally (+= on create, -= on free) so
@@ -4009,10 +4014,10 @@ static inline size_t *htGetMetadataSize(dict *d) {
  * when it is active. */
 typedef struct rdbLoadTemplateCtx rdbLoadTemplateCtx;
 rdbLoadTemplateCtx *rdbLoadTemplateCtxCreate(size_t disassembly_threshold);
-int rdbLoadTemplateCtxTryConvert(rdbLoadTemplateCtx *g, robj *o);
-void rdbLoadTemplateCtxCommit(rdbLoadTemplateCtx *g, robj *kv, redisDb *db);
-void rdbLoadTemplateCtxDisassemble(rdbLoadTemplateCtx *g);
-void rdbLoadTemplateCtxFree(rdbLoadTemplateCtx *g);
+int rdbLoadTemplateCtxTryConvert(rdbLoadTemplateCtx *ctx, robj *o);
+void rdbLoadTemplateCtxCommit(rdbLoadTemplateCtx *ctx, robj *kv, redisDb *db);
+void rdbLoadTemplateCtxDisassemble(rdbLoadTemplateCtx *ctx);
+void rdbLoadTemplateCtxFree(rdbLoadTemplateCtx *ctx);
 
 void hashTypeConvert(redisDb *db, robj *o, int enc);
 int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields,
@@ -4055,7 +4060,7 @@ size_t himportFieldsetMemOverhead(client *c);
 void hsetcCacheFree(client *c);
 int hashTypeIsExpired(const robj *o, uint64_t expireAt);
 
-/* Hinted Hash Templates functions */
+/* Hash Templates functions */
 hashTemplate *hashTemplateGetOrCreate(sds *fields, unsigned long long field_count);
 hashTemplate *hashTemplateGetOrCreateWithHash(uint64_t hash, sds *fields, unsigned long long field_count);
 void hashTemplateIncrKeyRef(hashTemplate *tmpl);

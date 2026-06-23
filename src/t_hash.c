@@ -268,7 +268,7 @@ static void hashDictWithExpireOnRelease(dict *d) {
 }
 
 /*-----------------------------------------------------------------------------
- * Hash template registry (Hinted Hash Templates) - OBJ_ENCODING_TMPL_LP / TMPL_ARRAY
+ * Hash template registry
  *
  * Many hashes often share the exact same set of field names (e.g. rows of one
  * "schema"). Instead of repeating the field names in every key, a single
@@ -300,7 +300,7 @@ static void hashDictWithExpireOnRelease(dict *d) {
  *                             order. Used once listpack limits are exceeded (or
  *                             there are many fields). Lookup: values[idx].
  *
- * Registry: htemplates->registry maps a sorted field set to its template, and
+ * Registry: htemplates->by_fields maps a sorted field set to its template, and
  * htemplates->by_id maps a small integer id to the template. TMPL_LP stores
  * this id inline rather than an 8-byte pointer, so a key's reference to its
  * template can be as little as ~2 bytes. RDB save uses it the same way: each
@@ -341,15 +341,9 @@ static int hashTemplateCanUseLpEncoding(hashTemplate *tmpl) {
     return lpSafeToAdd(NULL, field_sum);
 }
 
-/* Incremental pending_free drain state (serverCron processes in batches). */
-static uint64_t *pending_free_drain_queue = NULL;
-static size_t pending_free_drain_count = 0;
-static size_t pending_free_drain_pos = 0;
-
-/* Incremental fields_lp cleanup state (serverCron processes in batches). */
-static dictIterator *fields_lp_cleanup_iter = NULL;
-
-/* Allocate the smallest available template ID and register in by_id.
+/* Allocate the smallest free template ID and register the template in by_id.
+ * IDs are kept small (lowest free slot) because TMPL_LP stores the ID as a
+ * listpack varint, so a small ID costs ~2 bytes per key.
  * Main-thread only (template creation), but a BIO lazyfree thread may read by_id
  * concurrently (hashTemplateLpFree), so the array is grown/written under the
  * lock that also guards pending_free_ids. */
@@ -383,7 +377,7 @@ static void recycleTemplateId(uint64_t id) {
      * invokes before decrementing the table's used count, so the template being
      * removed is still counted: dictSize()==1 means it is the last one and the
      * by_id index can be released. */
-    if (dictSize(htemplates->registry) == 1) {
+    if (dictSize(htemplates->by_fields) == 1) {
         zfree(htemplates->by_id);
         htemplates->by_id = NULL;
         htemplates->by_id_cap = 0;
@@ -412,9 +406,6 @@ void hashTemplateAttachFieldsLp(hashTemplate *tmpl, sds fields_lp) {
  * it on first use. Owned by the template; do not free. */
 sds hashTemplateGetFieldsLp(hashTemplate *tmpl) {
     if (tmpl->fields_lp) return tmpl->fields_lp;
-
-    /* Sanity check: TMPL_LP keys should only use LP-compatible templates. */
-    serverAssert(tmpl->can_use_lp);
 
     unsigned char *lp = lpNew(0);
     for (unsigned long long i = 0; i < tmpl->field_count; i++)
@@ -449,14 +440,14 @@ static uint64_t computeFieldsHash(sds *fields, unsigned long long field_count) {
 }
 
 /* Template registry dict callbacks. Key is hashTemplate*, value is same. */
-static uint64_t templateRegistryHashFunc(const void *key) {
+static uint64_t templateFieldsHashFunc(const void *key) {
     const hashTemplate *tmpl = key;
     return tmpl->hash;
 }
 
-static int templateRegistryKeyCompare(dictCmpCache *cache, 
-                                      const void *k1,
-                                      const void *k2)
+static int templateFieldsKeyCompare(dictCmpCache *cache, 
+                                    const void *k1,
+                                    const void *k2)
 {
     UNUSED(cache);
     const hashTemplate *t1 = k1;
@@ -472,7 +463,7 @@ static int templateRegistryKeyCompare(dictCmpCache *cache,
     return 1;
 }
 
-static void templateRegistryKeyDestructor(dict *d, void *key) {
+static void templateFieldsKeyDestructor(dict *d, void *key) {
     UNUSED(d);
     hashTemplate *tmpl = key;
     /* propargv is freed in hashTemplateDecrHoldRef when the last non-key
@@ -491,12 +482,12 @@ static void templateRegistryKeyDestructor(dict *d, void *key) {
     zfree(tmpl);
 }
 
-static dictType templateRegistryDictType = {
-    templateRegistryHashFunc,      /* hash function */
+static dictType templateFieldsDictType = {
+    templateFieldsHashFunc,        /* hash function */
     NULL,                          /* key dup */
     NULL,                          /* val dup */
-    templateRegistryKeyCompare,    /* key compare */
-    templateRegistryKeyDestructor, /* key destructor (key=tmpl) */
+    templateFieldsKeyCompare,      /* key compare */
+    templateFieldsKeyDestructor,   /* key destructor (key=tmpl) */
     NULL,                          /* val destructor (val=same as key) */
     NULL                           /* allow to expand */
 };
@@ -529,7 +520,7 @@ static dictType templateFieldsLpDictType = {
 void hashTemplatesInit(void) {
     if (htemplates) return;
     htemplates = zcalloc(sizeof(hashTemplates));
-    htemplates->registry = dictCreate(&templateRegistryDictType);
+    htemplates->by_fields = dictCreate(&templateFieldsDictType);
     htemplates->by_fields_lp = dictCreate(&templateFieldsLpDictType);
     pthread_mutex_init(&htemplates->lock, NULL);
     server.htemplates = htemplates;
@@ -553,7 +544,10 @@ static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsi
     }
     htemplates->total_mem_size += tmpl->mem_size;
 
-    /* Check if fields fit in listpack (after they're populated). */
+    /* Cache whether the field names fit a listpack (now that they're populated).
+     * This decides whether keys using this template can take the compact TMPL_LP
+     * encoding (vs TMPL_ARRAY) and whether DUMP can serialize the fields as one
+     * listpack blob. Computed once: templates are immutable, so it never changes. */
     tmpl->can_use_lp = hashTemplateCanUseLpEncoding(tmpl);
     tmpl->id = allocateTemplateId(tmpl);
     return tmpl;
@@ -580,11 +574,11 @@ hashTemplate *hashTemplateGetOrCreateWithHash(uint64_t hash, sds *fields,
         .fields = fields
     };
 
-    dictEntry *de = dictFind(htemplates->registry, &query);
+    dictEntry *de = dictFind(htemplates->by_fields, &query);
     if (de) return dictGetKey(de);
 
     hashTemplate *tmpl = hashTemplateCreateInternal(hash, fields, field_count);
-    dictAdd(htemplates->registry, tmpl, NULL);
+    dictAdd(htemplates->by_fields, tmpl, NULL);
     return tmpl;
 }
 
@@ -617,16 +611,20 @@ static void hashTemplateEnqueuePendingFree(uint64_t id) {
     pthread_mutex_unlock(&htemplates->lock);
 }
 
-/* Decrement hold_refcount. Main-thread only (clients and RDB load), so
- * hold_refcount and propargv need no locking. When the last non-key holder is
- * gone and no key references remain either, free the template inline. */
+/* Release one non-key holder of the template (a client's prepared fieldset, an
+ * in-progress RDB load, or the HSETC cache). Main-thread only, so hold_refcount
+ * and propargv need no lock. When the last holder leaves, drop the cached
+ * propagation argv; and if no keys reference the template either, free it now. */
 void hashTemplateDecrHoldRef(hashTemplate *tmpl) {
     debugServerAssert(pthread_equal(pthread_self(), server.main_thread_id));
     serverAssert(tmpl->hold_refcount > 0);
     tmpl->hold_refcount--;
     if (tmpl->hold_refcount > 0) return;
 
-    /* No non-key holder is left, so the cached propagation argv is dead weight. */
+    /* propargv is the cached argv that propagates HIMPORT SET as HSETC. HIMPORT
+     * SET can only target this template while a client has it prepared (a
+     * hold-ref via HIMPORT PREPARE); with no holders left no such write can
+     * happen, so the cached argv is dead weight - free it. */
     if (tmpl->propargv) {
         /* Field robjs live at propargv[2 .. 2+field_count). */
         for (unsigned long long i = 0; i < tmpl->field_count; i++)
@@ -637,7 +635,7 @@ void hashTemplateDecrHoldRef(hashTemplate *tmpl) {
 
     unsigned long long key_refs;
     atomicGet(tmpl->key_refcount, key_refs);
-    if (key_refs == 0) dictDelete(htemplates->registry, tmpl);
+    if (key_refs == 0) dictDelete(htemplates->by_fields, tmpl);
 }
 
 /* Decrement key_refcount when freeing a hash (main thread or BIO lazyfree
@@ -657,7 +655,7 @@ void hashTemplateDecrKeyRef(hashTemplate *tmpl) {
     if (pthread_equal(pthread_self(), server.main_thread_id)) {
         /* Safe to touch tmpl: only the main thread frees templates, and no key
          * ref remains for a BIO thread to be racing on. */
-        if (tmpl->hold_refcount == 0) dictDelete(htemplates->registry, tmpl);
+        if (tmpl->hold_refcount == 0) dictDelete(htemplates->by_fields, tmpl);
     } else {
         hashTemplateEnqueuePendingFree(id);
     }
@@ -670,48 +668,53 @@ void hashTemplateDecrKeyRef(hashTemplate *tmpl) {
  * Processes incrementally with a time limit to avoid blocking the main thread
  * when draining large batches (e.g. after FLUSHALL). */
 void hashTemplateDrainPendingFree(void) {
+    /* Drain state kept across serverCron cycles (main-thread only). */
+    static uint64_t *batch = NULL;
+    static size_t batch_count = 0;
+    static size_t pos = 0;
+
     /* Acquire new batch if not already draining. */
-    if (!pending_free_drain_queue) {
+    if (!batch) {
         pthread_mutex_lock(&htemplates->lock);
-        pending_free_drain_queue = htemplates->pending_free_ids;
-        pending_free_drain_count = htemplates->pending_free_count;
+        batch = htemplates->pending_free_ids;
+        batch_count = htemplates->pending_free_count;
         htemplates->pending_free_ids = NULL;
         htemplates->pending_free_count = 0;
         htemplates->pending_free_cap = 0;
         pthread_mutex_unlock(&htemplates->lock);
 
-        pending_free_drain_pos = 0;
-        if (pending_free_drain_count == 0) {
-            zfree(pending_free_drain_queue);
-            pending_free_drain_queue = NULL;
+        pos = 0;
+        if (batch_count == 0) {
+            zfree(batch);
+            batch = NULL;
             return;
         }
     }
 
     /* Time limit: spread work across multiple cron cycles to avoid spikes. */
     long long start = ustime();
-    long long timelimit = 1000000 / server.hz / 10;  // 10% of a hz cycle
+    long long timelimit = 1000000 / server.hz / 10;  /* 10% of a hz cycle */
     if (timelimit <= 0) timelimit = 1;
 
-    while (pending_free_drain_pos < pending_free_drain_count) {
-        hashTemplate *tmpl = hashTemplateGetById(pending_free_drain_queue[pending_free_drain_pos]);
+    while (pos < batch_count) {
+        hashTemplate *tmpl = hashTemplateGetById(batch[pos]);
         if (tmpl != NULL) {
             unsigned long long key_refs;
             atomicGet(tmpl->key_refcount, key_refs);
             if (key_refs == 0 && tmpl->hold_refcount == 0)
-                dictDelete(htemplates->registry, tmpl);
+                dictDelete(htemplates->by_fields, tmpl);
         }
-        pending_free_drain_pos++;
+        pos++;
 
         if (ustime() - start > timelimit) break;
     }
 
     /* Done with this batch? */
-    if (pending_free_drain_pos >= pending_free_drain_count) {
-        zfree(pending_free_drain_queue);
-        pending_free_drain_queue = NULL;
-        pending_free_drain_count = 0;
-        pending_free_drain_pos = 0;
+    if (pos >= batch_count) {
+        zfree(batch);
+        batch = NULL;
+        batch_count = 0;
+        pos = 0;
     }
 }
 
@@ -724,19 +727,22 @@ void hashTemplateDrainPendingFree(void) {
  * Processes incrementally with a time limit to avoid blocking the main thread
  * when cleaning large template registries. Main-thread only (serverCron). */
 void hashTemplatesCleanupFieldsLpCron(void) {
+    /* Cleanup state kept across serverCron cycles (main-thread only). */
+    static dictIterator *iter = NULL;
+
     /* Start cleanup if not already running and there are blobs to clean. */
-    if (!fields_lp_cleanup_iter) {
+    if (!iter) {
         if (dictSize(htemplates->by_fields_lp) == 0) return;
-        fields_lp_cleanup_iter = dictGetSafeIterator(htemplates->by_fields_lp);
+        iter = dictGetSafeIterator(htemplates->by_fields_lp);
     }
 
     /* Time limit: spread work across multiple cron cycles to avoid spikes. */
     long long start = ustime();
-    long long timelimit = 1000000 / server.hz / 10;  // 10% of a hz cycle
+    long long timelimit = 1000000 / server.hz / 10;  /* 10% of a hz cycle */
     if (timelimit <= 0) timelimit = 1;
 
     dictEntry *de;
-    while ((de = dictNext(fields_lp_cleanup_iter)) != NULL) {
+    while ((de = dictNext(iter)) != NULL) {
         hashTemplate *tmpl = dictGetVal(de);
         dictDelete(htemplates->by_fields_lp, tmpl->fields_lp);
         sdsfree(tmpl->fields_lp);
@@ -747,15 +753,15 @@ void hashTemplatesCleanupFieldsLpCron(void) {
 
     /* Done with this cleanup cycle? */
     if (de == NULL) {
-        dictReleaseIterator(fields_lp_cleanup_iter);
-        fields_lp_cleanup_iter = NULL;
+        dictReleaseIterator(iter);
+        iter = NULL;
     }
 }
 
 /* Get number of templates in the registry. */
 size_t hashTemplateRegistrySize(void) {
-    if (!htemplates->registry) return 0;
-    return dictSize(htemplates->registry);
+    if (!htemplates->by_fields) return 0;
+    return dictSize(htemplates->by_fields);
 }
 
 /* Get total number of template-based keys (sum of all key_refcounts). */
@@ -766,18 +772,13 @@ size_t hashTemplateKeyCount(void) {
     return count;
 }
 
-/* Memory held by the shared template registry. Reported in INFO Memory
- * (mem_hash_templates) and MEMORY STATS (hash.templates). O(1): the per-template
- * footprint is the incrementally-maintained total_mem_size (the registry may
- * hold ~100k templates, so it is never walked here), plus the O(1) structural
- * overhead of the lookup dicts and the by_id array. The lazy fields_lp blob and
- * propargv are excluded: both are transient and freed before the template.
- * pending_free_ids (BIO-written, negligible) is also omitted. Main-thread only;
- * by_id_cap is only ever written by the main thread. */
+/* Memory held by the shared template registry, reported as
+ * used_memory_hash_templates (INFO) and hash.templates (MEMORY STATS). O(1):
+ * the incremental total_mem_size counter plus the lookup dicts and by_id array. */
 size_t hashTemplatesMemUsage(void) {
     if (!htemplates) return 0;
     return htemplates->total_mem_size + sizeof(*htemplates) +
-           dictMemUsage(htemplates->registry) +
+           dictMemUsage(htemplates->by_fields) +
            dictMemUsage(htemplates->by_fields_lp) +
            htemplates->by_id_cap * sizeof(hashTemplate *);
 }
@@ -3077,53 +3078,53 @@ static dictType rdbLoadTemplateCtxReverseDictType = {
 };
 
 rdbLoadTemplateCtx *rdbLoadTemplateCtxCreate(size_t disassembly_threshold) {
-    rdbLoadTemplateCtx *g = zcalloc(sizeof(*g));
-    g->disassembly_threshold = disassembly_threshold;
+    rdbLoadTemplateCtx *ctx = zcalloc(sizeof(*ctx));
+    ctx->disassembly_threshold = disassembly_threshold;
     if (disassembly_threshold > 0)
-        g->reverse_lookup = dictCreate(&rdbLoadTemplateCtxReverseDictType);
-    return g;
+        ctx->reverse_lookup = dictCreate(&rdbLoadTemplateCtxReverseDictType);
+    return ctx;
 }
 
 /* Registry lookup without creating on miss. fields must be pre-sorted. */
 static hashTemplate *hashTemplateLookupByHash(uint64_t hash, sds *fields,
                                               unsigned long long field_count) {
     hashTemplate query = { .hash = hash, .field_count = field_count, .fields = fields };
-    dictEntry *de = dictFind(htemplates->registry, &query);
+    dictEntry *de = dictFind(htemplates->by_fields, &query);
     return de ? dictGetKey(de) : NULL;
 }
 
-/* Convert-time bookkeeping for the key just attached to tmpl. Called after the
- * key ref has been taken, so tmpl->key_refcount is current. The key's keyspace
- * object is not yet stable (dbAddRDBLoad rebuilds it into an embedded-key
- * kvobj), so we only record the template here and defer adding the object to the
- * reverse map until rdbLoadTemplateCtxCommit() runs with the stable kvobj. A
- * template that just reached the threshold graduates (leaves the map). */
-static void rdbLoadTemplateCtxTrack(rdbLoadTemplateCtx *g, hashTemplate *tmpl) {
+/* Record that the key just loaded uses tmpl, so few-key templates can be undone
+ * at the end of the load. The key's final object is not built yet (dbAddRDBLoad
+ * does that), so we only note the template as "pending" here; Commit attaches
+ * the real object once it exists. We track tmpl only while it has fewer keys
+ * than the threshold - the key that reaches the threshold makes tmpl worth
+ * keeping, so it leaves the tracking map. */
+static void rdbLoadTemplateCtxTrack(rdbLoadTemplateCtx *ctx, hashTemplate *tmpl) {
     unsigned long long count;
     atomicGet(tmpl->key_refcount, count);
-    g->pending_tmpl = NULL;
-    if (count < g->disassembly_threshold) {
-        g->pending_tmpl = tmpl;
-    } else if (count == g->disassembly_threshold) {
-        dictDelete(g->reverse_lookup, tmpl);
+    ctx->pending_tmpl = NULL;
+    if (count < ctx->disassembly_threshold) {
+        ctx->pending_tmpl = tmpl;
+    } else if (count == ctx->disassembly_threshold) {
+        dictDelete(ctx->reverse_lookup, tmpl);
     }
 }
 
-/* Commit the pending few-key template against kv, the now-stable keyspace
- * object for the key just loaded. Always clears the pending slot, so it must be
- * called exactly once after each rdbLoadObject (pass kv==NULL when the loaded
- * object was discarded, e.g. an already-expired key, to clear without adding). */
-void rdbLoadTemplateCtxCommit(rdbLoadTemplateCtx *g, robj *kv, redisDb *db) {
-    if (g == NULL) return;
-    hashTemplate *tmpl = g->pending_tmpl;
-    g->pending_tmpl = NULL;
+/* Attach kv - the key's now-built object - to the template that Track noted as
+ * pending, building the template -> keys list that disassembly walks. Call once
+ * per loaded key; pass kv==NULL if the key was dropped (e.g. already expired) to
+ * just clear the pending slot. */
+void rdbLoadTemplateCtxCommit(rdbLoadTemplateCtx *ctx, robj *kv, redisDb *db) {
+    if (ctx == NULL) return;
+    hashTemplate *tmpl = ctx->pending_tmpl;
+    ctx->pending_tmpl = NULL;
     if (tmpl == NULL || kv == NULL) return;
-    dictEntry *de = dictFind(g->reverse_lookup, tmpl);
+    dictEntry *de = dictFind(ctx->reverse_lookup, tmpl);
     list *l;
     if (de == NULL) {
         l = listCreate();
         listSetFreeMethod(l, rdbLoadTemplateCtxKvRefListFree);
-        dictAdd(g->reverse_lookup, tmpl, l);
+        dictAdd(ctx->reverse_lookup, tmpl, l);
     } else {
         l = dictGetVal(de);
     }
@@ -3133,19 +3134,19 @@ void rdbLoadTemplateCtxCommit(rdbLoadTemplateCtx *g, robj *kv, redisDb *db) {
     listAddNodeTail(l, ref);
 }
 
-int rdbLoadTemplateCtxTryConvert(rdbLoadTemplateCtx *g, robj *o) {
-    if (g == NULL) return 0; /* RESTORE/DUMP/check, or template-aware RDB: no convert. */
+int rdbLoadTemplateCtxTryConvert(rdbLoadTemplateCtx *ctx, robj *o) {
+    if (ctx == NULL) return 0; /* RESTORE/DUMP/check, or template-aware RDB: no convert. */
     return hashTypeTryConvertToTemplate(o, server.hash_rdb_load_min_template_entries,
-                                        server.hash_rdb_load_max_template_entries, g);
+                                        server.hash_rdb_load_max_template_entries, ctx);
 }
 
 /* End of load: disassemble every template that is still few-key back to a plain
  * hash. Each disassembly drops a key ref; once a template loses its last key it
  * is freed from the registry. We never dereference a template key here (only its
  * value list), so a freed template left as a stale dict key is harmless. */
-void rdbLoadTemplateCtxDisassemble(rdbLoadTemplateCtx *g) {
-    if (g == NULL || g->reverse_lookup == NULL) return;
-    dictIterator *di = dictGetIterator(g->reverse_lookup);
+void rdbLoadTemplateCtxDisassemble(rdbLoadTemplateCtx *ctx) {
+    if (ctx == NULL || ctx->reverse_lookup == NULL) return;
+    dictIterator *di = dictGetIterator(ctx->reverse_lookup);
     dictEntry *de;
     while ((de = dictNext(di)) != NULL) {
         list *l = dictGetVal(de);
@@ -3176,16 +3177,16 @@ void rdbLoadTemplateCtxDisassemble(rdbLoadTemplateCtx *g) {
     dictReleaseIterator(di);
 }
 
-void rdbLoadTemplateCtxFree(rdbLoadTemplateCtx *g) {
-    if (g == NULL) return;
-    if (g->reverse_lookup) dictRelease(g->reverse_lookup);
-    zfree(g);
+void rdbLoadTemplateCtxFree(rdbLoadTemplateCtx *ctx) {
+    if (ctx == NULL) return;
+    if (ctx->reverse_lookup) dictRelease(ctx->reverse_lookup);
+    zfree(ctx);
 }
 
 /* Convert a hash to template encoding once it reaches hash-min-template-entries
  * fields: LP -> TMPL_LP, HT (no HFE) -> TMPL_ARRAY. Returns 1 if converted.
  * Hashes with field TTLs (LP_EX, HT with HFE) are left as-is. 'ctx' is set
- * only on the bulk RDB-load path and applies the utility throttle/tracking. */
+ * only on the RDB-load path and drives the throttle/tracking for disassembly. */
 int hashTypeTryConvertToTemplate(robj *o, 
                                  size_t min_fields,
                                  size_t max_fields,
@@ -3257,7 +3258,7 @@ int hashTypeTryConvertToTemplate(robj *o,
                 return 0;
             }
             tmpl = hashTemplateCreateInternal(fhash, fields, num_fields);
-            dictAdd(htemplates->registry, tmpl, NULL);
+            dictAdd(htemplates->by_fields, tmpl, NULL);
             ctx->number_of_templates++;
         }
     } else {
@@ -3281,7 +3282,7 @@ int hashTypeTryConvertToTemplate(robj *o,
         took_values = 1;
     }
 
-    /* RdbLoadContext: record this key's (now referenced) template as pending, or
+    /* rdbload conversion: record this key's (now referenced) template as pending or
      * graduate the template if it just reached the keep threshold. The stable
      * keyspace object is bound later by rdbLoadTemplateCtxCommit(). */
     if (ctx && ctx->disassembly_threshold > 0)

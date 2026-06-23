@@ -5,7 +5,6 @@ set ::num_skipped 0
 set ::num_aborted 0
 set ::tests_failed {}
 set ::cur_test ""
-array set ::sanitizer_reported {}
 
 proc fail {msg} {
     error "assertion:$msg"
@@ -361,27 +360,6 @@ proc test {name code {okpattern undefined} {tags {}}} {
     # Restore server configuration if it was saved
     if {$restore_config && [llength $saved_configs] > 0} {
         restore_server_configs $saved_configs
-    }
-
-    # Per-test sanitizer localization: check_sanitizer_errors only runs at
-    # server teardown (block level), so a sanitizer crash is never tied to a
-    # test name. Scan every running server's stderr here for the TARGET race
-    # (the ASM-trim histogram path, uniquely identified by the
-    # populateDeltaHistograms frame) and attribute it to this test. Filtering on
-    # this frame ignores unrelated TSan noise (jemalloc stats, etc.). Reported
-    # once per file.
-    if {!$::external} {
-        foreach srv $::servers {
-            if {![dict exists $srv stderr]} continue
-            set stderrfile [dict get $srv stderr]
-            if {[info exists ::sanitizer_reported($stderrfile)]} continue
-            if {[catch {exec cat $stderrfile} content]} continue
-            if {[string match {*populateDeltaHistograms*} $content]} {
-                set ::sanitizer_reported($stderrfile) 1
-                send_data_packet $::test_server_fd err \
-                    "TARGET race (populateDeltaHistograms) localized to test '$name' \[$stderrfile\]"
-            }
-        }
     }
 
     set ::cur_test $prev_test

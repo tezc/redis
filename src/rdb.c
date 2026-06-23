@@ -1859,13 +1859,13 @@ ssize_t rdbSaveHashTemplates(rio *rdb) {
     ssize_t written = 0;
     ssize_t ret;
 
-    if (!server.htemplates || !server.htemplates->registry) return 0;
+    if (!server.htemplates || !server.htemplates->by_fields) return 0;
 
     /* Save template-encoded hashes in compact REF form (id + values). Without
      * this flag (e.g. DUMP) they are written self-contained in full form. */
     server.htemplates->rdb_saving = 1;
 
-    dictIterator *di = dictGetIterator(server.htemplates->registry);
+    dictIterator *di = dictGetIterator(server.htemplates->by_fields);
     dictEntry *de;
     while ((de = dictNext(di)) != NULL) {
         hashTemplate *tmpl = dictGetKey(de);
@@ -3101,12 +3101,12 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
          * has templates). */
         rdbLoadTemplateCtxTryConvert(rdb_load_tmpl_ctx, o);
     } else if (rdbtype == RDB_TYPE_HASH_TMPL_LP) {
-        /* TMPL_LP self-contained format: [fields_lp_blob][values_lp_blob].
-         * The field names travel as one listpack blob, so the template can be
-         * resolved with a single O(1) blob lookup; only the first key of each
-         * template falls back to parsing the names out and registering it. The
-         * first values-listpack entry is the source-side template ID, swapped
-         * in-place to our local registry's ID by rdbFinalizeTmplLp. */
+        /* TMPL_LP self-contained (DUMP) form: two listpack blobs back to back,
+         * the field names then the values. Look the template up by the
+         * field-names blob (O(1)); on a miss - the first key carrying this
+         * field set - parse the names out and register a new template. The
+         * values blob's first entry is the template ID from the source;
+         * rdbFinalizeTmplLp rewrites it to our local id. */
         sds fields_lp = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
         if (fields_lp == NULL) return NULL;
 
@@ -3180,9 +3180,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
 
         o = rdbFinalizeTmplLp(lp, tmpl);
     } else if (rdbtype == RDB_TYPE_HASH_TMPL_LP_REF) {
-        /* TMPL_LP compact: raw listpack blob. The first listpack entry is the
-         * source-side template ID, which we map to our local registry and
-         * swap in-place. */
+        /* TMPL_LP compact: The first listpack entry is the template ID */
         long long src_id;
         unsigned char *lp = rdbLoadTmplLpBlob(rdb, deep_integrity_validation, &src_id);
         if (lp == NULL)
@@ -4847,8 +4845,8 @@ static int rdbLoadRioWithLoadingCtxInternal(rio *rdb, int rdbflags, rdbSaveInfo 
             }
             continue;
         } else if (type == RDB_OPCODE_HASH_TEMPLATES) {
-            /* Load hash template registry. A template header means this is a
-             * template-aware RDB, so the load-time conversion/utility context must
+            /* Load hash template registry. A template header means this RDB
+             * already has templates, so the load-time conversion context must
              * stay off. These records precede all keys, so the ctx has not been
              * used yet: just free it. A NULL ctx is a no-op in every helper. */
             rdbLoadTemplateCtxFree(rdb_load_tmpl_ctx);
@@ -5035,9 +5033,9 @@ eoferr:
  * would keep stale hold-refs and abort the next resync with "Duplicate hash
  * template ID". */
 int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadingCtx *rdb_loading_ctx) {
-    /* Arm the bulk-load utility context, but only when load-time conversion is
-     * enabled at all (min-entries > 0); otherwise no ctx is needed. It is for
-     * legacy/template-unaware RDBs only and is freed if a template header is seen. */
+    /* Create the load-time conversion context, but only when load-time
+     * conversion is enabled (min-entries > 0). It applies only to RDBs that have
+     * no templates, and is freed as soon as a template header is seen. */
     rdb_load_tmpl_ctx = (server.hash_rdb_load_min_template_entries > 0)
         ? rdbLoadTemplateCtxCreate(server.hash_rdb_load_template_disassembly_threshold)
         : NULL;
