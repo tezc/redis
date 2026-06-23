@@ -325,6 +325,22 @@ static void hashDictWithExpireOnRelease(dict *d) {
 /* Global template registry; file-local alias of server.htemplates. */
 static hashTemplates *htemplates = NULL;
 
+/* Check if template fields fit in listpack. DUMP serializes fields as LP blob. */
+static int hashTemplateCanUseLpEncoding(hashTemplate *tmpl) {
+    if (tmpl->field_count > server.hash_max_listpack_entries)
+        return 0;
+
+    size_t field_sum = 0;
+    for (unsigned long long i = 0; i < tmpl->field_count; i++) {
+        size_t len = sdslen(tmpl->fields[i]);
+        if (len > server.hash_max_listpack_value)
+            return 0;
+        field_sum += len;
+    }
+
+    return lpSafeToAdd(NULL, field_sum);
+}
+
 /* Incremental pending_free drain state (serverCron processes in batches). */
 static uint64_t *pending_free_drain_queue = NULL;
 static size_t pending_free_drain_count = 0;
@@ -396,6 +412,10 @@ void hashTemplateAttachFieldsLp(hashTemplate *tmpl, sds fields_lp) {
  * it on first use. Owned by the template; do not free. */
 sds hashTemplateGetFieldsLp(hashTemplate *tmpl) {
     if (tmpl->fields_lp) return tmpl->fields_lp;
+
+    /* Sanity check: TMPL_LP keys should only use LP-compatible templates. */
+    serverAssert(tmpl->can_use_lp);
+
     unsigned char *lp = lpNew(0);
     for (unsigned long long i = 0; i < tmpl->field_count; i++)
         lp = lpAppend(lp, (unsigned char *)tmpl->fields[i], sdslen(tmpl->fields[i]));
@@ -531,6 +551,8 @@ static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsi
         tmpl->mem_size += sdsZmallocSize(tmpl->fields[i]);
     }
 
+    /* Check if fields fit in listpack (after they're populated). */
+    tmpl->can_use_lp = hashTemplateCanUseLpEncoding(tmpl);
     tmpl->id = allocateTemplateId(tmpl);
     return tmpl;
 }
@@ -965,7 +987,8 @@ int hashTypeCanCreateTmplLp(unsigned long long count, sds *values) {
 robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values, int take) {
     robj *o;
 
-    if (hashTypeCanCreateTmplLp(tmpl->field_count, values)) {
+    /* TMPL_LP requires both fields and values to fit in listpack. */
+    if (tmpl->can_use_lp && hashTypeCanCreateTmplLp(tmpl->field_count, values)) {
         o = createObject(OBJ_HASH, hashTemplateLpCreate(tmpl, values));
         o->encoding = OBJ_ENCODING_TMPL_LP;
         /* The listpack copied the value bytes; if we own them, free them now. */
@@ -1852,6 +1875,12 @@ int hashTypeSet(redisDb *db, kvobj *o, sds field, sds value, int flags) {
         hashTemplateIncrKeyRef(new_tmpl);
         if (new_fields != stack_fields) zfree(new_fields);
 
+        /* Rare: HSET adds a huge field, new template's fields don't fit in LP.
+         * Convert to avoid DUMP-time overflow (fields are serialized as LP blob). */
+        if (o->encoding == OBJ_ENCODING_TMPL_LP && !new_tmpl->can_use_lp) {
+            hashTypeConvert(NULL, o, OBJ_ENCODING_TMPL_ARRAY);
+        }
+
         /* Insert value at insert_pos in existing structure. */
         if (o->encoding == OBJ_ENCODING_TMPL_LP) {
             unsigned char *lp = o->ptr;
@@ -2194,6 +2223,11 @@ int hashTypeDelete(robj *o, void *field) {
                 hashTemplate *new_tmpl = hashTemplateGetOrCreateWithHash(
                     new_hash, new_fields, new_count);
                 hashTemplateIncrKeyRef(new_tmpl);
+
+                /* Rare: new template's fields don't fit in LP. Convert to avoid DUMP overflow. */
+                if (o->encoding == OBJ_ENCODING_TMPL_LP && !new_tmpl->can_use_lp) {
+                    hashTypeConvert(NULL, o, OBJ_ENCODING_TMPL_ARRAY);
+                }
 
                 if (o->encoding == OBJ_ENCODING_TMPL_LP) {
                     /* Delete value at idx (index 0 is template ID). */

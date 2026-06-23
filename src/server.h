@@ -3918,6 +3918,7 @@ typedef struct hashTemplate {
                           * self-contained DUMP/RESTORE TMPL_LP form ship one blob
                           * instead of N strings, and lets RESTORE find the
                           * template with one O(1) blob lookup. Owned here. */
+    unsigned int can_use_lp:1;  /* 1 if fields fit in listpack (DUMP serializes them as LP blob) */
     robj **propargv;     /* Lazy-built argv used only to propagate HIMPORT SET
                           * (as HSETC). Layout: [hsetc, NULL_key, <fields>,
                           * <null-values>]; field slots own field robjs, key and
