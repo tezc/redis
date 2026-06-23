@@ -2490,27 +2490,35 @@ struct redisServer {
     size_t hash_max_listpack_value;
     /* Hash template config */
     size_t hash_min_template_entries; /* Field-count threshold at which regular
-                                       * hashes (from HSET or RDB load) are
-                                       * auto-converted to template encoding.
+                                       * hashes are auto-converted to template
+                                       * encoding. Applies to the live command
+                                       * path (e.g. HSET), not RDB load (which has
+                                       * its own hash_rdb_load_* configs below).
                                        * 0 disables auto-convert. */
-    size_t hash_max_template_entries; /* Upper field-count bound for auto-convert:
-                                       * hashes with more fields than this are not
-                                       * converted. 0 disables the upper bound. */
+    size_t hash_max_template_entries; /* Upper field-count bound for that
+                                       * auto-convert: hashes with more fields than
+                                       * this are not converted. 0 disables the
+                                       * upper bound. */
     size_t hash_rdb_load_min_template_entries; /* Like hash_min_template_entries
                                        * but applied on the RDB-load path (which
-                                       * the AOF RDB preamble also uses). Affects
-                                       * only plain hashes loaded from RDB; REF
-                                       * form templates are restored regardless.
-                                       * 0 disables. */
+                                       * the AOF RDB preamble also uses). Only
+                                       * effective if the RDB does not already
+                                       * include templates; otherwise it is loaded
+                                       * as-is. 0 disables. */
     size_t hash_rdb_load_max_template_entries; /* Upper field-count bound for the
                                        * RDB-load path. 0 disables the bound. */
-    size_t hash_rdb_load_template_disassembly_threshold; /* Bulk RDB-load only
-                                       * (not RESTORE/DUMP). A template that ends
-                                       * the load with fewer than this many keys
-                                       * is "low-utility" and is disassembled back
-                                       * to a plain hash. Also drives the throttle
-                                       * that stops creating new templates once
-                                       * most are low-utility. 0 disables. */
+    size_t hash_rdb_load_template_disassembly_threshold; /* Relevant only when
+                                       * RDB-load auto-convert is on (i.e.
+                                       * hash_rdb_load_min_template_entries > 0).
+                                       * That auto-convert turns plain hashes into
+                                       * templates as the RDB loads; afterwards a
+                                       * template still shared by fewer than this
+                                       * many keys ("few-key") is disassembled back
+                                       * to a plain hash, so rarely-shared
+                                       * templates don't waste memory. Also drives
+                                       * the throttle that stops creating new
+                                       * templates once most are few-key. RDB-load
+                                       * only, not RESTORE/DUMP. 0 disables. */
     int hash_template_mask_encoding; /* TEMPORARY (remove before merge): when set,
                                       * OBJECT ENCODING / DEBUG OBJECT report the
                                       * legacy listpack/hashtable name for
@@ -3981,11 +3989,11 @@ static inline size_t *htGetMetadataSize(dict *d) {
 #define HFE_LAZY_NO_UPDATE_KEYSIZES  (1<<5) /* If field lazy deleted, avoid updating keysizes histogram */
 #define HFE_LAZY_NO_UPDATE_ALLOCSIZES (1<<6) /* If field lazy deleted, avoid updating slot allocation sizes */
 
-/* Bulk RDB-load-only utility guard for hash templates (see t_hash.c). Opaque
- * here; rdb.c only holds a pointer and calls the helpers below. */
+/* Opaque here; rdb.c just holds a pointer and calls the helpers below. See the
+ * comment above struct rdbLoadTemplateGuard in t_hash.c for what it does and
+ * when it is active. */
 typedef struct rdbLoadTemplateGuard rdbLoadTemplateGuard;
 rdbLoadTemplateGuard *hashTemplateGuardCreate(size_t disassembly_threshold);
-void hashTemplateGuardMarkHeaderTemplates(rdbLoadTemplateGuard *g);
 int hashTemplateGuardTryConvert(rdbLoadTemplateGuard *g, robj *o);
 void hashTemplateGuardCommit(rdbLoadTemplateGuard *g, robj *kv);
 void hashTemplateGuardDisassemble(rdbLoadTemplateGuard *g);

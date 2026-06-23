@@ -1913,6 +1913,39 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
         assert_equal 4 [r hget k0 0_d]
         assert_equal 4 [r hget k1099 1099_d]
     }
+
+    test {converting hash expired on load is dropped without leaking its template} {
+        r flushall
+        wait_for_condition 50 20 { [s hash_templates] == 0 } else {
+            fail "templates not drained after flushall"
+        }
+        # Keep the past-TTL key in the keyspace until SAVE writes it; the load
+        # then discards it on master startup (expiretime < now). This is the
+        # hashTemplateGuardCommit(g, NULL) path for a converted-but-expired key.
+        r debug set-active-expire 0
+        # Shared field set {a b c d}: two keys, kept as one template after load.
+        r hset live1 a 1 b 2 c 3 d 4
+        r hset live2 a 5 b 6 c 7 d 8
+        # Unique field set with a short TTL that is past by load time. It converts
+        # during load (pending template set), then is discarded; its single-use
+        # template must not survive (the pending slot is cleared, not committed).
+        r hset gone w 1 x 2 y 3 z 4
+        r pexpire gone 100
+        assert_equal 0 [s hash_templates]
+        r config set hash-rdb-load-min-template-entries 4
+        r config set hash-rdb-load-template-disassembly-threshold 2
+        r config rewrite
+        r save
+        restart_server 0 true false
+        # Expired key gone; only the shared field set survives as a template.
+        assert_equal 0 [r exists gone]
+        assert_equal template-listpack [r object encoding live1]
+        assert_equal template-listpack [r object encoding live2]
+        assert_equal 1 [s hash_templates]
+        assert_equal 2 [s hash_template_keys]
+        assert_equal 4 [r hget live1 d]
+        assert_equal 8 [r hget live2 d]
+    }
 }
 
 # A template-aware RDB (one that carries a template header) must bypass the

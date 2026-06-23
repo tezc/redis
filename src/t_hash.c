@@ -2796,29 +2796,49 @@ static int hashTypeTryConvertCmpPair(const void *a, const void *b) {
 }
 
 /* ------------------------------------------------------------------------- *
- * Bulk RDB-load template utility guard
+ * RDB-load template utility guard
  *
- * Loading a legacy (template-unaware) RDB, the field-count gate can create a
- * flood of single-use templates that only waste memory. This guard, active only
- * for bulk RDB load (not RESTORE/DUMP) when
- * hash-rdb-load-template-disassembly-threshold > 0 and the RDB carries no
- * template header, tracks every template still below the threshold key count
- * ("low-utility") in a reverse map (template -> the hash robjs using it). Once
- * low-utility templates dominate it stops creating new ones, and at the end of
- * the load it disassembles whatever stays low-utility back to plain hashes. No
- * keyspace scan is needed: each low-utility template carries its own key list. */
+ * Background: a template holds one shared copy of a hash's field names, so many
+ * hashes with the same fields can drop their per-key field-name copies and point
+ * at the template instead. This only pays off when a template is shared by many
+ * keys; a template used by a single key costs more memory than it saves.
+ *
+ * While loading a whole RDB we can opportunistically turn plain hashes into
+ * template-based ones. Three configs control this. They apply to RDB load
+ * only (not to RESTORE/DUMP), and all of them are skipped if the RDB already
+ * carries a template header:
+ *
+ *   - hash-rdb-load-min-template-entries: min field count for a hash to be
+ *     eligible (0 = feature off, nothing is converted).
+ *   - hash-rdb-load-max-template-entries: max field count (0 = no upper bound).
+ *   - hash-rdb-load-template-disassembly-threshold: how many keys a template
+ *     must have to be worth keeping (0 = this guard off; every eligible hash is
+ *     converted and kept).
+ *
+ * Goal: keep templates that are shared by many keys and avoid templates that end
+ * up with only a few keys -- such a template wastes memory instead of saving it.
+ * We call a template "few-key" while its key count is below the threshold.
+ *
+ * The guard does two things during the load:
+ *   - Throttle: once few-key templates clearly dominate, stop creating new
+ *     templates (hashes whose fields match an existing template still attach).
+ *   - Disassemble: at end of load, turn every template still below the threshold
+ *     key count back into a plain LISTPACK/HT hash.
+ *
+ * Why the reverse map (template -> list of the hash kvobjs using it): to undo a
+ * few-key template at end of load we need its keys, but a template doesn't know
+ * who points at it. Building the list as we go lets us disassemble without
+ * scanning the whole keyspace. A template that reaches the threshold "graduates"
+ * (leaves the map); only few-key templates stay tracked. */
 #define MIN_REVERSE_LOOKUP 1000
-
 struct rdbLoadTemplateGuard {
-    dict *reverse_lookup;   /* hashTemplate* -> list of hash kvobj* (low-utility
+    dict *reverse_lookup;   /* hashTemplate* -> list of hash kvobj* (few-key
                              * templates only; entries leave on graduation). */
     size_t disassembly_threshold; /* Keep templates with >= this many keys. */
     size_t number_of_templates;   /* Templates created this load (monotonic). */
-    size_t number_of_templates_in_reverse_lookup; /* = dictSize(reverse_lookup). */
-    hashTemplate *pending_tmpl; /* Low-utility template the just-converted object
+    hashTemplate *pending_tmpl; /* Few-key template the just-converted object
                                  * attached to, awaiting commit of its stable
                                  * keyspace object; NULL when nothing is pending. */
-    int header_has_templates; /* RDB carried a template header -> guard off. */
     int stop_creating;        /* One-way latch: stop creating new templates. */
 };
 
@@ -2842,10 +2862,6 @@ rdbLoadTemplateGuard *hashTemplateGuardCreate(size_t disassembly_threshold) {
     return g;
 }
 
-void hashTemplateGuardMarkHeaderTemplates(rdbLoadTemplateGuard *g) {
-    if (g) g->header_has_templates = 1;
-}
-
 /* Registry lookup without creating on miss. fields must be pre-sorted. */
 static hashTemplate *hashTemplateLookupByHash(uint64_t hash, sds *fields,
                                               unsigned long long field_count) {
@@ -2867,12 +2883,11 @@ static void hashTemplateGuardTrack(rdbLoadTemplateGuard *g, hashTemplate *tmpl) 
     if (count < g->disassembly_threshold) {
         g->pending_tmpl = tmpl;
     } else if (count == g->disassembly_threshold) {
-        if (dictDelete(g->reverse_lookup, tmpl) == DICT_OK)
-            g->number_of_templates_in_reverse_lookup--;
+        dictDelete(g->reverse_lookup, tmpl);
     }
 }
 
-/* Commit the pending low-utility template against kv, the now-stable keyspace
+/* Commit the pending few-key template against kv, the now-stable keyspace
  * object for the key just loaded. Always clears the pending slot, so it must be
  * called exactly once after each rdbLoadObject (pass kv==NULL when the loaded
  * object was discarded, e.g. an already-expired key, to clear without adding). */
@@ -2886,7 +2901,6 @@ void hashTemplateGuardCommit(rdbLoadTemplateGuard *g, robj *kv) {
     if (de == NULL) {
         l = listCreate();
         dictAdd(g->reverse_lookup, tmpl, l);
-        g->number_of_templates_in_reverse_lookup++;
     } else {
         l = dictGetVal(de);
     }
@@ -2894,13 +2908,12 @@ void hashTemplateGuardCommit(rdbLoadTemplateGuard *g, robj *kv) {
 }
 
 int hashTemplateGuardTryConvert(rdbLoadTemplateGuard *g, robj *o) {
-    if (g == NULL) return 0;               /* RESTORE/DUMP/check: no conversion. */
-    if (g->header_has_templates) return 0; /* Template-aware RDB: all configs off. */
+    if (g == NULL) return 0; /* RESTORE/DUMP/check, or template-aware RDB: no convert. */
     return hashTypeTryConvertToTemplate(o, server.hash_rdb_load_min_template_entries,
                                         server.hash_rdb_load_max_template_entries, g);
 }
 
-/* End of load: disassemble every template still low-utility back to a plain
+/* End of load: disassemble every template that is still few-key back to a plain
  * hash. Each disassembly drops a key ref; once a template loses its last key it
  * is freed from the registry. We never dereference a template key here (only its
  * value list), so a freed template left as a stale dict key is harmless. */
@@ -2979,7 +2992,7 @@ int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields,
     zfree(pairs);
 
     /* Get or create template. With an active utility guard, refuse to create a
-     * brand-new template once the throttle has decided low-utility templates
+     * brand-new template once the throttle has decided few-key templates
      * dominate; such hashes stay plain (matching ones still attach to existing
      * templates via the lookup below). */
     hashTemplate *tmpl;
@@ -2987,9 +3000,10 @@ int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields,
         uint64_t fhash = computeFieldsHash(fields, num_fields);
         tmpl = hashTemplateLookupByHash(fhash, fields, num_fields);
         if (tmpl == NULL) {
+            size_t few_key_templates = dictSize(guard->reverse_lookup);
             if (guard->stop_creating ||
-                (guard->number_of_templates_in_reverse_lookup > MIN_REVERSE_LOOKUP &&
-                 guard->number_of_templates_in_reverse_lookup * 2 > guard->number_of_templates))
+                (few_key_templates > MIN_REVERSE_LOOKUP &&
+                 few_key_templates * 2 > guard->number_of_templates))
             {
                 guard->stop_creating = 1;
                 for (size_t j = 0; j < num_fields; j++) {
@@ -3007,6 +3021,7 @@ int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields,
     } else {
         tmpl = hashTemplateGetOrCreate(fields, num_fields);
     }
+
     int took_values; /* TMPL_ARRAY takes ownership of values; TMPL_LP copies. */
     if (o->encoding == OBJ_ENCODING_LISTPACK) {
         /* LP → TMPL_LP */

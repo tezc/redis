@@ -1897,9 +1897,9 @@ werr:
 static hashTemplate **rdb_tmpls = NULL;
 static size_t rdb_tmpls_cap = 0;
 
-/* Bulk RDB-load utility guard, set only while rdbLoadRioWithLoadingCtx runs.
- * NULL on the RESTORE/DUMP/check paths (they call rdbLoadObject directly), which
- * is how those paths opt out of all rdb-load template conversion. */
+/* Used to convert plain hashes into template-encoded hashes while loading a
+ * legacy RDB (see t_hash.c). Set only while rdbLoadRioWithLoadingCtx runs;
+ * NULL for RESTORE/DUMP/check, which load directly and skip the conversion. */
 static rdbLoadTemplateGuard *rdb_load_tmpl_guard = NULL;
 
 static int rdbEnsureHashTemplatesCap(uint64_t id) {
@@ -3092,9 +3092,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         /* All pairs should be read by now */
         serverAssert(len == 0);
 
-        /* Try to convert to template-based hash if threshold met. Bulk RDB load
-         * only (the guard is NULL on RESTORE/DUMP and when the RDB header already
-         * carried templates). */
+        /* Try to convert to template-based hash if threshold met. RDB load only 
+         * (the guard is NULL on RESTORE/DUMP and when the RDB header already
+         * has templates). */
         hashTemplateGuardTryConvert(rdb_load_tmpl_guard, o);
     } else if (rdbtype == RDB_TYPE_HASH_TMPL_LP) {
         /* TMPL_LP full format: [count][f0]...[fN-1][lp_blob].
@@ -4795,8 +4795,10 @@ static int rdbLoadRioWithLoadingCtxInternal(rio *rdb, int rdbflags, rdbSaveInfo 
         } else if (type == RDB_OPCODE_HASH_TEMPLATES) {
             /* Load hash template registry. A template header means this is a
              * template-aware RDB, so the load-time conversion/utility guard must
-             * stay off (these records precede all keys). */
-            hashTemplateGuardMarkHeaderTemplates(rdb_load_tmpl_guard);
+             * stay off. These records precede all keys, so the guard has not been
+             * used yet: just free it. A NULL guard is a no-op in every helper. */
+            hashTemplateGuardFree(rdb_load_tmpl_guard);
+            rdb_load_tmpl_guard = NULL;
             if (rdbLoadHashTemplates(rdb) != C_OK) {
                 serverLog(LL_WARNING, "Failed loading hash templates");
                 goto eoferr;
@@ -4894,7 +4896,7 @@ static int rdbLoadRioWithLoadingCtxInternal(rio *rdb, int rdbflags, rdbSaveInfo 
                 }
             }
 
-            /* Bind any pending low-utility template to the stable keyspace object
+            /* Bind any pending few-key template to the stable keyspace object
              * (dbAddRDBLoad may have rebuilt val into an embedded-key kvobj). */
             hashTemplateGuardCommit(rdb_load_tmpl_guard, kv);
 
@@ -4979,13 +4981,15 @@ eoferr:
  * would keep stale hold-refs and abort the next resync with "Duplicate hash
  * template ID". */
 int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadingCtx *rdb_loading_ctx) {
-    /* Arm the bulk-load utility guard for this load (legacy/template-unaware
-     * RDBs only; it disables itself if a template header is seen). */
-    rdb_load_tmpl_guard =
-        hashTemplateGuardCreate(server.hash_rdb_load_template_disassembly_threshold);
+    /* Arm the bulk-load utility guard, but only when load-time conversion is
+     * enabled at all (min-entries > 0); otherwise no guard is needed. It is for
+     * legacy/template-unaware RDBs only and is freed if a template header is seen. */
+    rdb_load_tmpl_guard = (server.hash_rdb_load_min_template_entries > 0)
+        ? hashTemplateGuardCreate(server.hash_rdb_load_template_disassembly_threshold)
+        : NULL;
     int retval = rdbLoadRioWithLoadingCtxInternal(rdb, rdbflags, rsi, rdb_loading_ctx);
-    /* On success, disassemble the templates that stayed low-utility back to
-     * plain hashes. Skip on failure: the partial dataset is discarded anyway. */
+    /* On success, disassemble the templates that stayed few-key back to plain
+     * hashes. Skip on failure: the partial dataset is discarded anyway. */
     if (retval == C_OK)
         hashTemplateGuardDisassemble(rdb_load_tmpl_guard);
     hashTemplateGuardFree(rdb_load_tmpl_guard);
