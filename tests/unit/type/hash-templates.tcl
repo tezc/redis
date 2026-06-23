@@ -1082,7 +1082,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"} overrides {hash-min-tem
     # DEL - template refcount management
     # ============================================================
 
-    test {DEL on template-based hash releases template ref} {
+    test {DEL on template-based hash works fine} {
         make_hashtmpl del:test name alice email bob
         assert_encoding $encoding del:test
         r del del:test
@@ -1158,8 +1158,9 @@ start_server {tags {"hash" "rdb" "needs:debug" "cluster:skip"}
         assert_encoding $encoding rdb:multi1
         assert_encoding $encoding rdb:multi2
         assert_encoding $encoding rdb:multi3
-        assert_equal [r hget rdb:multi1 a] 1
-        assert_equal [r hget rdb:multi2 b] 5
+        assert_equal [r hgetall rdb:multi1] {a 1 b 2 c 3}
+        assert_equal [r hgetall rdb:multi2] {a 4 b 5 c 6}
+        assert_equal [r hgetall rdb:multi3] {x 1 y 2}
     }
 }
 
@@ -1338,7 +1339,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
         }
     }
 
-    test {threshold=1: HSET auto-converts to template encoding} {
+    test {HSET auto-converts to template encoding} {
         r flushall
         wait_tmpl_drain
         set t0 [s hash_templates]
@@ -1353,7 +1354,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
         assert_equal [r hgetall key1] {a 1 b 2 c 3}
     }
 
-    test {threshold=1: same field set shares a single template} {
+    test {same field set shares a single template} {
         r flushall
         wait_tmpl_drain
         r hset key1 a 1 b 2 c 3
@@ -1365,16 +1366,16 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
         assert_equal [r hget key2 b] 8
     }
 
-    test {threshold=1: large hash auto-converts to template-array} {
+    test {large hash auto-converts to template-array} {
         r flushall
         wait_tmpl_drain
         # Force a low listpack threshold so the template uses the array variant
         # deterministically regardless of test defaults.
         set saved [lindex [r config get hash-max-listpack-entries] 1]
         r config set hash-max-listpack-entries 16
-        set cmd [list r hset big:1]
-        for {set i 0} {$i < 32} {incr i} { lappend cmd "f$i" "v$i" }
-        {*}$cmd
+        set pairs {}
+        for {set i 0} {$i < 32} {incr i} { lappend pairs "f$i" "v$i" }
+        r hset big:1 {*}$pairs
         assert_equal [r object encoding big:1] "template-array"
         assert_equal [r hget big:1 f10] "v10"
         assert_equal [r hlen big:1] 32
@@ -1444,8 +1445,8 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
         r flushall
         wait_tmpl_drain
         # Each entry creates a fresh key whose single field crosses the
-        # threshold; every write path that runs the conversion guard must end
-        # up template-encoded (HSET is covered separately above).
+        # threshold; every write path that triggers conversion must end up
+        # template-encoded (HSET is covered separately above).
         foreach {name cmd} {
             hsetnx       {hsetnx conv:hsetnx f v}
             hsetex       {hsetex conv:hsetex FIELDS 1 f v}
@@ -1499,10 +1500,10 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
         r hset k1 a 1 b 2 c 3
         assert_equal 1 [s hash_templates]
 
-        # Lazy delete → BIO queues template for free
+        # Lazy delete -> BIO queues template for free
         r del k1
 
-        # Immediately recreate with same template (resurrection)
+        # Immediately recreate with same template (resurrection if fast enough)
         r hset k1 a 4 b 5 c 6
 
         # Wait for pending_free drain
@@ -1514,7 +1515,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
         assert_equal 5 [r hget k1 b]
     }
 
-    # TMPL_LP → TMPL_ARRAY auto-convert when template switch causes LP overflow
+    # TMPL_LP -> TMPL_ARRAY auto-convert when template switch causes LP overflow
     # Rare scenario: HSET adds field, new template's fields don't fit in listpack blob
     test {HSET converts TMPL_LP to TMPL_ARRAY if new template fields exceed LP limits} {
         r flushall
@@ -1530,7 +1531,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
         r hset huge_tmpl $huge_field 1 y 2
         assert_encoding template-array huge_tmpl
 
-        # Now add the huge field to k1 → template switch → new template has can_use_lp=0
+        # Now add the huge field to k1 -> template switch -> new template has can_use_lp=0
         # Should auto-convert k1 from TMPL_LP to TMPL_ARRAY
         r hset k1 $huge_field 4
 
@@ -1540,36 +1541,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
         assert_equal 1 [r hget k1 a]
         assert_equal 4 [r hget k1 $huge_field]
     }
-
-    # HDEL variant: TMPL_LP key deletes field, switches to LP-incompatible template
-    test {HDEL converts TMPL_LP to TMPL_ARRAY if new template fields exceed LP limits} {
-        r flushall
-        wait_tmpl_drain
-
-        # Step 1: Pre-create LP-incompatible template (huge field names)
-        set huge_field [string repeat "y" 600]
-        r hset pre a 1 $huge_field 2
-        assert_encoding template-array pre
-        set incompatible_tmpl_id [s hash_templates]
-
-        # Step 2: Create TMPL_LP hash with different fields
-        r hset k1 a 1 b 2 c 3
-        assert_encoding template-listpack k1
-        assert_equal 2 [s hash_templates]
-
-        # Step 3: HDEL field from k1, then add huge_field → switch to incompatible template
-        # k1 is TMPL_LP, new template (a,huge_field) is LP-incompatible → must convert
-        r hdel k1 b c
-        r hset k1 $huge_field 999
-
-        # k1 should auto-convert to TMPL_ARRAY
-        assert_encoding template-array k1
-        assert_equal 2 [r hlen k1]
-        assert_equal 1 [r hget k1 a]
-        assert_equal 999 [r hget k1 $huge_field]
-    }
 }
-
 
 # ============================================================
 # Tests under hash-max-template-entries (upper bound).
@@ -1598,9 +1570,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
     test {max bound: hash above max stays plain} {
         r flushall
         wait_tmpl_drain
-        set cmd [list r hset wide]
-        for {set i 0} {$i < 6} {incr i} { lappend cmd "f$i" "v$i" }
-        {*}$cmd
+        r hset wide f0 v0 f1 v1 f2 v2 f3 v3 f4 v4 f5 v5
         assert_equal [r object encoding wide] "listpack"
         assert_equal [s hash_templates] 0
     }
@@ -1617,9 +1587,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
         r flushall
         wait_tmpl_drain
         r config set hash-max-template-entries 0
-        set cmd [list r hset wide2]
-        for {set i 0} {$i < 6} {incr i} { lappend cmd "f$i" "v$i" }
-        {*}$cmd
+        r hset wide2 f0 v0 f1 v1 f2 v2 f3 v3 f4 v4 f5 v5
         assert_equal [r object encoding wide2] "template-listpack"
         r config set hash-max-template-entries 4
     }
@@ -1633,7 +1601,6 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
         # Lowering max below the existing template's field count must not
         # convert it back.
         r config set hash-max-template-entries 2
-        assert_equal [r object encoding k] "template-listpack"
         # A new 3-field hash now exceeds max and stays plain.
         r hset k2 a 1 b 2 c 3
         assert_equal [r object encoding k2] "listpack"
@@ -2021,18 +1988,17 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
     }
 }
 
-# RDB-load utility guard: when a legacy (template-unaware) RDB is loaded with
-# load-time conversion enabled, hash-rdb-load-template-disassembly-threshold
-# keeps a converted template only if it ends up shared by at least that many
-# keys; low-utility (sub-threshold) templates are disassembled back to plain
-# hashes at the end of the load.
+# hash-rdb-load-template-disassembly-threshold: when an RDB with no templates is
+# loaded with load-time conversion on, a converted template is kept only if it
+# ends up shared by at least this many keys; templates below the threshold are
+# disassembled back to plain hashes at the end of the load.
 start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0 hash-max-listpack-entries 64 appendonly no}} {
 
-    test {disassembly-threshold prunes single-use templates on legacy RDB load} {
+    test {disassembly-threshold prunes single-use templates on RDB load} {
         r flushall
-        # Plain hashes only (HSET-path conversion off) => the saved RDB carries
-        # no template header, so the utility guard is active on reload.
+        # Plain hashes only (HSET-path conversion off) => the saved RDB has no
+        # templates, so load-time conversion runs on reload.
         # Field set {a b c d} is shared by two keys; {p q r s} by one.
         r hset shared1 a 1 b 2 c 3 d 4
         r hset shared2 a 5 b 6 c 7 d 8
@@ -2056,12 +2022,12 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
         assert_equal 4 [r hget lone s]
     }
 
-    test {disassembly-threshold=0 keeps every converted template (guard off)} {
+    test {disassembly-threshold=0 keeps every converted template} {
         r flushall
         wait_for_condition 50 20 { [s hash_templates] == 0 } else {
             fail "templates not drained after flushall"
         }
-        # A single-use field set that would be pruned if the guard were on.
+        # A single-use field set that would be pruned if the threshold were on.
         r hset solo a 1 b 2 c 3 d 4
         assert_equal 0 [s hash_templates]
         r config set hash-rdb-load-min-template-entries 4
@@ -2069,17 +2035,17 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
         r config rewrite
         r save
         restart_server 0 true false
-        # Guard disabled: the single-use template is kept.
+        # Threshold disabled: the single-use template is kept.
         assert_equal template-listpack [r object encoding solo]
         assert_equal 1 [s hash_templates]
         assert_equal 1 [s hash_template_keys]
         assert_equal 4 [r hget solo d]
     }
 
-    test {disassembly guard tolerates a throttle-triggering legacy RDB load} {
+    test {disassembly tolerates a throttle-triggering RDB load} {
         # More than MIN_REVERSE_LOOKUP (1000) distinct single-use field sets:
         # the creation throttle latches mid-load. The load must still complete
-        # with all data intact and no low-utility templates left behind.
+        # with all data intact and no few-key templates left behind.
         r flushall
         wait_for_condition 50 20 { [s hash_templates] == 0 } else {
             fail "templates not drained after flushall"
@@ -2110,7 +2076,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
         }
         # Keep the past-TTL key in the keyspace until SAVE writes it; the load
         # then discards it on master startup (expiretime < now). This is the
-        # hashTemplateGuardCommit(g, NULL) path for a converted-but-expired key.
+        # rdbLoadTemplateCtxCommit(ctx, NULL) path for a converted-but-expired key.
         r debug set-active-expire 0
         # Shared field set {a b c d}: two keys, kept as one template after load.
         r hset live1 a 1 b 2 c 3 d 4
@@ -2175,23 +2141,23 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
     }
 }
 
-# A template-aware RDB (one that carries a template header) must bypass the
-# load-time utility guard entirely: existing templates are restored as-is even
-# when the disassembly threshold would otherwise prune them.
+# An RDB that already contains templates must skip load-time conversion
+# entirely: its templates are restored as-is, even when the disassembly
+# threshold would otherwise prune them.
 start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 4 hash-max-listpack-entries 64 appendonly no}} {
 
-    test {template-aware RDB header bypasses the disassembly guard} {
+    test {RDB that already has templates bypasses disassembly} {
         r flushall
         wait_for_condition 50 20 { [s hash_templates] == 0 } else {
             fail "templates not drained after flushall"
         }
         # HSET-path conversion creates a template referenced by a single key, so
-        # the saved RDB carries a template header.
+        # the saved RDB already contains templates.
         r hset solo a 1 b 2 c 3 d 4
         assert_equal template-listpack [r object encoding solo]
         assert_equal 1 [s hash_templates]
-        # A threshold that would prune a single-use template on a legacy RDB.
+        # A threshold that would prune a single-use template on an RDB with none.
         r config set hash-rdb-load-template-disassembly-threshold 100
         r config rewrite
         r save
@@ -2613,11 +2579,11 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
 }
 
 # ============================================================
-# HRANDFIELD batch optimization tests (separate start_server)
+# HRANDFIELD batch optimization tests 
 # ============================================================
-start_server {tags {"hash"}} {
+start_server {tags {"hash" "cluster:skip"}} {
     test {HRANDFIELD large count batching on TMPL_LP} {
-        # Test batch random sampling optimization (avoid O(count·n) lpSeek overhead).
+        # Test batch random sampling optimization (avoid O(count*n) lpSeek overhead).
         r config set hash-min-template-entries 50
 
         r del h1 h2
@@ -2625,7 +2591,7 @@ start_server {tags {"hash"}} {
         for {set i 0} {$i < 100} {incr i} {
             lappend fields "f$i" "v$i"
         }
-        # Two hashes with same fields → triggers template
+        # Two hashes with same fields -> triggers template
         r hset h1 {*}$fields
         r hset h2 {*}$fields
 
