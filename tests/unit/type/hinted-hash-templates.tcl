@@ -1837,6 +1837,46 @@ start_server {tags {"hash" "memory" "needs:debug" "cluster:skip"}
         # bound is looser than the deterministic single-key check above.
         assert {$tmpl_total  <= $plain_total  * 0.7}
     }
+
+    test {INFO and MEMORY STATS track shared template memory} {
+        r flushall
+        # Wait for any templates from earlier tests to drain (freed via the
+        # pending_free queue on serverCron) so we start from a clean baseline.
+        wait_for_condition 50 100 {
+            [s hash_templates] == 0
+        } else {
+            fail "templates did not drain to zero before baseline"
+        }
+        set base_info  [s used_memory_hash_templates]
+        set base_stats [dict get [r memory stats] hash.templates]
+
+        # Two distinct schemas -> two templates in the registry.
+        r himport prepare schemaA fa1 fa2 fa3
+        r himport set keyA schemaA 1 2 3
+        r himport prepare schemaB fb1 fb2 fb3 fb4
+        r himport set keyB schemaB 1 2 3 4
+        assert_equal 2 [s hash_templates]
+
+        # Both readouts must rise above the empty baseline and agree.
+        set with_info  [s used_memory_hash_templates]
+        set with_stats [dict get [r memory stats] hash.templates]
+        assert {$with_info  > $base_info}
+        assert {$with_stats > $base_stats}
+        assert_equal $with_info $with_stats
+
+        # Drop key refs (flushall) and the fieldset hold-refs (discardall); the
+        # templates then drain and the counter falls back to the baseline.
+        r himport discardall
+        r flushall
+        wait_for_condition 50 100 {
+            [s hash_templates] == 0 &&
+            [s used_memory_hash_templates] <= $base_info
+        } else {
+            fail "template memory did not return to baseline after flush\
+                  (templates=[s hash_templates] mem=[s used_memory_hash_templates] base=$base_info)"
+        }
+        assert_equal $base_info [dict get [r memory stats] hash.templates]
+    }
 }
 
 # Stress freeing template hashes concurrently with async flushing to surface any
@@ -2561,12 +2601,42 @@ start_server {tags {"hash"}} {
             assert_match "f*" $field
         }
 
-        # With WITHVALUES
+        # With WITHVALUES: each field "fN" must pair with its own value "vN"
+        # (regression for the O(1) value-pointer index that replaced per-draw lpSeek).
         set result [r hrandfield h1 -300 WITHVALUES]
         assert_equal [llength $result] 600
         for {set i 0} {$i < 600} {incr i 2} {
-            assert_match "f*" [lindex $result $i]
-            assert_match "v*" [lindex $result [expr {$i + 1}]]
+            set f [lindex $result $i]
+            set v [lindex $result [expr {$i + 1}]]
+            assert_match "f*" $f
+            assert_equal "v[string range $f 1 end]" $v
+        }
+    }
+
+    test {HRANDFIELD positive count WITHVALUES pairs correctly on TMPL_LP} {
+        # Positive count exercises the unique-index path (CASE 2.5b), which also
+        # collects value pointers in a single pass instead of per-draw lpSeek.
+        r config set hash-min-template-entries 50
+
+        r del h1 h2
+        set fields {}
+        for {set i 0} {$i < 100} {incr i} {
+            lappend fields "f$i" "v$i"
+        }
+        r hset h1 {*}$fields
+        r hset h2 {*}$fields
+        assert_equal template-listpack [r object encoding h1]
+
+        # 40 unique fields, each paired with its own value, no duplicates.
+        set result [r hrandfield h1 40 WITHVALUES]
+        assert_equal [llength $result] 80
+        set seen {}
+        for {set i 0} {$i < 80} {incr i 2} {
+            set f [lindex $result $i]
+            set v [lindex $result [expr {$i + 1}]]
+            assert_equal "v[string range $f 1 end]" $v
+            assert {[lsearch -exact $seen $f] == -1}
+            lappend seen $f
         }
     }
 

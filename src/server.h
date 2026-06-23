@@ -1836,6 +1836,7 @@ struct redisMemOverhead {
     size_t eval_caches;
     size_t functions_caches;
     size_t script_vm;
+    size_t hash_templates;
     size_t overhead_total;
     size_t dataset;
     size_t total_keys;
@@ -3946,6 +3947,10 @@ typedef struct hashTemplates {
                                  * propargv stay main-thread only. */
     int rdb_saving;             /* 1 during RDB save (compact refs). */
     redisAtomic size_t total_key_refs; /* Sum of key_refcount across all templates. */
+    size_t total_mem_size;      /* Sum of every live template's mem_size. Tracked
+                                 * incrementally (+= on create, -= on free) so
+                                 * INFO/MEMORY STATS need not walk a registry that
+                                 * may hold ~100k templates. Main-thread only. */
 } hashTemplates;
 
 /* OBJ_ENCODING_TMPL_LP: o->ptr points directly to a listpack.
@@ -4062,6 +4067,7 @@ void hashTemplateDrainPendingFree(void);
 void hashTemplatesCleanupFieldsLpCron(void);
 int hashTemplateValidateFields(sds *fields, unsigned long long field_count);
 hashTemplate *hashTemplateGetById(uint64_t id);
+size_t hashTemplatesMemUsage(void);
 sds hashTemplateGetFieldsLp(hashTemplate *tmpl);
 hashTemplate *hashTemplateGetByFieldsLp(sds fields_lp);
 void hashTemplateAttachFieldsLp(hashTemplate *tmpl, sds fields_lp);

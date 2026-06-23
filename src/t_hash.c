@@ -487,6 +487,7 @@ static void templateRegistryKeyDestructor(dict *d, void *key) {
     for (unsigned long long i = 0; i < tmpl->field_count; i++)
         sdsfree(tmpl->fields[i]);
     zfree(tmpl->fields);
+    htemplates->total_mem_size -= tmpl->mem_size;
     zfree(tmpl);
 }
 
@@ -550,6 +551,7 @@ static hashTemplate *hashTemplateCreateInternal(uint64_t hash, sds *fields, unsi
         tmpl->fields[i] = sdsdup(fields[i]);
         tmpl->mem_size += sdsZmallocSize(tmpl->fields[i]);
     }
+    htemplates->total_mem_size += tmpl->mem_size;
 
     /* Check if fields fit in listpack (after they're populated). */
     tmpl->can_use_lp = hashTemplateCanUseLpEncoding(tmpl);
@@ -764,6 +766,22 @@ size_t hashTemplateKeyCount(void) {
     return count;
 }
 
+/* Memory held by the shared template registry. Reported in INFO Memory
+ * (mem_hash_templates) and MEMORY STATS (hash.templates). O(1): the per-template
+ * footprint is the incrementally-maintained total_mem_size (the registry may
+ * hold ~100k templates, so it is never walked here), plus the O(1) structural
+ * overhead of the lookup dicts and the by_id array. The lazy fields_lp blob and
+ * propargv are excluded: both are transient and freed before the template.
+ * pending_free_ids (BIO-written, negligible) is also omitted. Main-thread only;
+ * by_id_cap is only ever written by the main thread. */
+size_t hashTemplatesMemUsage(void) {
+    if (!htemplates) return 0;
+    return htemplates->total_mem_size + sizeof(*htemplates) +
+           dictMemUsage(htemplates->registry) +
+           dictMemUsage(htemplates->by_fields_lp) +
+           htemplates->by_id_cap * sizeof(hashTemplate *);
+}
+
 /* Lazy-build the propargv. Field robjs are stored contiguously at
  * propargv[2 .. 2+field_count), making them directly usable both for
  * propagation and for keyspace subkey notifications. Returns the field
@@ -855,8 +873,7 @@ char *hashTemplateEquivalentEncoding(robj *o) {
 uint64_t hashTemplateLpGetTemplateId(unsigned char *lp) {
     unsigned char *p = lpFirst(lp);
     long long id;
-    unsigned char *vstr = lpGetValue(p, NULL, &id);
-    if (vstr != NULL)
+    if (!lpGetIntegerValue(p, &id))
         serverPanic("TMPL_LP listpack header is not an integer template ID");
     return (uint64_t)id;
 }
@@ -887,6 +904,20 @@ unsigned char *hashTemplateLpSetTemplate(unsigned char *lp, hashTemplate *tmpl) 
 static unsigned char *hashTemplateLpFirstValue(unsigned char *lp) {
     unsigned char *p = lpFirst(lp);  /* template ID entry */
     return lpNext(lp, p);            /* first value */
+}
+
+/* Walk a TMPL_LP listpack once, filling vptrs[i] with a pointer to the entry
+ * holding the value of field i (i in [0, field_count)). Lets callers that need
+ * many values index them in O(1) instead of an O(field_count) lpSeek per draw
+ * (e.g. HRANDFIELD with a large count). */
+static void hashTemplateLpCollectValuePtrs(unsigned char *lp, unsigned char **vptrs,
+                                           unsigned long long field_count) {
+    unsigned char *p = hashTemplateLpFirstValue(lp);
+    for (unsigned long long i = 0; i < field_count; i++) {
+        serverAssert(p != NULL);
+        vptrs[i] = p;
+        p = lpNext(lp, p);
+    }
 }
 
 /* Create listpack with template ID and values. Increments key_refcount. */
@@ -5432,25 +5463,42 @@ void hrandfieldWithCountCommand(client *c, long l, int withvalues) {
             zfree(vals);
         } else if (hash->encoding == OBJ_ENCODING_TMPL_LP ||
                    hash->encoding == OBJ_ENCODING_TMPL_ARRAY) {
-            /* For tmpl-based hashes, use hashTypeRandomElement. */
+
+            /* Sample with replacement by random index. For TMPL_LP, collect
+             * value-entry pointers in a single pass so each of the (unbounded)
+             * draws is an O(1) index instead of an O(field_count) lpSeek. */
+            hashTemplate *tmpl = hashTypeGetTemplate(hash);
+            unsigned long long field_count = tmpl->field_count;
+            unsigned char *stack_vptrs[HASH_TMPL_STACK_ENTRIES];
+            unsigned char **vptrs = NULL;
+            if (withvalues && hash->encoding == OBJ_ENCODING_TMPL_LP) {
+                vptrs = (field_count <= HASH_TMPL_STACK_ENTRIES) ?
+                            stack_vptrs : zmalloc(sizeof(*vptrs) * field_count);
+                hashTemplateLpCollectValuePtrs(hash->ptr, vptrs, field_count);
+            }
             while (count--) {
-                listpackEntry key, val;
-                hashTypeRandomElement(hash, size, &key, withvalues ? &val : NULL);
+                unsigned long long fi = randomULong() % field_count;
                 if (withvalues && c->resp > 2)
                     addReplyArrayLen(c, 2);
-                if (key.sval)
-                    addReplyBulkCBuffer(c, key.sval, key.slen);
-                else
-                    addReplyBulkLongLong(c, key.lval);
+                addReplyBulkCBuffer(c, tmpl->fields[fi], sdslen(tmpl->fields[fi]));
                 if (withvalues) {
-                    if (val.sval)
-                        addReplyBulkCBuffer(c, val.sval, val.slen);
-                    else
-                        addReplyBulkLongLong(c, val.lval);
+                    if (hash->encoding == OBJ_ENCODING_TMPL_LP) {
+                        unsigned int vlen;
+                        long long vll;
+                        unsigned char *vstr = lpGetValue(vptrs[fi], &vlen, &vll);
+                        if (vstr)
+                            addReplyBulkCBuffer(c, vstr, vlen);
+                        else
+                            addReplyBulkLongLong(c, vll);
+                    } else {
+                        hashTemplateArray *hta = hash->ptr;
+                        addReplyBulkCBuffer(c, hta->values[fi], sdslen(hta->values[fi]));
+                    }
                 }
                 if (c->flags & CLIENT_CLOSE_ASAP)
                     break;
             }
+            if (vptrs && vptrs != stack_vptrs) zfree(vptrs);
         }
         goto out;
     }
@@ -5523,6 +5571,16 @@ void hrandfieldWithCountCommand(client *c, long l, int withvalues) {
             idx[j] = tmp;
         }
 
+        /* For TMPL_LP, collect value-entry pointers in a single pass so each
+         * lookup below is O(1) instead of an O(field_count) lpSeek per draw. */
+        unsigned char *stack_vptrs[HASH_TMPL_STACK_ENTRIES];
+        unsigned char **vptrs = NULL;
+        if (withvalues && hash->encoding == OBJ_ENCODING_TMPL_LP) {
+            vptrs = (field_count <= HASH_TMPL_STACK_ENTRIES) ?
+                        stack_vptrs : zmalloc(sizeof(*vptrs) * field_count);
+            hashTemplateLpCollectValuePtrs(hash->ptr, vptrs, field_count);
+        }
+
         for (unsigned long long i = 0; i < count; i++) {
             unsigned long long fi = idx[i];
             if (withvalues && c->resp > 2)
@@ -5530,10 +5588,9 @@ void hrandfieldWithCountCommand(client *c, long l, int withvalues) {
             addReplyBulkCBuffer(c, tmpl->fields[fi], sdslen(tmpl->fields[fi]));
             if (withvalues) {
                 if (hash->encoding == OBJ_ENCODING_TMPL_LP) {
-                    unsigned char *p = lpSeek(hash->ptr, fi + 1);
                     unsigned int vlen;
                     long long vll;
-                    unsigned char *vstr = lpGetValue(p, &vlen, &vll);
+                    unsigned char *vstr = lpGetValue(vptrs[fi], &vlen, &vll);
                     if (vstr)
                         addReplyBulkCBuffer(c, vstr, vlen);
                     else
@@ -5545,6 +5602,7 @@ void hrandfieldWithCountCommand(client *c, long l, int withvalues) {
             }
         }
         if (idx != stack_idx) zfree(idx);
+        if (vptrs && vptrs != stack_vptrs) zfree(vptrs);
         goto out;
     }
 
