@@ -103,9 +103,10 @@ keys are hashtable/array-encoded and the rest stay listpack:
 | Regular hashes | `listpack` + `hashtable` | 3.49 GB |
 | Template-encoded | `template-listpack` + `template-array` | 1.77 GB |
 
-About **49% less memory**. The saving tracks how much of each key is field names:
-highest for the listpack keys (short values, names repeated per key) and lower
-for the keys with a large value, where the value dominates the footprint.
+About **49% less memory**. The more of a key's size is taken up by field names,
+the more it saves: keys with short values save the most (the repeated field names
+are most of the footprint), while keys with a large value save less (the value
+dominates and the field names are a small part to begin with).
 
 ---
 
@@ -130,6 +131,8 @@ Stores the ordered field-name list under `<fieldset-name>` for this connection
 - **Reply:** `+OK`.
 - **Errors:** `duplicate field name in fieldset` (a field name appears twice).
 
+---
+
 ```
 HIMPORT SET <key> <fieldset-name> <value> [<value> ...]
 ```
@@ -142,11 +145,15 @@ as a template; later keys reuse it.
 - **Errors:** `no such fieldset` (name not prepared on this connection);
   `value count does not match fieldset field count`.
 
+---
+
 ```
 HIMPORT DISCARD <fieldset-name>
 ```
 Removes the fieldset from the connection.
 - **Reply:** `1` if removed, `0` if no such fieldset.
+
+---
 
 ```
 HIMPORT DISCARDALL
@@ -207,9 +214,9 @@ Server-wide counters:
 
 | Field | Where | Meaning |
 |---|---|---|
-| `hash_templates` | `INFO stats` | distinct templates in the registry |
-| `hash_template_keys` | `INFO stats` | total keys backed by a template |
-| `used_memory_hash_templates` | `INFO memory` | bytes held by the registry |
+| `hash_templates` | `INFO stats` | number of distinct templates |
+| `hash_template_keys` | `INFO stats` | total number of keys backed by a template |
+| `used_memory_hash_templates` | `INFO memory` | total memory used by all hash templates |
 | `hash.templates` | `MEMORY STATS` | same as `used_memory_hash_templates` |
 
 The shared template is **not** attributed to any single key: `MEMORY USAGE <key>`
@@ -238,12 +245,16 @@ Everything below is implementation detail, not a user contract.
 
 In the code a template is a `hashTemplate`: an **immutable** list of field names
 with a small runtime **id**. The names are kept **sorted by `sdscmplen`** (length
-first, then a byte compare). A template matches a field set **exactly**: two keys
-share one template only if their field-name sets are identical (in any order), so
-templates are **shared** and **deduplicated** across keys. A field lookup within a
-key is a binary search over the sorted names (`hashTemplateFieldIndex`).
+first, then a byte compare). A key uses a template only if the template's field
+names are exactly the key's field names, the whole set, no more and no less
+(order does not matter). So two keys share one template only when they have the
+identical set of field names, which is what makes templates **shared** and
+**deduplicated** across keys. To look up a field in a key, a binary search over the
+template's sorted names (`hashTemplateFieldIndex`) gives the field's index, and
+the value at that index is then read from the key's own storage (the listpack or
+value array, depending on the encoding).
 
-Because a template is immutable and exact-match, `HSET` of a **new** field or
+Because a template is immutable and matched as a whole, `HSET` of a **new** field or
 `HDEL` **detaches** the key from its current template and re-resolves a template
 for the new field set, creating a new one if none matches (which costs real work:
 allocating the struct and copying and sorting the field names). Consequences:
@@ -265,9 +276,7 @@ to confirm the match.
 
 ## Encodings
 
-Two new object encodings (`src/object.h`). Like the existing `listpack`/`hashtable`
-encodings, the internal layout behind `o->ptr` is reached only through the hash
-type accessors, not touched directly by the rest of the code:
+Two new object encodings, added alongside the existing `listpack` / `hashtable`:
 
 | Encoding | id | `o->ptr` layout | Used when |
 |---|---|---|---|
@@ -291,8 +300,8 @@ before any key uses it.
 
 `HIMPORT SET` then just finds the fieldset by name and writes the key from the
 cached template and that mapping: no registry lookup, no field sorting, no
-per-call allocation for the layout. That is where the ingestion speedup comes
-from.
+per-call allocation for the layout. That is how template-encoded keys are
+ingested quickly.
 
 ## Reference counting & lifetime
 
@@ -327,13 +336,11 @@ registry, with no field names repeated per key. Two variants per encoding:
 | `RDB_TYPE_HASH_TMPL_ARRAY` | 31 | self-contained: `[count][f0][v0]…` | DUMP |
 | `RDB_TYPE_HASH_TMPL_ARRAY_REF` | 32 | ref: `[id][v0]…[vN-1]` | RDB save |
 
-On load the registry is rebuilt and then released on every load path (disk
-startup, diskless replica, AOF rdb-preamble). Loading can also convert to or from
-template encoding via the `hash-rdb-load-*` settings (see *Configuration*).
+When an RDB is loaded the registry is rebuilt from it. Loading can also convert to
+or from template encoding via the `hash-rdb-load-*` settings (see *Configuration*).
 
-**DUMP / RESTORE** uses the **self-contained** types (`RDB_TYPE_HASH_TMPL_LP` =
-29, `RDB_TYPE_HASH_TMPL_ARRAY` = 31): the field names are inlined so the payload
-is portable. The leading RDB type byte is what tells the destination this is a
+**DUMP / RESTORE** uses the **self-contained** types: the payload includes the
+field names, so it is portable. The leading RDB type byte is what tells the destination this is a
 template hash, so `RESTORE` interns the inlined field set as a template and
 rebuilds a *template-backed* hash rather than a plain one.
 
