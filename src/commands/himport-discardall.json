@@ -3,13 +3,10 @@
         "summary": "Removes all session-local fieldsets for the connection.",
         "complexity": "O(N) where N is the number of session-local fieldsets.",
         "group": "hash",
-        "since": "9.0.0",
+        "since": "8.10.0",
         "arity": 2,
         "container": "HIMPORT",
         "function": "himportDiscardallCommand",
-        "command_flags": [
-            "FAST"
-        ],
         "acl_categories": [
             "HASH"
         ],

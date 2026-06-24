@@ -160,6 +160,13 @@ int replicationCronRunMasterClient(void) {
 
     if (server.master->running_tid != IOTHREAD_MAIN_THREAD_ID) return 0;
 
+    /* Drop the master client's HSETC template cache once it has gone idle. */
+    if (server.master->hsetc_cache &&
+        (server.mstime - server.master->hsetc_cache_time) > 5000)
+    {
+        hsetcCacheFree(server.master);
+    }
+
     /* Timed out master when we are an already connected slave? */
     if (server.repl_state == REPL_STATE_CONNECTED &&
         (time(NULL)-server.master->lastinteraction) > server.repl_timeout)
@@ -4537,6 +4544,7 @@ void replicationCacheMaster(client *c) {
     c->bufpos = 0;
     resetClient(c, -1);
     resetClientQbufState(c);
+    hsetcCacheFree(c);
 
     /* Save the master. Server.master will be set to null later by
      * replicationHandleMasterDisconnection(). */

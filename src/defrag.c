@@ -1191,9 +1191,7 @@ void defragKey(defragKeysCtx *ctx, dictEntry *de, dictEntryLink link) {
             hashTemplateArray *hta = ob->ptr;
             hashTemplateArray *newhta = activeDefragAlloc(hta);
             if (newhta) ob->ptr = hta = newhta;
-            for (unsigned long long i = 0;
-                 i < hta->tmpl->field_count; i++)
-            {
+            for (unsigned long long i = 0; i < hta->tmpl->field_count; i++) {
                 sds newsds = activeDefragSds(hta->values[i]);
                 if (newsds) hta->values[i] = newsds;
             }

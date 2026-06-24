@@ -2103,17 +2103,21 @@ static int rioWriteHashIteratorCursor(rio *r, hashTypeIterator *hi, int what) {
         size_t len;
         hashTypeCurrentFromHashTable(hi, what, &str, &len, NULL);
         return rioWriteBulkString(r, str, len);
-    } else if (hi->encoding == OBJ_ENCODING_TMPL_LP ||
-               hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_LP) {
         unsigned char *vstr = NULL;
         unsigned int vlen = UINT_MAX;
         long long vll = LLONG_MAX;
 
-        hashTypeCurrentObject(hi, what, &vstr, &vlen, &vll, NULL);
+        hashTypeCurrentFromTmplLp(hi, what, &vstr, &vlen, &vll, NULL);
         if (vstr)
-            return rioWriteBulkString(r, (char *)vstr, vlen);
+            return rioWriteBulkString(r, (char*)vstr, vlen);
         else
             return rioWriteBulkLongLong(r, vll);
+    } else if (hi->encoding == OBJ_ENCODING_TMPL_ARRAY) {
+        char *str;
+        size_t len;
+        hashTypeCurrentFromTmplArray(hi, what, &str, &len, NULL);
+        return rioWriteBulkString(r, str, len);
     }
 
     serverPanic("Unknown hash encoding");
@@ -2136,7 +2140,7 @@ int rewriteHashObject(rio *r, robj *key, robj *o) {
 
     if (isTmpl) {
         /* Emit a single HSETC so replay restores the template encoding
-         * Layout: HSETC key f0 f1 ... fN-1 v0 v1 ... vN-1 */
+         * Layout: HSETC key <fields> <values> */
         if (!rioWriteBulkCount(r, '*', 2 + items * 2) ||
             !rioWriteBulkString(r, "HSETC", 5) ||
             !rioWriteBulkObject(r, key))

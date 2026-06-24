@@ -258,6 +258,7 @@ client *createClient(connection *conn) {
     c->node_id = NULL;
     c->himport_fieldsets = NULL;
     c->hsetc_cache = NULL;
+    c->hsetc_cache_time = 0;
     atomicSet(c->pending_read, 0);
     return c;
 }
@@ -2061,6 +2062,7 @@ void clearClientConnectionState(client *c) {
     moduleNotifyUserChanged(c);
     discardTransaction(c);
     himportFieldsetFreeList(c);
+    hsetcCacheFree(c);
 
     pubsubUnsubscribeAllChannels(c,0);
     pubsubUnsubscribeShardAllChannels(c, 0);
@@ -5224,6 +5226,9 @@ size_t getClientMemoryUsage(client *c) {
      * spot problematic clients. */
     mem += c->all_argv_len_sum + sizeof(robj*)*c->argc;
     mem += multiStateMemOverhead(c);
+
+    /* Add memory overhead of this client's HIMPORT fieldset bindings. */
+    mem += himportFieldsetMemOverhead(c);
 
     /* Add memory overhead of pubsub channels and patterns. Note: this is just the overhead of the robj pointers
      * to the strings themselves because they aren't stored per client. */

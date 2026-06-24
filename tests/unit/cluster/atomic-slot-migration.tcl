@@ -687,6 +687,41 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_asm_done
     }
 
+    test "Slot migration preserves template-encoded hashes" {
+        R 0 flushall
+        R 1 flushall
+        R 0 config set hash-min-template-entries 0
+        R 1 config set hash-min-template-entries 0
+        
+        # key with template-listpack encoding
+        set lp_key [slot_key 0 htmpllp]
+        R 1 himport prepare fieldset1 name email age
+        R 1 himport set $lp_key fieldset1 alice alice@example.com 25
+        assert_equal {template-listpack} [R 1 object encoding $lp_key]
+        
+        # key with template-array encoding
+        set ar_key [slot_key 0 htmplar]
+        R 1 himport prepare fieldset2 f1 f2 f3
+        R 1 himport set $ar_key fieldset2 v1 [string repeat x 100] v3
+        assert_equal {template-array} [R 1 object encoding $ar_key]
+
+        # migrate slot 0-100 to R 0 and verify both encodings/data survive
+        R 0 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_asm_done
+        
+        # verify the encoding and data of template-listpack
+        assert_equal {template-listpack} [R 0 object encoding $lp_key]
+        assert_equal {age 25 name alice email alice@example.com} [R 0 hgetall $lp_key]
+        
+        # verify the encoding and data of template-array
+        assert_equal {template-array} [R 0 object encoding $ar_key]
+        assert_equal "f1 v1 f2 [string repeat x 100] f3 v3" [R 0 hgetall $ar_key]
+
+        # migrate slot 0-100 back to R 1
+        R 1 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_asm_done
+    }
+
     proc asm_basic_error_handling_test {operation channel all_states} {
         foreach state $all_states {
             if {$::verbose} { puts "Testing $operation $channel channel with state: $state"}

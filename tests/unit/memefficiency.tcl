@@ -1225,6 +1225,92 @@ run_solo {defrag} {
             }
         }
     }
+
+    if {[string match {*jemalloc*} [s mem_allocator]] &&
+        [r debug mallctl arenas.page] <= 8192 &&
+        $type eq "standalone"} { ;# skip in cluster mode and non-jemalloc
+        # Active defrag relocates the per-key allocations of template-encoded
+        # hashes (the TMPL_LP listpack blob, and the hashTemplateArray struct +
+        # its value sds's for TMPL_ARRAY). defragKey must update ob->ptr and
+        # every values[] entry without touching the shared template. Fragment
+        # many template hashes, run active defrag, and assert the data is
+        # byte-identical afterwards (debug digest) and the keys still resolve.
+        test "Active defrag template-encoded hashes: $type" {
+            r flushall
+            r config set hz 100
+            r config set activedefrag no
+            wait_for_defrag_stop 500 100
+            r config resetstat
+            r config set active-defrag-threshold-lower 5
+            r config set active-defrag-cycle-min 65
+            r config set active-defrag-cycle-max 75
+            r config set active-defrag-ignore-bytes 100kb
+            r config set maxmemory 0
+            # Field count drives the encoding: the 3-field schema stays
+            # template-listpack, the 40-field schema becomes template-array.
+            r config set hash-max-listpack-entries 16
+
+            # Two shared schemas: small -> template-listpack, big -> template-array.
+            set big_fields {}
+            for {set f 0} {$f < 40} {incr f} { lappend big_fields field_[format %02d $f] }
+            set bigval [string repeat x 80]
+
+            set n 20000
+            # HIMPORT fieldsets are per-client, so prepare on the same
+            # (deferring) connection that issues the HIMPORT SETs.
+            set rd [redis_deferring_client]
+            $rd himport prepare small a b c       ; $rd read
+            $rd himport prepare big {*}$big_fields ; $rd read
+            set batch 200
+            for {set j 0} {$j < $n} {incr j} {
+                if {$j % 2 == 0} {
+                    $rd himport set k:$j small v${j}a v${j}b v${j}c
+                } else {
+                    set vals {}
+                    for {set f 0} {$f < 40} {incr f} { lappend vals $bigval }
+                    $rd himport set k:$j big {*}$vals
+                }
+                discard_replies_every $rd [expr {$j + 1}] $batch $batch
+            }
+            for {set j 0} {$j < [expr {$n % $batch}]} {incr j} { $rd read }
+
+            assert_equal template-listpack [r object encoding k:0]
+            assert_equal template-array    [r object encoding k:1]
+
+            # Fragment: delete half (j%4<2) so both schemas survive and both
+            # are freed, leaving holes in their size classes.
+            set deleted 0
+            for {set j 0} {$j < $n} {incr j} {
+                if {($j % 4) < 2} { $rd del k:$j; incr deleted }
+            }
+            for {set j 0} {$j < $deleted} {incr j} { $rd read }
+            $rd close
+
+            after 120
+            if {$::verbose} { puts "frag before defrag: [s allocator_frag_ratio]" }
+
+            set digest [debug_digest]
+            catch {r config set activedefrag yes}
+            if {[r config get activedefrag] eq "activedefrag yes"} {
+                wait_for_condition 100 100 {
+                    [s total_active_defrag_time] ne 0
+                } else {
+                    fail "defrag not started."
+                }
+                wait_for_defrag_stop 500 100
+            }
+
+            # Data byte-identical after defrag moved the allocations.
+            assert_equal $digest [debug_digest]
+            # Survivors of both encodings still resolve (k:2 small, k:3 big).
+            assert_equal template-listpack [r object encoding k:2]
+            assert_equal template-array    [r object encoding k:3]
+            assert_equal v2a    [r hget k:2 a]
+            assert_equal $bigval [r hget k:3 field_00]
+            assert_equal $bigval [r hget k:3 field_39]
+            r save ;# iterate over all data / pointers
+        } {OK}
+    }
     }
 
     test "Active defrag can't be triggered during replicaof database flush. See issue #14267" {

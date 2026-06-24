@@ -883,7 +883,8 @@ int sdscmp(const sds s1, const sds s2) {
  * Faster than sdscmp when strings often have different lengths.
  * Returns: negative if s1 < s2, positive if s1 > s2, 0 if equal. */
 int sdscmplen(const sds s1, const sds s2) {
-    size_t l1 = sdslen(s1), l2 = sdslen(s2);
+    size_t l1 = sdslen(s1);
+    size_t l2 = sdslen(s2);
     if (l1 != l2) return (l1 > l2) ? 1 : -1;
     return memcmp(s1, s2, l1);
 }

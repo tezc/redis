@@ -2251,8 +2251,13 @@ static int slotSnapshotSaveKeyValuePair(rio *rdb, kvobj *o, int dbid) {
      * use RESTORE command (RDB format) to migrate data.
      * Generally RDB binary format is more efficient, but it may cause
      * block in the destination if the object is too large, so fall back
-     * to AOF format if necessary. */
-    if ((o->type == OBJ_MODULE) ||
+     * to AOF format if necessary. Templated hashes always use RESTORE
+     * regardless of size: the DUMP payload is self-contained (full
+     * RDB_TYPE_HASH_TMPL_LP/ARRAY with fields inlined). */
+    int isTmplHash = (o->type == OBJ_HASH &&
+                      (o->encoding == OBJ_ENCODING_TMPL_LP ||
+                       o->encoding == OBJ_ENCODING_TMPL_ARRAY));
+    if ((o->type == OBJ_MODULE) || isTmplHash ||
         (o->type != OBJ_STRING && getObjectLength(o) <= ASM_AOF_MIN_ITEMS_PER_KEY))
     {
         if (rioWriteBulkCount(rdb, '*', 5) == 0) return C_ERR;

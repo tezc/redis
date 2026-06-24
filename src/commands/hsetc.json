@@ -3,14 +3,14 @@
         "summary": "Creates a schema-based hash, replacing any existing key. Internal command propagated by HIMPORT SET.",
         "complexity": "O(N) where N is the number of field/value pairs.",
         "group": "hash",
-        "since": "8.0.0",
+        "since": "8.10.0",
         "arity": -4,
         "function": "hsetcCommand",
         "command_flags": [
             "WRITE",
             "DENYOOM",
-            "FAST",
-            "INTERNAL"
+            "INTERNAL",
+            "NOSCRIPT"
         ],
         "acl_categories": [
             "HASH"
@@ -46,19 +46,14 @@
                 "key_spec_index": 0
             },
             {
-                "name": "data",
-                "type": "block",
-                "multiple": true,
-                "arguments": [
-                    {
-                        "name": "field",
-                        "type": "string"
-                    },
-                    {
-                        "name": "value",
-                        "type": "string"
-                    }
-                ]
+                "name": "field",
+                "type": "string",
+                "multiple": true
+            },
+            {
+                "name": "value",
+                "type": "string",
+                "multiple": true
             }
         ]
     }

@@ -1665,6 +1665,7 @@ typedef struct client {
     size_t stat_avg_pipeline_length_cnt; /* Count of pipeline length samples */
     void *himport_fieldsets;      /* Session-local HIMPORT fieldsets (himportFieldsetList*) */
     void *hsetc_cache;            /* hashTemplate* - last HSETC template (skips dictFind on repeat) */
+    mstime_t hsetc_cache_time;    /* Last time hsetc_cache was used (for idle eviction) */
 } client;
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
@@ -1835,6 +1836,7 @@ struct redisMemOverhead {
     size_t eval_caches;
     size_t functions_caches;
     size_t script_vm;
+    size_t hash_templates;
     size_t overhead_total;
     size_t dataset;
     size_t total_keys;
@@ -2488,14 +2490,44 @@ struct redisServer {
     size_t hash_max_listpack_entries;
     size_t hash_max_listpack_value;
     /* Hash template config */
-    size_t hash_min_template_entries; /* Auto-convert regular hashes (HSET, RDB
-                                       * load) to template encoding at this
-                                       * field count. 0 disables auto-convert;
-                                       * templates are created only via HIMPORT
-                                       * SET. Falling below the threshold via
-                                       * HDEL converts back to listpack/ht. */
+    size_t hash_min_template_entries; /* Field-count threshold at which regular
+                                       * hashes are auto-converted to template
+                                       * encoding. Applies to the live command
+                                       * path (e.g. HSET), not RDB load (which has
+                                       * its own hash_rdb_load_* configs below).
+                                       * 0 disables auto-convert. */
+    size_t hash_max_template_entries; /* Upper field-count bound for that
+                                       * auto-convert: hashes with more fields than
+                                       * this are not converted. 0 disables the
+                                       * upper bound. */
+    size_t hash_rdb_load_min_template_entries; /* Like hash_min_template_entries
+                                       * but applied on the RDB-load path (which
+                                       * the AOF RDB preamble also uses). Only
+                                       * effective if the RDB does not already
+                                       * include templates; otherwise it is loaded
+                                       * as-is. 0 disables. */
+    size_t hash_rdb_load_max_template_entries; /* Upper field-count bound for the
+                                       * RDB-load path. 0 disables the bound. */
+    size_t hash_rdb_load_template_disassembly_threshold; /* Relevant only when
+                                       * RDB-load auto-convert is on (i.e.
+                                       * hash_rdb_load_min_template_entries > 0).
+                                       * That auto-convert turns plain hashes into
+                                       * templates as the RDB loads; afterwards a
+                                       * template still shared by fewer than this
+                                       * many keys ("few-key") is disassembled back
+                                       * to a plain hash, so rarely-shared
+                                       * templates don't waste memory. Also drives
+                                       * the throttle that stops creating new
+                                       * templates once most are few-key. RDB-load
+                                       * only, not RESTORE/DUMP. 0 disables. */
+    int hash_template_mask_encoding; /* TEMPORARY (remove before merge): when set,
+                                      * OBJECT ENCODING / DEBUG OBJECT report the
+                                      * legacy listpack/hashtable name for
+                                      * template-encoded hashes instead of
+                                      * template-*, so the existing hash test
+                                      * suite passes with templates enabled. */
 
-    struct hashTemplates *htemplates;               /* Global template registry */
+    struct hashTemplates *htemplates;   /* Global template registry */
     size_t set_max_intset_entries;
     size_t set_max_listpack_entries;
     size_t set_max_listpack_value;
@@ -3851,10 +3883,10 @@ typedef struct listpackEx {
 } listpackEx;
 
 /*-----------------------------------------------------------------------------
- * Hash with shared template (Hinted Hash Templates) - OBJ_ENCODING_TMPL_LP/AR
+ * Hash with shared template (Hinted Hash Templates) - OBJ_ENCODING_TMPL_LP/ARRAY
  *
  * These encodings store hash values without repeating field names. Instead,
- * field names are stored once in a shared template structure, and multiple
+ * field names are stored once in a shared template structure and multiple
  * hash keys can reference the same template.
  *----------------------------------------------------------------------------*/
 
@@ -3865,30 +3897,65 @@ typedef struct hashTemplate {
                           * entry in TMPL_LP (varint, ~1-2 bytes) instead of an
                           * 8-byte template pointer, and written by RDB save
                           * to identify the template. */
-    uint64_t hash;       /* Pre-computed hash of sorted field names. */
-    redisAtomic unsigned long long key_refcount; /* Number of hash keys. */
-    unsigned long long client_refcount; /* Number of clients referring to this 
-                                         * template (due to HIMPORT PREPARE). */
+    uint64_t hash;       /* Pre-computed commutative hash of the field-name set
+                          * (order-independent; see computeFieldsHash). */
+    redisAtomic unsigned long long key_refcount; /* Number of hash keys. Atomic:
+                          * a BIO lazyfree thread may decrement it directly. Only
+                          * the zero-transition enqueues the template id for the
+                          * main thread to reclaim. */
+    unsigned long long hold_refcount; /* Non-key holders (a client's HIMPORT
+                          * PREPARE fieldset, RDB load); keeps a template alive
+                          * while it has no keys yet but is still referenced. */
     unsigned long long field_count; /* Number of fields in the template. */
+    size_t mem_size;     /* Cached own allocation footprint: the struct, the
+                          * fields array, and the duplicated field-name SDS.
+                          * Constant after creation (templates are immutable;
+                          * a changed field set creates a new template). Used to
+                          * attribute a holder's share to client memory. */
     sds *fields;         /* Ordered array of field names (sorted, owned). */
-    robj **propargv;     /* Lazy-built propagation array, layout:
-                            [hsetc, NULL_key, f0, f1, ..., fN-1,
-                                              NULL_v0, NULL_v1, ..., NULL_vN-1].
-                            Field slots own field robjs; key and value slots
-                            are filled per HIMPORT SET / HSETC call.  */
-    struct hashTemplate *next_pending_free; /* Pending free list link. */
-    int pending_free;    /* 1 if in pending free list (lock-protected). */
+    sds fields_lp;       /* Lazily-built listpack blob of the sorted field names
+                          * ([f0][f1]...[fN-1]), wrapped in an sds so it can key
+                          * by_fields_lp. NULL until first needed. Lets the
+                          * self-contained DUMP/RESTORE TMPL_LP form ship one blob
+                          * instead of N strings, and lets RESTORE find the
+                          * template with one O(1) blob lookup. Owned here. */
+    unsigned int can_use_lp:1;  /* 1 if fields fit in listpack (DUMP serializes them as LP blob) */
+    robj **propargv;     /* Lazy-built argv used only to propagate HIMPORT SET
+                          * (as HSETC). Layout: [hsetc, NULL_key, <fields>,
+                          * <null-values>]; field slots own field robjs, key and
+                          * value slots are filled per call. */
 } hashTemplate;
 
 /* Global registry for hash templates. */
 typedef struct hashTemplates {
-    dict *registry;             /* field set -> template lookup */
+    dict *by_fields;            /* field set -> template lookup */
+    dict *by_fields_lp;         /* fields-listpack blob -> template lookup, used
+                                 * to resolve a self-contained TMPL_LP RESTORE in
+                                 * O(1) without reading field names one by one. */
     hashTemplate **by_id;       /* ID -> template lookup */
     size_t by_id_cap;           /* Allocated slots in by_id array. */
-    hashTemplate *pending_free_list;        /* Pending free list head. */
-    pthread_mutex_t pending_free_list_lock; /* Protects pending_free_list. */
-    int rdb_saving;              /* 1 during RDB save (compact refs). */
+    uint64_t *pending_free_ids; /* Ids of templates that hit zero refs on a BIO
+                                 * lazyfree thread which can't touch the registry
+                                 * itself. The main thread later drains this in
+                                 * hashTemplateDrainPendingFree and frees them. */
+    size_t pending_free_count;  /* Used slots in pending_free_ids. */
+    size_t pending_free_cap;    /* Allocated slots in pending_free_ids. */
+    pthread_mutex_t lock;       /* Guards the only cross-thread state: the
+                                 * pending_free_ids queue and the by_id array
+                                 * (both touched by BIO threads). Everything else
+                                 * (registry, hold_refcount, propargv) is
+                                 * main-thread only. */
+    int rdb_saving;             /* Controls how keys are serialized into RDB or
+                                 * DUMP. If 1, an RDB save is in progress: templates
+                                 * are written once, then keys reference them
+                                 * (compact). If 0 (e.g. DUMP), keys are written in
+                                 * full form (fields included) so RESTORE is
+                                 * self-contained. */
     redisAtomic size_t total_key_refs; /* Sum of key_refcount across all templates. */
+    size_t total_mem_size;      /* Sum of every live template's mem_size. Tracked
+                                 * incrementally (+= on create, -= on free) so
+                                 * INFO/MEMORY STATS need not walk a registry that
+                                 * may hold ~100k templates. Main-thread only. */
 } hashTemplates;
 
 /* OBJ_ENCODING_TMPL_LP: o->ptr points directly to a listpack.
@@ -3942,8 +4009,19 @@ static inline size_t *htGetMetadataSize(dict *d) {
 #define HFE_LAZY_NO_UPDATE_KEYSIZES  (1<<5) /* If field lazy deleted, avoid updating keysizes histogram */
 #define HFE_LAZY_NO_UPDATE_ALLOCSIZES (1<<6) /* If field lazy deleted, avoid updating slot allocation sizes */
 
+/* Opaque here; rdb.c just holds a pointer and calls the helpers below. See the
+ * comment above struct rdbLoadTemplateCtx in t_hash.c for what it does and
+ * when it is active. */
+typedef struct rdbLoadTemplateCtx rdbLoadTemplateCtx;
+rdbLoadTemplateCtx *rdbLoadTemplateCtxCreate(size_t disassembly_threshold);
+int rdbLoadTemplateCtxTryConvert(rdbLoadTemplateCtx *ctx, robj *o);
+void rdbLoadTemplateCtxCommit(rdbLoadTemplateCtx *ctx, robj *kv, redisDb *db);
+void rdbLoadTemplateCtxDisassemble(rdbLoadTemplateCtx *ctx);
+void rdbLoadTemplateCtxFree(rdbLoadTemplateCtx *ctx);
+
 void hashTypeConvert(redisDb *db, robj *o, int enc);
-int hashTypeTryConvertToTemplate(robj *o);
+int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields,
+                                 rdbLoadTemplateCtx *ctx);
 void hashTypeTryConversion(redisDb *db, kvobj *kv, robj **argv, int start, int end);
 int hashTypeExists(redisDb *db, kvobj *kv, sds field, int hfeFlags, int *isHashDeleted);
 int hashTypeDelete(robj *o, void *key);
@@ -3959,6 +4037,14 @@ void hashTypeCurrentFromListpack(hashTypeIterator *hi, int what,
                                  uint64_t *expireTime);
 void hashTypeCurrentFromHashTable(hashTypeIterator *hi, int what, char **str,
                                   size_t *len, uint64_t *expireTime);
+void hashTypeCurrentFromTmplLp(hashTypeIterator *hi, int what,
+                               unsigned char **vstr,
+                               unsigned int *vlen,
+                               long long *vll,
+                               uint64_t *expireTime);
+void hashTypeCurrentFromTmplArray(hashTypeIterator *hi, int what,
+                                  char **str, size_t *len,
+                                  uint64_t *expireTime);
 void hashTypeCurrentObject(hashTypeIterator *hi, int what, unsigned char **vstr,
                            unsigned int *vlen, long long *vll, uint64_t *expireTime);
 sds hashTypeCurrentObjectNewSds(hashTypeIterator *hi, int what);
@@ -3969,28 +4055,36 @@ int hashTypeSet(redisDb *db, kvobj *kv, sds field, sds value, int flags);
 robj *hashTypeDup(kvobj *kv, uint64_t *minHashExpire);
 uint64_t hashTypeExpire(redisDb *db, kvobj *o, uint32_t *quota, int updateSubexpires, int activeEx);
 void hashTypeFree(robj *o);
-int himportFieldsetFreeList(client *c);
+int64_t himportFieldsetFreeList(client *c);
+size_t himportFieldsetMemOverhead(client *c);
 void hsetcCacheFree(client *c);
 int hashTypeIsExpired(const robj *o, uint64_t expireAt);
 
-/* Hinted Hash Templates functions */
+/* Hash Templates functions */
 hashTemplate *hashTemplateGetOrCreate(sds *fields, unsigned long long field_count);
 hashTemplate *hashTemplateGetOrCreateWithHash(uint64_t hash, sds *fields, unsigned long long field_count);
 void hashTemplateIncrKeyRef(hashTemplate *tmpl);
 void hashTemplateDecrKeyRef(hashTemplate *tmpl);
-void hashTemplateIncrClientRef(hashTemplate *tmpl);
-void hashTemplateDecrClientRef(hashTemplate *tmpl);
+void hashTemplateIncrHoldRef(hashTemplate *tmpl);
+void hashTemplateDecrHoldRef(hashTemplate *tmpl);
 
 void hashTemplateDrainPendingFree(void);
+void hashTemplatesCleanupFieldsLpCron(void);
+int hashTemplateValidateFields(sds *fields, unsigned long long field_count);
 hashTemplate *hashTemplateGetById(uint64_t id);
+size_t hashTemplatesMemUsage(void);
+sds hashTemplateGetFieldsLp(hashTemplate *tmpl);
+hashTemplate *hashTemplateGetByFieldsLp(sds fields_lp);
+void hashTemplateAttachFieldsLp(hashTemplate *tmpl, sds fields_lp);
 void hashTemplatesInit(void);
 hashTemplate *hashTemplateLpGetTemplate(unsigned char *lp);
+hashTemplate *hashTypeGetTemplate(robj *o);
+uint64_t hashTemplateLpGetTemplateId(unsigned char *lp);
 char *hashTemplateEquivalentEncoding(robj *o);
 unsigned char *hashTemplateLpCreate(hashTemplate *tmpl, sds *values);
 hashTemplateArray *hashTemplateArrayCreate(hashTemplate *tmpl, sds *values, int take);
-robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values);
+robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values, int take);
 size_t hashTemplateRegistrySize(void);
-size_t hashTemplateCountActive(void);
 size_t hashTemplateKeyCount(void);
 unsigned char *hashTypeListpackGetLp(robj *o);
 uint64_t hashTypeGetMinExpire(robj *o, int accurate);

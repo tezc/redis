@@ -1802,9 +1802,17 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         pendingCommandPoolCron();
     }
 
-    /* Free templates whose key_refcount dropped to 0 from bio thread. */
-    run_with_period(1000) {
-        hashTemplateDrainPendingFree();
+    /* Reclaim templates that a BIO lazyfree thread brought to zero references
+     * (the BIO thread can't remove them from the registry, so it enqueues their
+     * ids). Cheap when the queue is empty, so run it every cron tick to keep the
+     * live template registry from lagging behind. */
+    hashTemplateDrainPendingFree();
+
+    /* Clean up fields_lp blobs periodically. These are built lazily during
+     * DUMP/RESTORE/ASM and are dead weight once those operations complete.
+     * Run every 100ms; the function is cheap when there are no blobs to clean. */
+    run_with_period(100) {
+        hashTemplatesCleanupFieldsLpCron();
     }
 
     /* Resize tracking keys table if needed. This is also done at every
@@ -6516,6 +6524,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "used_memory_vm_total:%lld\r\n", memory_functions + memory_lua,
             "used_memory_vm_total_human:%s\r\n", used_memory_vm_total_hmem,
             "used_memory_functions:%lld\r\n", (long long)mh->functions_caches,
+            "used_memory_hash_templates:%zu\r\n", mh->hash_templates,
             "used_memory_scripts:%lld\r\n", (long long)mh->eval_caches + (long long)mh->functions_caches,
             "used_memory_scripts_human:%s\r\n", used_memory_scripts_hmem,
             "maxmemory:%lld\r\n", server.maxmemory,

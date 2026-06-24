@@ -815,8 +815,7 @@ void dismissHashObject(robj *o, size_t size_hint) {
             for (unsigned long long i = 0; i < n; i++)
                 dismissSds(hta->values[i]);
         }
-        /* Dismiss the values[] array (analogous to dict bucket dismissal). */
-        dismissMemory(hta->values, n * sizeof(sds));
+        dismissMemory(hta, n * sizeof(sds));
     } else {
         serverPanic("Unknown hash encoding type");
     }
@@ -1507,6 +1506,9 @@ struct redisMemOverhead *getMemoryOverheadData(void) {
     mh->script_vm += functionsMemoryVM();
     mem_total+=mh->script_vm;
 
+    mh->hash_templates = hashTemplatesMemUsage();
+    mem_total+=mh->hash_templates;
+
     /* Cluster atomic slot migration buffers. */
     mh->asm_import_input_buffer = asmGetImportInputBufferSize();
     mh->asm_migrate_output_buffer = asmGetMigrateOutputMemoryUsage();
@@ -1758,11 +1760,8 @@ NULL
     } else if (!strcasecmp(c->argv[1]->ptr,"encoding") && c->argc == 3) {
         if ((kv = kvobjCommandLookupOrReply(c, c->argv[2], shared.null[c->resp]))
                 == NULL) return;
-        /* When hash_min_template_entries > 0, regular hashes get auto-converted
-         * to template encoding. Mask that here so the existing test suite, which
-         * asserts on listpack/hashtable, keeps passing under that config.
-         * TODO: Remove before merge. */
-        if (server.hash_min_template_entries > 0 &&
+        /* Mask shim (remove before merge): report legacy encoding name. */
+        if (server.hash_template_mask_encoding &&
             (kv->encoding == OBJ_ENCODING_TMPL_LP ||
              kv->encoding == OBJ_ENCODING_TMPL_ARRAY))
             addReplyBulkCString(c, hashTemplateEquivalentEncoding(kv));
@@ -1843,7 +1842,7 @@ NULL
     } else if (!strcasecmp(c->argv[1]->ptr,"stats") && c->argc == 2) {
         struct redisMemOverhead *mh = getMemoryOverheadData();
 
-        addReplyMapLen(c,35+mh->num_dbs);
+        addReplyMapLen(c,36+mh->num_dbs);
 
         addReplyBulkCString(c,"peak.allocated");
         addReplyLongLong(c,mh->peak_allocated);
@@ -1886,6 +1885,9 @@ NULL
 
         addReplyBulkCString(c,"script.VMs");
         addReplyLongLong(c,mh->script_vm);
+
+        addReplyBulkCString(c,"hash.templates");
+        addReplyLongLong(c,mh->hash_templates);
 
         for (size_t j = 0; j < mh->num_dbs; j++) {
             char dbname[32];
