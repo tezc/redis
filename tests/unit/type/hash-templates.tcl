@@ -1924,18 +1924,23 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
 # to a template encoding when that config is enabled (> 0).
 start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
               overrides {hash-min-template-entries 0 hash-max-listpack-entries 64 appendonly no}} {
-    # "small" stays listpack (<= hash-max-listpack-entries), "big" is hashtable.
-    test {hash-min-template-entries=0: restart keeps plain hashes unconverted} {
+    # Negative control: with hash-rdb-load-min-template-entries at its default
+    # (0 = off), an RDB load must create NO templates. Guards the "min == 0 still
+    # converts" sentinel regression, and pairs with the next test (config > 0 =>
+    # converts). ("small" is listpack <= hash-max-listpack-entries, "big" is
+    # hashtable.)
+    test {load-time conversion off (default): RDB load creates no templates} {
         r flushall
+        assert_equal 0 [lindex [r config get hash-rdb-load-min-template-entries] 1]
         for {set i 0} {$i < 5}   {incr i} { r hset small f$i v$i }
         for {set i 0} {$i < 200} {incr i} { r hset big f$i v$i }
         assert_equal listpack  [r object encoding small]
         assert_equal hashtable [r object encoding big]
         r save
         restart_server 0 true false
+        assert_equal 0 [s hash_templates]   ;# the guard: nothing was converted on load
         assert_equal listpack  [r object encoding small]
         assert_equal hashtable [r object encoding big]
-        assert_equal 0 [s hash_templates]
         assert_equal v3   [r hget small f3]
         assert_equal v100 [r hget big f100]
     }
@@ -1960,7 +1965,7 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
         assert_equal v100 [r hget big f100]
     }
 
-    test {RESTORE ignores hash-rdb-load configs and loads the payload verbatim} {
+    test {RESTORE ignores hash-rdb-load configs} {
         # The rdb-load conversion configs apply only to bulk RDB load (the
         # restart test above), never to RESTORE. A plain dumped hash must come
         # back plain even with the rdb-load config enabled.
