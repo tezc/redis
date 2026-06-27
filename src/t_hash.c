@@ -582,18 +582,18 @@ hashTemplate *hashTemplateGetOrCreateWithHash(uint64_t hash, sds *fields,
     return tmpl;
 }
 
-/* Increment key_refcount (called when creating a hash key). Always on the main
- * thread, but the counter is atomic because a BIO lazyfree thread may decrement
- * a (different key of the) same template concurrently. */
+/* Increment key_refcount (called when creating a hash key). Runs under the GIL
+ * (the main thread, or a module thread-safe context holding the GIL), but the
+ * counter is atomic because a BIO lazyfree thread may decrement a (different key
+ * of the) same template concurrently. */
 void hashTemplateIncrKeyRef(hashTemplate *tmpl) {
-    debugServerAssert(pthread_equal(pthread_self(), server.main_thread_id));
     atomicIncr(tmpl->key_refcount, 1);
     atomicIncr(htemplates->total_key_refs, 1);
 }
 
-/* Increment hold_refcount while non-key state references the template. */
+/* Increment hold_refcount while non-key state references the template. Runs
+ * under the GIL, so hold_refcount needs no lock. */
 void hashTemplateIncrHoldRef(hashTemplate *tmpl) {
-    debugServerAssert(pthread_equal(pthread_self(), server.main_thread_id));
     tmpl->hold_refcount++;
 }
 
@@ -612,11 +612,10 @@ static void hashTemplateEnqueuePendingFree(uint64_t id) {
 }
 
 /* Release one non-key holder of the template (a client's prepared fieldset, an
- * in-progress RDB load, or the HSETC cache). Main-thread only, so hold_refcount
+ * in-progress RDB load, or the HSETC cache). Runs under the GIL, so hold_refcount
  * and propargv need no lock. When the last holder leaves, drop the cached
  * propagation argv; and if no keys reference the template either, free it now. */
 void hashTemplateDecrHoldRef(hashTemplate *tmpl) {
-    debugServerAssert(pthread_equal(pthread_self(), server.main_thread_id));
     serverAssert(tmpl->hold_refcount > 0);
     tmpl->hold_refcount--;
     if (tmpl->hold_refcount > 0) return;
