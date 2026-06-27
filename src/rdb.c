@@ -1956,13 +1956,29 @@ static void rdbFreeSdsArray(sds *v, uint64_t count) {
 
 /* Load 'count' SDS strings into a fresh array; NULL on failure ('ctx' names it). */
 static sds *rdbLoadSdsArray(rio *rdb, uint64_t count, const char *ctx) {
-    sds *v = rdbTryAllocSdsArray(count);
-    if (v == NULL) {
-        rdbReportCorruptRDB("%s field count %llu too large",
-            ctx, (unsigned long long)count);
-        return NULL;
-    }
+    /* Grow the array as strings are read rather than pre-sizing it to 'count'.
+     * 'count' often comes straight from the payload, and a corrupt value (e.g.
+     * 2^32-1) would otherwise reserve gigabytes up front - which can OOM the
+     * process under memory overcommit before any data is read - even though the
+     * payload only holds a handful of entries. Growing on demand bounds the
+     * allocation to the data actually present; a bogus count just runs out of
+     * input and is rejected. */
+    sds *v = NULL;
+    uint64_t cap = 0;
     for (uint64_t i = 0; i < count; i++) {
+        if (i == cap) {
+            uint64_t newcap = cap ? cap * 2 : 16;
+            if (newcap > count) newcap = count;
+            sds *nv = ztryrealloc(v, sizeof(sds) * newcap);
+            if (nv == NULL) {
+                rdbReportCorruptRDB("%s field count %llu too large",
+                    ctx, (unsigned long long)count);
+                rdbFreeSdsArray(v, i);
+                return NULL;
+            }
+            v = nv;
+            cap = newcap;
+        }
         v[i] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
         if (v[i] == NULL) {
             rdbFreeSdsArray(v, i);
@@ -2050,23 +2066,11 @@ int rdbLoadHashTemplates(rio *rdb) {
         return C_ERR;
     }
 
-    /* Allocate fields array. */
-    sds *fields = rdbTryAllocSdsArray(field_count);
-    if (fields == NULL) {
-        rdbReportCorruptRDB("Hash template field count %llu too large",
-            (unsigned long long)field_count);
-        return C_ERR;
-    }
-
-    /* Read each field name. */
-    for (uint64_t j = 0; j < field_count; j++) {
-        fields[j] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
-        if (fields[j] == NULL) {
-            for (uint64_t k = 0; k < j; k++) sdsfree(fields[k]);
-            zfree(fields);
-            return C_ERR;
-        }
-    }
+    /* Read each field name. The array grows as names are read (see
+     * rdbLoadSdsArray) so an untrusted field_count can't reserve gigabytes
+     * before any data is read. */
+    sds *fields = rdbLoadSdsArray(rdb, field_count, "Hash template");
+    if (fields == NULL) return C_ERR;
 
     /* Reject unsorted/duplicate fields; the template field lookup assumes them. */
     if (!hashTemplateValidateFields(fields, field_count)) {
@@ -3216,19 +3220,30 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         if (len == RDB_LENERR) return NULL;
         if (len == 0) goto emptykey;
 
-        sds *fields = rdbTryAllocSdsArray(len);
-        sds *values = rdbTryAllocSdsArray(len);
-        if (fields == NULL || values == NULL) {
-            rdbReportCorruptRDB("template-array field count %llu too large",
-                (unsigned long long)len);
-            zfree(fields);
-            zfree(values);
-            return NULL;
-        }
-
-        /* Load all interleaved field-value pairs. */
-        uint64_t loaded = 0;
+        /* Grow the arrays as pairs are read rather than pre-sizing them to
+         * 'len': 'len' is untrusted and a corrupt value (e.g. 2^32-1) would
+         * otherwise reserve gigabytes up front, OOMing the process under memory
+         * overcommit before any data is read. Growing on demand bounds the
+         * allocation to the pairs actually present. */
+        sds *fields = NULL, *values = NULL;
+        uint64_t cap = 0, loaded = 0;
         for (; loaded < len; loaded++) {
+            if (loaded == cap) {
+                uint64_t newcap = cap ? cap * 2 : 16;
+                if (newcap > len) newcap = len;
+                sds *nf = ztryrealloc(fields, sizeof(sds) * newcap);
+                sds *nv = ztryrealloc(values, sizeof(sds) * newcap);
+                if (nf) fields = nf;
+                if (nv) values = nv;
+                if (nf == NULL || nv == NULL) {
+                    rdbReportCorruptRDB("template-array field count %llu too large",
+                        (unsigned long long)len);
+                    rdbFreeSdsArray(fields, loaded);
+                    rdbFreeSdsArray(values, loaded);
+                    return NULL;
+                }
+                cap = newcap;
+            }
             fields[loaded] = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
             if (fields[loaded] == NULL) {
                 rdbFreeSdsArray(fields, loaded);
