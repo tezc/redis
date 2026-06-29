@@ -1018,8 +1018,11 @@ int hashTypeCanCreateTmplLp(unsigned long long count, sds *values) {
 robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values, int take) {
     robj *o;
 
-    /* TMPL_LP requires both fields and values to fit in listpack. */
-    if (tmpl->can_use_lp && hashTypeCanCreateTmplLp(tmpl->field_count, values)) {
+    /* The encoding depends only on whether the VALUES fit a listpack: the field
+     * names live in the shared template, not in the value listpack, so whether
+     * they fit lp (tmpl->can_use_lp) is irrelevant here. can_use_lp only decides
+     * how DUMP serializes the field names (one lp blob vs one-by-one). */
+    if (hashTypeCanCreateTmplLp(tmpl->field_count, values)) {
         o = createObject(OBJ_HASH, hashTemplateLpCreate(tmpl, values));
         o->encoding = OBJ_ENCODING_TMPL_LP;
         /* The listpack copied the value bytes; if we own them, free them now. */
@@ -1906,12 +1909,6 @@ int hashTypeSet(redisDb *db, kvobj *o, sds field, sds value, int flags) {
         hashTemplateIncrKeyRef(new_tmpl);
         if (new_fields != stack_fields) zfree(new_fields);
 
-        /* Rare: HSET adds a huge field, new template's fields don't fit in LP.
-         * Convert to avoid DUMP-time overflow (fields are serialized as LP blob). */
-        if (o->encoding == OBJ_ENCODING_TMPL_LP && !new_tmpl->can_use_lp) {
-            hashTypeConvert(NULL, o, OBJ_ENCODING_TMPL_ARRAY);
-        }
-
         /* Insert value at insert_pos in existing structure. */
         if (o->encoding == OBJ_ENCODING_TMPL_LP) {
             unsigned char *lp = o->ptr;
@@ -2254,11 +2251,6 @@ int hashTypeDelete(robj *o, void *field) {
                 hashTemplate *new_tmpl = hashTemplateGetOrCreateWithHash(
                     new_hash, new_fields, new_count);
                 hashTemplateIncrKeyRef(new_tmpl);
-
-                /* Rare: new template's fields don't fit in LP. Convert to avoid DUMP overflow. */
-                if (o->encoding == OBJ_ENCODING_TMPL_LP && !new_tmpl->can_use_lp) {
-                    hashTypeConvert(NULL, o, OBJ_ENCODING_TMPL_ARRAY);
-                }
 
                 if (o->encoding == OBJ_ENCODING_TMPL_LP) {
                     /* Delete value at idx (index 0 is template ID). */
@@ -3270,18 +3262,22 @@ int hashTypeTryConvertToTemplate(robj *o,
         tmpl = hashTemplateGetOrCreate(fields, num_fields);
     }
 
+    /* The target encoding depends only on whether the VALUES fit a listpack,
+     * not on the source encoding: a hash may be HT because a FIELD name is too
+     * big for a listpack, yet still take the compact TMPL_LP value encoding when
+     * its values fit (field names live in the shared template, not the value
+     * listpack). */
+    int src_is_lp = (o->encoding == OBJ_ENCODING_LISTPACK);
     int took_values; /* TMPL_ARRAY takes ownership of values; TMPL_LP copies. */
-    if (o->encoding == OBJ_ENCODING_LISTPACK) {
-        /* LP → TMPL_LP */
+    if (hashTypeCanCreateTmplLp(num_fields, values)) {
         unsigned char *new_lp = hashTemplateLpCreate(tmpl, values);
-        zfree(o->ptr);
+        if (src_is_lp) zfree(o->ptr); else dictRelease(o->ptr);
         o->ptr = new_lp;
         o->encoding = OBJ_ENCODING_TMPL_LP;
         took_values = 0;
     } else {
-        /* HT → TMPL_ARRAY */
         hashTemplateArray *hta = hashTemplateArrayCreate(tmpl, values, 1);
-        dictRelease(o->ptr);
+        if (src_is_lp) zfree(o->ptr); else dictRelease(o->ptr);
         o->ptr = hta;
         o->encoding = OBJ_ENCODING_TMPL_ARRAY;
         took_values = 1;
@@ -4058,6 +4054,10 @@ void himportPrepareCommand(client *c) {
     addReply(c, shared.ok);
 }
 
+/* Build a DUMP payload (defined in cluster.c) - used by the experimental
+ * himport-propagate-restore path below. */
+void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int skip_checksum, size_t size_hint);
+
 /* HIMPORT SET <key> <fieldset> <value1> [value2 ...]
  *
  * Create a hash from a fieldset prepared earlier (HIMPORT PREPARE): the values
@@ -4105,6 +4105,25 @@ void himportSetCommand(client *c) {
 
     robj *o = createHashObjectFromTemplate(tmpl, values, /*take*/ 0);
 
+    /* EXPERIMENT (himport-propagate-restore): build the self-contained RESTORE
+     * payload from 'o' BEFORE setKey, which may consume 'o' into a kvobj and
+     * leave the standalone pointer dangling. CRC-less + compression-less. */
+    robj *restore_pl = NULL;
+    if (server.himport_propagate_restore && !server.himport_propagate_compact) {
+        /* Size the payload buffer up front so createDumpPayload allocates once.
+         * mem_size accounts for the field names (+overhead); doubling it is a
+         * cheap O(1) ballpark for fields + values that avoids reallocs for typical
+         * records (it may under-shoot only when values are far larger than the
+         * field names, which still beats growing from empty). */
+        size_t hint = tmpl->mem_size * 2;
+        rio payload;
+        int oldcomp = server.rdb_compression;
+        server.rdb_compression = 0;
+        createDumpPayload(&payload, o, c->argv[2], c->db->id, /*skip_checksum*/ 1, hint);
+        server.rdb_compression = oldcomp;
+        restore_pl = createObject(OBJ_STRING, payload.io.buffer.ptr); /* takes sds */
+    }
+
     /* Set key (overwrites existing key of any type). */
     setKey(c, c->db, c->argv[2], &o, 0);
 
@@ -4114,8 +4133,33 @@ void himportSetCommand(client *c) {
                                    fields_robj, (int) field_count);
     server.dirty++;
 
-    /* Propagate as HSETC. */
-    alsoPropagate(c->db->id, propargv, 2 + field_count * 2, PROPAGATE_AOF | PROPAGATE_REPL);
+    if (server.himport_propagate_compact) {
+        /* EXPERIMENT (throughput): propagate HSETC <key> <v1..vN> - values only,
+         * no field names. The replica binds them to a fixed process-wide template
+         * (see hsetcCommand). ~half the bytes; replica does no template lookup. */
+        int cargc = 2 + (int)field_count;
+        robj **cargv = zmalloc(sizeof(robj *) * cargc);
+        cargv[0] = propargv[0];   /* HSETC */
+        cargv[1] = c->argv[2];    /* key */
+        for (unsigned long long i = 0; i < field_count; i++)
+            cargv[2 + i] = propargv[2 + field_count + i]; /* values only */
+        alsoPropagate(c->db->id, cargv, cargc, PROPAGATE_AOF | PROPAGATE_REPL);
+        zfree(cargv);
+    } else if (restore_pl) {
+        /* Propagate as self-contained RESTORE <key> 0 <payload> REPLACE. */
+        static robj *r_restore = NULL, *r_zero = NULL, *r_replace = NULL;
+        if (!r_restore) {
+            r_restore = createStringObject("RESTORE", 7);
+            r_zero = createStringObject("0", 1);
+            r_replace = createStringObject("REPLACE", 7);
+        }
+        robj *rargv[5] = { r_restore, c->argv[2], r_zero, restore_pl, r_replace };
+        alsoPropagate(c->db->id, rargv, 5, PROPAGATE_AOF | PROPAGATE_REPL);
+        decrRefCount(restore_pl);
+    } else {
+        /* Propagate as HSETC. */
+        alsoPropagate(c->db->id, propargv, 2 + field_count * 2, PROPAGATE_AOF | PROPAGATE_REPL);
+    }
 
     /* Free heap-allocated values buffer if used. */
     if (values != stack_values) zfree(values);
@@ -4162,7 +4206,46 @@ static int hsetcCacheMatch(hashTemplate *tmpl, client *c, unsigned long long fie
  * builds the value object and overwrites key in one shot. The per-client
  * hsetc_cache fast-paths the common case where consecutive calls share the same
  * field set. */
+/* sdscmplen comparator for qsort, used to sort the fixed compact-mode schema. */
+static int hsetcCompactFieldCmp(const void *a, const void *b) {
+    return sdscmplen(*(const sds *)a, *(const sds *)b);
+}
+
 void hsetcCommand(client *c) {
+    if (server.himport_propagate_compact) {
+        /* EXPERIMENT (throughput only): compact propagation. argv is
+         * [HSETC, key, v1..vN] with NO field names. Bind the values to a
+         * process-wide template built once from a fixed 16-field schema, held
+         * by pointer so there is no per-key lookup or field match. Assumes the
+         * value count matches the schema; correctness is not the point here. */
+        static hashTemplate *compact_tmpl = NULL;
+        if (compact_tmpl == NULL) {
+            static const char *fnames[] = {
+                "username","email","password","created_at","updated_at",
+                "first_name","last_name","phone_number","address","city",
+                "country","postal_code","date_of_birth","last_login","is_active"};
+            int n = sizeof(fnames) / sizeof(fnames[0]);
+            sds f[15];
+            for (int i = 0; i < n; i++) f[i] = sdsnew(fnames[i]);
+            qsort(f, n, sizeof(sds), hsetcCompactFieldCmp);
+            compact_tmpl = hashTemplateGetOrCreate(f, n);
+            hashTemplateIncrHoldRef(compact_tmpl); /* keep alive for the run */
+            for (int i = 0; i < n; i++) sdsfree(f[i]);
+        }
+        unsigned long long field_count = compact_tmpl->field_count;
+        sds stack_values[HASH_TMPL_STACK_ENTRIES];
+        sds *values = (field_count <= HASH_TMPL_STACK_ENTRIES) ?
+                      stack_values : zmalloc(sizeof(sds) * field_count);
+        for (unsigned long long i = 0; i < field_count; i++)
+            values[i] = c->argv[2 + i]->ptr;
+        robj *o = createHashObjectFromTemplate(compact_tmpl, values, /*take*/ 0);
+        if (values != stack_values) zfree(values);
+        setKey(c, c->db, c->argv[1], &o, 0);
+        server.dirty++;
+        addReply(c, shared.ok);
+        return;
+    }
+
     if (c->argc < 4 || (c->argc % 2) != 0) {
         addReplyErrorArity(c);
         return;

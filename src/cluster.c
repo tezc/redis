@@ -86,13 +86,24 @@ ConnectionType *connTypeOfCluster(void) {
 
 /* Generates a DUMP-format representation of the object 'o', adding it to the
  * io stream pointed by 'rio'. This function can't fail. */
-void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int skip_checksum) {
+void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int skip_checksum, size_t size_hint) {
     unsigned char buf[2];
     uint64_t crc = 0;
 
     /* Serialize the object in an RDB-like format. It consist of an object type
-     * byte followed by the serialized object. This is understood by RESTORE. */
-    rioInitWithBuffer(payload,sdsempty());
+     * byte followed by the serialized object. This is understood by RESTORE.
+     * 'size_hint', when non-zero, sizes the buffer to the caller's estimate of
+     * the payload in a single allocation (no sdsempty()+grow churn), avoiding
+     * reallocations while it is built. */
+    sds buffer;
+    if (size_hint) {
+        buffer = sdsnewlen(SDS_NOINIT, size_hint); /* one alloc, capacity = hint */
+        sdssetlen(buffer, 0);                       /* reset to empty; capacity kept */
+        buffer[0] = '\0';
+    } else {
+        buffer = sdsempty();
+    }
+    rioInitWithBuffer(payload,buffer);
 
     /* Save key metadata if present without (handles TTL separately via command args) */
     if (getModuleMetaBits(o->metabits))
@@ -172,7 +183,7 @@ void dumpCommand(client *c) {
     }
 
     /* Create the DUMP encoded representation. */
-    createDumpPayload(&payload,o,c->argv[1],c->db->id,0);
+    createDumpPayload(&payload,o,c->argv[1],c->db->id,0,0);
 
     /* Transfer to the client */
     addReplyBulkSds(c,payload.io.buffer.ptr);
@@ -612,7 +623,7 @@ void migrateCommand(client *c) {
 
         /* Emit the payload argument, that is the serialized object using
          * the DUMP format. */
-        createDumpPayload(&payload,kvArray[j],keyArray[j],dbid,0);
+        createDumpPayload(&payload,kvArray[j],keyArray[j],dbid,0,0);
         serverAssertWithInfo(c,NULL,
                              rioWriteBulkString(&cmd,payload.io.buffer.ptr,
                                                 sdslen(payload.io.buffer.ptr)));

@@ -2526,6 +2526,13 @@ struct redisServer {
                                       * template-encoded hashes instead of
                                       * template-*, so the existing hash test
                                       * suite passes with templates enabled. */
+    int himport_propagate_restore;   /* EXPERIMENT: when set, HIMPORT SET propagates
+                                      * a self-contained RESTORE ... REPLACE (CRC-less,
+                                      * compression-less) instead of fat HSETC. */
+    int himport_propagate_compact;   /* EXPERIMENT (throughput only): when set, HIMPORT
+                                      * SET propagates HSETC <key> <v1..vN> (values only,
+                                      * no field names); the replica binds them to a
+                                      * process-wide template built once, no lookup. */
 
     struct hashTemplates *htemplates;   /* Global template registry */
     size_t set_max_intset_entries;

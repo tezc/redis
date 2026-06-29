@@ -1517,26 +1517,25 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
 
     # TMPL_LP -> TMPL_ARRAY auto-convert when template switch causes LP overflow
     # Rare scenario: HSET adds field, new template's fields don't fit in listpack blob
-    test {HSET converts TMPL_LP to TMPL_ARRAY if new template fields exceed LP limits} {
+    test {HSET encoding is value-driven: huge field NAMES no longer force TMPL_ARRAY} {
         r flushall
         wait_tmpl_drain
 
-        # Create TMPL_LP hash with small field names
+        # Small field names + small values -> TMPL_LP
         r hset k1 a 1 b 2 c 3
         assert_encoding template-listpack k1
 
-        # Create a template with a huge field name (>512 bytes)
-        # This template will have can_use_lp=0 because field name exceeds limits
+        # A huge field NAME does NOT force TMPL_ARRAY: the value listpack stores
+        # values, not field names, so with small values the key stays TMPL_LP.
+        # (Field names live in the shared template; whether they fit a listpack
+        # only affects how DUMP serializes them, not the runtime encoding.)
         set huge_field [string repeat "x" 600]
         r hset huge_tmpl $huge_field 1 y 2
-        assert_encoding template-array huge_tmpl
+        assert_encoding template-listpack huge_tmpl
 
-        # Now add the huge field to k1 -> template switch -> new template has can_use_lp=0
-        # Should auto-convert k1 from TMPL_LP to TMPL_ARRAY
+        # Adding the huge field to k1 keeps it TMPL_LP (values are still small).
         r hset k1 $huge_field 4
-
-        # Verify conversion happened
-        assert_encoding template-array k1
+        assert_encoding template-listpack k1
         assert_equal 4 [r hlen k1]
         assert_equal 1 [r hget k1 a]
         assert_equal 4 [r hget k1 $huge_field]
