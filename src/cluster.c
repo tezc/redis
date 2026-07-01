@@ -233,7 +233,12 @@ void restoreCommand(client *c) {
 
     /* Make sure this key does not already exist here... */
     robj *key = c->argv[1];
-    kvobj *oldval = lookupKeyWrite(c->db,key);
+    /* Capture the keyspace insertion link in the same probe as the existence
+     * check, so the add below reuses it instead of traversing the dict a second
+     * time (matches the master HIMPORT SET setKeyByLink path). The link stays
+     * valid across rdbLoadObject because that does not mutate db->keys. */
+    dictEntryLink link = NULL;
+    kvobj *oldval = lookupKeyWriteWithLink(c->db, key, &link);
     int oldtype = oldval ? oldval->type : -1;
     if (!replace && oldval) {
         addReplyErrorObject(c,shared.busykeyerr);
@@ -282,10 +287,16 @@ void restoreCommand(client *c) {
         return;
     }
 
-    /* Remove the old key if needed. */
+    /* Remove the old key if needed. We already know whether the key exists from
+     * the lookupKeyWrite above, so skip the delete probe entirely when it does
+     * not: dbDelete on an absent key still traverses the keyspace dict, which is
+     * pure waste on the common RESTORE-new-key path (e.g. replicated RESTORE
+     * REPLACE of unique keys) and is amplified during incremental rehash. */
     int deleted = 0;
-    if (replace)
+    if (replace && oldval) {
         deleted = dbDelete(c->db,key);
+        link = NULL; /* dbDelete invalidated the link; let dbAddInternal recompute */
+    }
 
     if (ttl && checkAlreadyExpired(ttl)) {
         if (deleted) {
@@ -303,8 +314,9 @@ void restoreCommand(client *c) {
         return;
     }
 
-    /* Create the key and set the TTL if any */
-    kvobj *kv = dbAddInternal(c->db, key, &obj, NULL, &keymeta);
+    /* Create the key and set the TTL if any. Reuse the link from the existence
+     * probe above (NULL if the key existed and was just deleted -> recompute). */
+    kvobj *kv = dbAddInternal(c->db, key, &obj, &link, &keymeta);
 
     /* Save type: kv may be reallocated by module callbacks during notifyKeyspaceEvent below. */
     int kvtype = kv->type;
