@@ -233,14 +233,7 @@ void restoreCommand(client *c) {
 
     /* Make sure this key does not already exist here... */
     robj *key = c->argv[1];
-    /* Capture the keyspace insertion link in the same probe as the existence
-     * check, so the add below reuses it instead of traversing the dict a second
-     * time (matches the master HIMPORT SET setKeyByLink path). The link stays
-     * valid across rdbLoadObject because that does not mutate db->keys. */
-    dictEntryLink link = NULL;
-    kvobj *oldval = lookupKeyWriteWithLink(c->db, key, &link);
-    int oldtype = oldval ? oldval->type : -1;
-    if (!replace && oldval) {
+    if (!replace && lookupKeyWrite(c->db,key) != NULL) {
         addReplyErrorObject(c,shared.busykeyerr);
         return;
     }
@@ -287,15 +280,20 @@ void restoreCommand(client *c) {
         return;
     }
 
-    /* Remove the old key if needed. We already know whether the key exists from
-     * the lookupKeyWrite above, so skip the delete probe entirely when it does
-     * not: dbDelete on an absent key still traverses the keyspace dict, which is
-     * pure waste on the common RESTORE-new-key path (e.g. replicated RESTORE
-     * REPLACE of unique keys) and is amplified during incremental rehash. */
+    /* Resolve the key's existence and its insertion link. On the common new-key
+     * path dbAddInternal() below reuses the link instead of probing again. */
+    dictEntryLink link = NULL;
+    kvobj *oldval = lookupKeyWriteWithLink(c->db, key, &link);
+    int oldtype = oldval ? oldval->type : -1;
+
+    /* Call dbDelete() only when a key is actually present:
+     *   oldval != NULL -> key exists.
+     *   link  == NULL  -> an expired key might still be physically present and
+     *                     must be deleted. */
     int deleted = 0;
-    if (replace && oldval) {
+    if (oldval || !link) {
         deleted = dbDelete(c->db,key);
-        link = NULL; /* dbDelete invalidated the link; let dbAddInternal recompute */
+        link = NULL; /* dbDelete invalidated the link */
     }
 
     if (ttl && checkAlreadyExpired(ttl)) {
@@ -314,8 +312,7 @@ void restoreCommand(client *c) {
         return;
     }
 
-    /* Create the key and set the TTL if any. Reuse the link from the existence
-     * probe above (NULL if the key existed and was just deleted -> recompute). */
+    /* Create the key and set the TTL if any */
     kvobj *kv = dbAddInternal(c->db, key, &obj, &link, &keymeta);
 
     /* Save type: kv may be reallocated by module callbacks during notifyKeyspaceEvent below. */
