@@ -321,6 +321,45 @@ start_server {tags {"dump"}} {
         }
     } {} {external:skip}
 
+    test {MIGRATE can correctly transfer template-encoded hashes} {
+        set first [srv 0 client]
+        r flushdb
+        r config set hash-min-template-entries 0
+        r himport prepare fieldset1 name email age
+        r himport set lp_key fieldset1 alice alice@example.com 25
+        r himport prepare fieldset2 f1 f2 f3
+        r himport set array_key fieldset2 v1 [string repeat x 100] v3
+        # A long field name keeps the field NAMES out of a listpack (FIELDS_RAW dump
+        # form) while the small values still fit (template-listpack value encoding).
+        r himport prepare fieldset3 f0 f1 [string repeat n 70]
+        r himport set raw_key fieldset3 v1 v2 v3
+        start_server {tags {"repl"}} {
+            set second [srv 0 client]
+            set second_host [srv 0 host]
+            set second_port [srv 0 port]
+            $second config set hash-min-template-entries 0
+
+            set ret [r -1 migrate $second_host $second_port "" 9 10000 keys lp_key array_key raw_key]
+            assert {$ret eq {OK}}
+            assert {[$first exists lp_key] == 0}
+            assert {[$first exists array_key] == 0}
+            assert {[$first exists raw_key] == 0}
+
+            # verify keys are migrated with the correct content and encoding
+            assert_equal {age 25 name alice email alice@example.com} [$second hgetall lp_key]
+            assert_equal "f1 v1 f2 [string repeat x 100] f3 v3" [$second hgetall array_key]
+            assert_equal "f0 v1 f1 v2 [string repeat n 70] v3" [$second hgetall raw_key]
+            assert_equal {template-listpack} [$second object encoding lp_key]
+            assert_equal {template-array} [$second object encoding array_key]
+            assert_equal {template-listpack} [$second object encoding raw_key]
+
+            # The three distinct field sets must rebuild as three templates holding
+            # one key each on the destination registry.
+            assert_equal 3 [status $second hash_templates]
+            assert_equal 3 [status $second hash_template_keys]
+        }
+    } {} {external:skip}
+
     test {MIGRATE timeout actually works} {
         set first [srv 0 client]
         r set key "Some Value"

@@ -86,13 +86,23 @@ ConnectionType *connTypeOfCluster(void) {
 
 /* Generates a DUMP-format representation of the object 'o', adding it to the
  * io stream pointed by 'rio'. This function can't fail. */
-void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int skip_checksum) {
+void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int skip_checksum, size_t size_hint) {
     unsigned char buf[2];
     uint64_t crc = 0;
 
     /* Serialize the object in an RDB-like format. It consist of an object type
-     * byte followed by the serialized object. This is understood by RESTORE. */
-    rioInitWithBuffer(payload,sdsempty());
+     * byte followed by the serialized object. This is understood by RESTORE.
+     * 'size_hint', when non-zero, sizes the buffer to the caller's estimate of
+     * the payload in a single allocation to avoid reallocations. */
+    sds buffer;
+    if (size_hint) {
+        buffer = sdsnewlen(SDS_NOINIT, size_hint);
+        sdssetlen(buffer, 0);
+        buffer[0] = '\0';
+    } else {
+        buffer = sdsempty();
+    }
+    rioInitWithBuffer(payload,buffer);
 
     /* Save key metadata if present without (handles TTL separately via command args) */
     if (getModuleMetaBits(o->metabits))
@@ -121,6 +131,17 @@ void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int skip_chec
         memrev64ifbe(&crc);
     }
     payload->io.buffer.ptr = sdscatlen(payload->io.buffer.ptr,&crc,8);
+}
+
+/* CRC-less, compression-less DUMP payload for RESTORE; returns an sds the caller
+ * owns. size_hint (if nonzero) presizes the buffer. */
+sds createRawDumpPayload(robj *o, robj *key, int dbid, size_t size_hint) {
+    rio payload;
+    int oldcomp = server.rdb_compression;
+    server.rdb_compression = 0;
+    createDumpPayload(&payload, o, key, dbid, 1, size_hint);
+    server.rdb_compression = oldcomp;
+    return payload.io.buffer.ptr;
 }
 
 /* Verify that the RDB version of the dump payload matches the one of this Redis
@@ -172,7 +193,7 @@ void dumpCommand(client *c) {
     }
 
     /* Create the DUMP encoded representation. */
-    createDumpPayload(&payload,o,c->argv[1],c->db->id,0);
+    createDumpPayload(&payload,o,c->argv[1],c->db->id,0,0);
 
     /* Transfer to the client */
     addReplyBulkSds(c,payload.io.buffer.ptr);
@@ -222,9 +243,7 @@ void restoreCommand(client *c) {
 
     /* Make sure this key does not already exist here... */
     robj *key = c->argv[1];
-    kvobj *oldval = lookupKeyWrite(c->db,key);
-    int oldtype = oldval ? oldval->type : -1;
-    if (!replace && oldval) {
+    if (!replace && lookupKeyWrite(c->db,key) != NULL) {
         addReplyErrorObject(c,shared.busykeyerr);
         return;
     }
@@ -271,10 +290,21 @@ void restoreCommand(client *c) {
         return;
     }
 
-    /* Remove the old key if needed. */
+    /* Resolve the key's existence and its insertion link. On the common new-key
+     * path dbAddInternal() below reuses the link instead of probing again. */
+    dictEntryLink link = NULL;
+    kvobj *oldval = lookupKeyWriteWithLink(c->db, key, &link);
+    int oldtype = oldval ? oldval->type : -1;
+
+    /* Call dbDelete() only when a key is actually present:
+     *   oldval != NULL -> key exists.
+     *   link  == NULL  -> an expired key might still be physically present and
+     *                     must be deleted. */
     int deleted = 0;
-    if (replace)
+    if (oldval || !link) {
         deleted = dbDelete(c->db,key);
+        link = NULL; /* dbDelete invalidated the link */
+    }
 
     if (ttl && checkAlreadyExpired(ttl)) {
         if (deleted) {
@@ -293,7 +323,7 @@ void restoreCommand(client *c) {
     }
 
     /* Create the key and set the TTL if any */
-    kvobj *kv = dbAddInternal(c->db, key, &obj, NULL, &keymeta);
+    kvobj *kv = dbAddInternal(c->db, key, &obj, &link, &keymeta);
 
     /* Save type: kv may be reallocated by module callbacks during notifyKeyspaceEvent below. */
     int kvtype = kv->type;
@@ -612,7 +642,7 @@ void migrateCommand(client *c) {
 
         /* Emit the payload argument, that is the serialized object using
          * the DUMP format. */
-        createDumpPayload(&payload,kvArray[j],keyArray[j],dbid,0);
+        createDumpPayload(&payload,kvArray[j],keyArray[j],dbid,0,0);
         serverAssertWithInfo(c,NULL,
                              rioWriteBulkString(&cmd,payload.io.buffer.ptr,
                                                 sdslen(payload.io.buffer.ptr)));
