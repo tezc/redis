@@ -3147,6 +3147,7 @@ int rdbLoadTemplateCtxTryConvert(rdbLoadTemplateCtx *ctx, robj *o) {
  * from the registry. */
 void rdbLoadTemplateCtxDisassemble(rdbLoadTemplateCtx *ctx) {
     if (ctx == NULL || ctx->reverse_lookup == NULL) return;
+    size_t disassembled_templates = 0, disassembled_keys = 0;
     dictIterator *di = dictGetIterator(ctx->reverse_lookup);
     dictEntry *de;
     while ((de = dictNext(di)) != NULL) {
@@ -3154,6 +3155,7 @@ void rdbLoadTemplateCtxDisassemble(rdbLoadTemplateCtx *ctx) {
         listIter li;
         listNode *ln;
         listRewind(l, &li);
+        int disassembled = 0;
         while ((ln = listNext(&li)) != NULL) {
             rdbLoadTemplateCtxKvRef *ref = listNodeValue(ln);
             kvobj *o = ref->kv;
@@ -3164,6 +3166,8 @@ void rdbLoadTemplateCtxDisassemble(rdbLoadTemplateCtx *ctx) {
                 hashTypeConvertTmplArray(o, OBJ_ENCODING_LISTPACK);
             else
                 continue;
+            disassembled_keys++;
+            disassembled = 1;
             /* dbAddRDBLoad recorded the compact TMPL size into the per-slot
              * allocation-size histogram; the in-place TMPL->LISTPACK conversion
              * above cannot reach updateSlotAllocSize, so fix the histogram here
@@ -3174,8 +3178,16 @@ void rdbLoadTemplateCtxDisassemble(rdbLoadTemplateCtx *ctx) {
                 updateSlotAllocSize(ref->db, getKeySlot(kvobjGetKey(o)), o,
                                     oldsize, kvobjAllocSize(o));
         }
+        disassembled_templates += disassembled;
     }
     dictReleaseIterator(di);
+    if (disassembled_templates) {
+        serverLog(LL_NOTICE,
+            "Hash template RDB load: disassembled %zu templates (%zu keys) back "
+            "to plain hashes; each held fewer than %zu keys "
+            "(due to hash-rdb-load-template-disassembly-threshold config).",
+            disassembled_templates, disassembled_keys, ctx->disassembly_threshold);
+    }
 }
 
 void rdbLoadTemplateCtxFree(rdbLoadTemplateCtx *ctx) {
