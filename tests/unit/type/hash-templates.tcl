@@ -1190,6 +1190,13 @@ start_server {tags {"hash" "repl" "needs:repl" "needs:debug" "cluster:skip" "ext
 
             # All 8 keys are identical in content on master and replica.
             assert_equal [$master debug digest] [$replica debug digest]
+
+            # Deleting keys removes the replica's only references to the templates
+            foreach k {rdb:lp_short_fields rdb:arr_short_fields rdb:lp_long_fields rdb:arr_long_fields
+                       str:lp_short_fields str:arr_short_fields str:lp_long_fields str:arr_long_fields} {
+                $master del $k
+            }
+            wait_num_templates 0 0
         }
     }
 }
@@ -1242,12 +1249,102 @@ start_server {tags {"hash" "repl" "needs:repl" "needs:debug" "cluster:skip" "ext
 }
 } ;# end foreach encoding
 
-# fields_lp blob memory accounting
+# HRANDFIELD batch optimization tests 
+start_server {tags {"hash" "cluster:skip"}} {
+    test {HRANDFIELD large count batching on TMPL_LP} {
+        # Test batch random sampling optimization (avoid O(count*n) lpSeek overhead).
+        r config set hash-min-template-entries 50
+
+        r del h1 h2
+        set fields {}
+        for {set i 0} {$i < 100} {incr i} {
+            lappend fields "f$i" "v$i"
+        }
+        # Two hashes with same fields -> triggers template
+        r hset h1 {*}$fields
+        r hset h2 {*}$fields
+
+        set enc [r object encoding h1]
+        assert_equal template-listpack $enc
+
+        # Large count with duplicates (negative count)
+        set result [r hrandfield h1 -500]
+        assert_equal [llength $result] 500
+
+        foreach field $result {
+            assert_match "f*" $field
+        }
+
+        # With WITHVALUES: each field "fN" must pair with its own value "vN"
+        # (regression for the O(1) value-pointer index that replaced per-draw lpSeek).
+        set result [r hrandfield h1 -300 WITHVALUES]
+        assert_equal [llength $result] 600
+        for {set i 0} {$i < 600} {incr i 2} {
+            set f [lindex $result $i]
+            set v [lindex $result [expr {$i + 1}]]
+            assert_match "f*" $f
+            assert_equal "v[string range $f 1 end]" $v
+        }
+    }
+
+    test {HRANDFIELD positive count WITHVALUES pairs correctly on TMPL_LP} {
+        # Positive count exercises the unique-index path (CASE 2.5b), which also
+        # collects value pointers in a single pass instead of per-draw lpSeek.
+        r config set hash-min-template-entries 50
+
+        r del h1 h2
+        set fields {}
+        for {set i 0} {$i < 100} {incr i} {
+            lappend fields "f$i" "v$i"
+        }
+        r hset h1 {*}$fields
+        r hset h2 {*}$fields
+        assert_equal template-listpack [r object encoding h1]
+
+        # 40 unique fields, each paired with its own value, no duplicates.
+        set result [r hrandfield h1 40 WITHVALUES]
+        assert_equal [llength $result] 80
+        set seen {}
+        for {set i 0} {$i < 80} {incr i 2} {
+            set f [lindex $result $i]
+            set v [lindex $result [expr {$i + 1}]]
+            assert_equal "v[string range $f 1 end]" $v
+            assert {[lsearch -exact $seen $f] == -1}
+            lappend seen $f
+        }
+    }
+
+    test {HRANDFIELD large count on TMPL_ARRAY} {
+        r config set hash-min-template-entries 50
+
+        r del big1 big2
+        set fields {}
+        # Use 600 fields to definitely exceed listpack limit
+        for {set i 0} {$i < 600} {incr i} {
+            lappend fields "field$i" "value$i"
+        }
+        r hset big1 {*}$fields
+        r hset big2 {*}$fields
+
+        set enc [r object encoding big1]
+        assert_equal template-array $enc
+
+        # TMPL_ARRAY uses simple loop (O(1) array access)
+        set result [r hrandfield big1 -1000]
+        assert_equal [llength $result] 1000
+
+        foreach field $result {
+            assert_match "field*" $field
+        }
+    }
+}
+
+# DUMP/RESTORE: fields_lp blob memory accounting
 start_server {tags {"hash" "needs:debug" "cluster:skip"}
               overrides {hash-min-template-entries 0}} {
     # The fields_lp blob depends only on the field names fitting a listpack, so it
     # is built for both value encodings: TMPL_LP (small values) and TMPL_ARRAY
-    # (values too large for a listpack). Field names are kept short either way.
+
     foreach {enc big_values} {template-listpack 0 template-array 1} {
         test "fields_lp blob memory is accounted, then reclaimed when idle ($enc)" {
             # Its bytes must be added to used_memory_hash_templates and, once the
@@ -1255,48 +1352,57 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
             r flushall
             r himport discardall
             wait_num_templates 0
+            # Field names must each be <= hash-max-listpack-value (64) for the blob
+            # to build, so a chunky blob needs many fields; raise the entries limit
+            # so the wide field set still fits a listpack (and the small-value case
+            # stays template-listpack).
+            set saved [lindex [r config get hash-max-listpack-entries] 1]
+            r config set hash-max-listpack-entries 512
 
-            # 8 field names, each <= hash-max-listpack-value (64) so the blob builds.
+            # 250 field names of ~60 bytes -> a fields_lp blob of ~15 KB.
+            set n 250
             set fields {}
-            foreach i {1 2 3 4 5 6 7 8} { lappend fields "f${i}[string repeat _ 50]" }
+            for {set i 0} {$i < $n} {incr i} { lappend fields "f${i}[string repeat _ 55]" }
             r himport prepare fs {*}$fields
             # Large values (> hash-max-listpack-value) force the TMPL_ARRAY encoding.
             if {$big_values} { set v [string repeat x 100] } else { set v v1 }
-            r himport set k fs $v $v $v $v $v $v $v $v
+            set vals {}
+            for {set i 0} {$i < $n} {incr i} { lappend vals $v }
+            r himport set k fs {*}$vals
             assert_encoding $enc k
 
-            r dump k ;# ensure the ~8*52-byte fields_lp blob exists
+            set dump1 [r dump k] ;# builds the ~15 KB fields_lp blob
             set with_blob [s used_memory_hash_templates]
 
             # Cron reclaims the idle blob after a few seconds; the accounted total
-            # must drop by roughly the blob size. A drop at all proves it was counted.
+            # must drop by ~the blob size. Require a >10 KB drop so this passes only
+            # if the (chunky) blob was really counted and then reclaimed.
             wait_for_condition 100 100 {
-                $with_blob - [s used_memory_hash_templates] > 200
+                $with_blob - [s used_memory_hash_templates] > 10240
             } else {
                 fail "fields_lp blob memory ($with_blob) was not reclaimed"
             }
+            # The next DUMP rebuilds the reclaimed blob; it must be byte-identical.
+            assert_equal $dump1 [r dump k]
+            r config set hash-max-listpack-entries $saved
         }
     }
 }
 
 # Tests under hash-min-template-entries=1.
-# In this mode plain HSET auto-converts to a template encoding.
+# In this mode plain HSET-alike commands auto-converts to a template encoding.
 start_server {tags {"hash" "needs:debug" "cluster:skip"}
               overrides {hash-min-template-entries 1}} {
 
-    # Template free is deferred to serverCron (every ~1s). After flushall,
-    # poll until the registry is fully drained so external-server runs see
-    # a clean baseline.
     test {HSET auto-converts to template encoding} {
         r flushall
         wait_num_templates 0
-        set t0 [s hash_templates]
-        set k0 [s hash_template_keys]
+
+        assert_equal 0 [s hash_templates]
+        assert_equal 0 [s hash_template_keys]
         r hset key1 a 1 b 2 c 3
-        set t1 [s hash_templates]
-        set k1 [s hash_template_keys]
-        assert {$t1 > $t0}
-        assert_equal [expr {$k1 - $k0}] 1
+        assert_equal 1 [s hash_templates]
+        assert_equal 1 [s hash_template_keys]
         assert_equal [r object encoding key1] "template-listpack"
         assert_match "*encoding:template-listpack*" [r debug object key1]
         assert_equal [r hgetall key1] {a 1 b 2 c 3}
@@ -1317,13 +1423,14 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
     test {large hash auto-converts to template-array} {
         r flushall
         wait_num_templates 0
-        # Force a low listpack threshold so the template uses the array variant
-        # deterministically regardless of test defaults.
+
         set saved [lindex [r config get hash-max-listpack-entries] 1]
         r config set hash-max-listpack-entries 16
+        
         set pairs {}
         for {set i 0} {$i < 32} {incr i} { lappend pairs "f$i" "v$i" }
         r hset big:1 {*}$pairs
+
         assert_equal [r object encoding big:1] "template-array"
         assert_equal [r hget big:1 f10] "v10"
         assert_equal [r hlen big:1] 32
@@ -1343,20 +1450,28 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
     }
 
     test {threshold=1: RDB save/load preserves template-converted hashes} {
-        r flushall
-        wait_num_templates 0
-        r hset rdb:k1 a 1 b 2 c 3
-        r hset rdb:k2 a 9 b 8 c 7
-        set t_before [s hash_templates]
-        set k_before [s hash_template_keys]
-        r debug reload
-        set t_after [s hash_templates]
-        set k_after [s hash_template_keys]
-        assert_equal $t_before $t_after
-        assert_equal $k_before $k_after
-        assert_equal [r hgetall rdb:k1] {a 1 b 2 c 3}
-        assert_equal [r hget rdb:k2 b] 8
-        assert_equal [r object encoding rdb:k1] "template-listpack"
+        # Run for both value encodings: default listpack, and array forced via
+        # hash-max-listpack-entries 0 (values then can't fit a listpack).
+        set saved [lindex [r config get hash-max-listpack-entries] 1]
+        foreach {enc maxlp} [list template-listpack $saved template-array 0] {
+            r flushall
+            wait_num_templates 0
+            r config set hash-max-listpack-entries $maxlp
+
+            r hset rdb:k1 a 1 b 2 c 3
+            r hset rdb:k2 a 9 b 8 c 7
+            assert_equal 1 [s hash_templates]
+            assert_equal 2 [s hash_template_keys]
+
+            r debug reload
+            assert_equal 1 [s hash_templates]
+            assert_equal 2 [s hash_template_keys]
+
+            assert_equal [r hgetall rdb:k1] {a 1 b 2 c 3}
+            assert_equal [r hget rdb:k2 b] 8
+            assert_equal [r object encoding rdb:k1] $enc
+        }
+        r config set hash-max-listpack-entries $saved
     }
 
     test {threshold=1: HDEL releases template ref when key is dropped} {
@@ -1371,123 +1486,55 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
 
     test {threshold=1: AOF rewrite preserves auto-converted hashes} {
         r config set aof-use-rdb-preamble no
-        r flushall
-        wait_num_templates 0
-        waitForBgrewriteaof r
-        r hset aof:1 a 1 b 2 c 3
-        r hset aof:2 a 9 b 8 c 7
-        set t_before [s hash_templates]
-        set k_before [s hash_template_keys]
-        r bgrewriteaof
-        waitForBgrewriteaof r
-        r debug loadaof
-        set t_after [s hash_templates]
-        set k_after [s hash_template_keys]
-        assert_equal $t_before $t_after
-        assert_equal $k_before $k_after
-        assert_equal [r hgetall aof:1] {a 1 b 2 c 3}
-        assert_equal [r object encoding aof:1] "template-listpack"
+        # Run for both value encodings: default listpack, and array forced via
+        # hash-max-listpack-entries 0 (values then can't fit a listpack).
+        set saved [lindex [r config get hash-max-listpack-entries] 1]
+        foreach {enc maxlp} [list template-listpack $saved template-array 0] {
+            r flushall
+            wait_num_templates 0
+            r config set hash-max-listpack-entries $maxlp
+            waitForBgrewriteaof r
+            r hset aof:1 a 1 b 2 c 3
+            r hset aof:2 a 9 b 8 c 7
+            set t_before [s hash_templates]
+            set k_before [s hash_template_keys]
+            r bgrewriteaof
+            waitForBgrewriteaof r
+            r debug loadaof
+            assert_equal $t_before [s hash_templates]
+            assert_equal $k_before [s hash_template_keys]
+            assert_equal [r hgetall aof:1] {a 1 b 2 c 3}
+            assert_equal [r object encoding aof:1] $enc
+        }
+        r config set hash-max-listpack-entries $saved
     }
 
     test {threshold=1: every convert-triggering write path auto-converts} {
-        r flushall
-        wait_num_templates 0
-        # Each entry creates a fresh key whose single field crosses the
+        # Each command creates a fresh single-field key that crosses the
         # threshold; every write path that triggers conversion must end up
-        # template-encoded (HSET is covered separately above).
-        foreach {name cmd} {
-            hsetnx       {hsetnx conv:hsetnx f v}
-            hsetex       {hsetex conv:hsetex FIELDS 1 f v}
-            hincrby      {hincrby conv:hincrby f 5}
-            hincrbyfloat {hincrbyfloat conv:hincrbyfloat f 1.5}
-        } {
-            r {*}$cmd
-            set key [lindex $cmd 1]
-            assert_equal [r object encoding $key] "template-listpack" \
-                "$name should auto-convert $key to template-listpack"
+        # template-encoded (HSET is covered separately above). Run it for both
+        # value encodings: the default listpack one, and the array one forced by
+        # hash-max-listpack-entries 0 (a single field then can't fit a listpack).
+        set saved [lindex [r config get hash-max-listpack-entries] 1]
+        foreach {enc maxlp} [list template-listpack $saved template-array 0] {
+            r flushall
+            wait_num_templates 0
+            r config set hash-max-listpack-entries $maxlp
+            foreach {name cmd} {
+                hsetnx       {hsetnx conv:hsetnx f v}
+                hsetex       {hsetex conv:hsetex FIELDS 1 f v}
+                hincrby      {hincrby conv:hincrby f 5}
+                hincrbyfloat {hincrbyfloat conv:hincrbyfloat f 1.5}
+            } {
+                r {*}$cmd
+                set key [lindex $cmd 1]
+                assert_equal [r object encoding $key] $enc \
+                    "$name should auto-convert $key to $enc"
+            }
         }
+        r config set hash-max-listpack-entries $saved
     }
 
-    # fields_lp cleanup: DUMP builds fields_lp blob, cron cleans it up
-    test {fields_lp blobs are built during DUMP and cleaned by serverCron} {
-        r flushall
-        wait_num_templates 0
-
-        # Create template hash
-        r hset k1 a 1 b 2 c 3
-        assert_encoding template-listpack k1
-
-        # DUMP triggers fields_lp build for O(1) template lookup
-        set dump1 [r dump k1]
-
-        # Create more keys with same template
-        r hset k2 a 4 b 5 c 6
-        r hset k3 a 7 b 8 c 9
-
-        # Multiple DUMPs should reuse the same blob
-        set dump2 [r dump k2]
-        set dump3 [r dump k3]
-
-        # Verify data integrity (fields_lp cleanup doesn't affect functionality)
-        assert_equal 2 [r hget k1 b]
-        assert_equal 5 [r hget k2 b]
-        assert_equal 8 [r hget k3 b]
-
-        # Next DUMP should work (rebuild blob if cleaned)
-        set dump4 [r dump k1]
-        assert_equal $dump1 $dump4
-    }
-
-    # Template resurrection: BIO queues template for free, main thread recreates it
-    test {Template resurrection: pending_free skips re-referenced template} {
-        r flushall
-        r config set lazyfree-lazy-user-del yes
-        wait_num_templates 0
-
-        # Create template hash
-        r hset k1 a 1 b 2 c 3
-        assert_equal 1 [s hash_templates]
-
-        # Lazy delete -> BIO queues template for free
-        r del k1
-
-        # Immediately recreate with same template (resurrection if fast enough)
-        r hset k1 a 4 b 5 c 6
-
-        # Wait for pending_free drain
-        after 150
-
-        # Template should still exist (skip in drain loop)
-        assert_equal 1 [s hash_templates]
-        assert_equal 1 [s hash_template_keys]
-        assert_equal 5 [r hget k1 b]
-    }
-
-    # TMPL_LP -> TMPL_ARRAY auto-convert when template switch causes LP overflow
-    # Rare scenario: HSET adds field, new template's fields don't fit in listpack blob
-    test {Template encoding: conversion mirrors source, in-place grow stays TMPL_LP} {
-        r flushall
-        wait_num_templates 0
-
-        # Small field names + small values -> TMPL_LP
-        r hset k1 a 1 b 2 c 3
-        assert_encoding template-listpack k1
-
-        # A new key with a huge field NAME is stored as HT, then converted to a
-        # template: conversion mirrors the source encoding, so HT -> TMPL_ARRAY.
-        set huge_field [string repeat "x" 600]
-        r hset huge_tmpl $huge_field 1 y 2
-        assert_encoding template-array huge_tmpl
-
-        # Growing an existing TMPL_LP hash with a huge field keeps it TMPL_LP:
-        # the value listpack holds values (still small); the oversized field name
-        # lives in the shared template (DUMP serializes such fields one-by-one).
-        r hset k1 $huge_field 4
-        assert_encoding template-listpack k1
-        assert_equal 4 [r hlen k1]
-        assert_equal 1 [r hget k1 a]
-        assert_equal 4 [r hget k1 $huge_field]
-    }
 }
 
 # ============================================================
@@ -1694,6 +1741,35 @@ start_server {tags {"hash" "convert" "needs:debug" "cluster:skip"}
         r himport discard fieldset
         r config set hash-max-listpack-entries $prev_e
     }
+
+    # These paths go through plain-HSET auto-conversion, so enable it here (this
+    # block otherwise creates templates via HIMPORT with threshold 0).
+    test {convert: auto-convert mirrors source encoding; in-place grow stays TMPL_LP} {
+        r config set hash-min-template-entries 1
+        r flushall
+        wait_num_templates 0
+
+        # Small field names + small values -> TMPL_LP.
+        r hset k1 a 1 b 2 c 3
+        assert_encoding template-listpack k1
+
+        # A key whose huge field NAME forces plain HT storage, then auto-converts:
+        # the conversion mirrors the source encoding, so HT -> TMPL_ARRAY.
+        set huge_field [string repeat "x" 600]
+        r hset huge_tmpl $huge_field 1 y 2
+        assert_encoding template-array huge_tmpl
+
+        # Growing an existing TMPL_LP hash with a huge field keeps it TMPL_LP: the
+        # value listpack still holds only small values; the oversized field name
+        # lives in the shared template (DUMP serializes such fields one-by-one).
+        r hset k1 $huge_field 4
+        assert_encoding template-listpack k1
+        assert_equal 4 [r hlen k1]
+        assert_equal 1 [r hget k1 a]
+        assert_equal 4 [r hget k1 $huge_field]
+
+        r config set hash-min-template-entries 0
+    }
 }
 
 # ============================================================
@@ -1854,6 +1930,30 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
             fail "templates did not drain: [s hash_templates]"
         }
         assert_equal PONG [r ping]
+    }
+
+    # Template resurrection: an HSET-auto-converted template (no fieldset hold-ref)
+    # is deleted -- BIO queues its id for pending_free -- then immediately recreated
+    # with the same field set. The drain must skip the id since it is referenced
+    # again. Needs threshold=1 so a plain HSET auto-converts without a fieldset
+    # hold-ref keeping the template alive across the delete.
+    test {Template resurrection: pending_free skips re-referenced template} {
+        r flushall
+        r config set hash-min-template-entries 1
+        r config set lazyfree-lazy-user-del yes
+        wait_num_templates 0
+
+        r hset k1 a 1 b 2 c 3
+        assert_equal 1 [s hash_templates]
+
+        r del k1                ;# lazy delete -> BIO queues the template for free
+        r hset k1 a 4 b 5 c 6   ;# recreate with the same field set (resurrection)
+        after 150               ;# let the pending_free drain run
+
+        # Still present: the drain skipped the re-referenced id.
+        assert_equal 1 [s hash_templates]
+        assert_equal 1 [s hash_template_keys]
+        assert_equal 5 [r hget k1 b]
     }
 }
 
@@ -2366,44 +2466,6 @@ start_server {tags {"hash" "repl" "needs:repl" "needs:debug" "cluster:skip" "ext
     }
 }
 
-# With RESTORE propagation the replica reconstructs the template while loading
-# the payload; it is referenced only through the key. Once the key is deleted
-# the template must be reclaimed on the replica (no lingering hold-ref).
-start_server {tags {"hash" "repl" "needs:repl" "cluster:skip" "external:skip"}
-              overrides {hash-min-template-entries 0}} {
-    start_server {overrides {hash-min-template-entries 0}} {
-        test {Replica reclaims template after the key is deleted} {
-            set master [srv -1 client]
-            set master_host [srv -1 host]
-            set master_port [srv -1 port]
-            set replica [srv 0 client]
-
-            $replica replicaof $master_host $master_port
-            wait_for_sync $replica
-
-            # Template hash on master -> replicated as RESTORE, which
-            # reconstructs the template on the replica (held by the key).
-            $master himport prepare fs name email
-            $master himport set k fs alice alice@x.com
-            wait_for_condition 50 100 { [$replica exists k] == 1 } else {
-                fail "template hash not propagated to replica"
-            }
-            assert_equal template-listpack [$replica object encoding k]
-            assert_equal 1 [s 0 hash_templates]
-
-            # Drop the key: with no other holder the template is reclaimed.
-            $master del k
-            wait_for_condition 50 100 {
-                [$replica exists k] == 0 && [s 0 hash_templates] == 0
-            } else {
-                fail "replica did not reclaim template after key deletion\
-                      (hash_templates=[s 0 hash_templates])"
-            }
-        }
-    }
-}
-
-
 # ============================================================
 # Bulk template registry: a large number of DISTINCT templates must round-trip
 # through full sync, AOF restart and RDB restart without loss or corruption.
@@ -2451,10 +2513,10 @@ start_server {tags {"hash" "repl" "needs:repl" "needs:debug" "cluster:skip" "ext
             wait_for_sync $replica
             assert {[s -1 sync_full] > $sync_full_before}
 
-            # INFO must show the registry was actually rebuilt on the replica...
+            # INFO must show the registry was actually rebuilt on the replica
             wait_num_templates $T 0
             wait_num_template_keys $K 0
-            # ...and the full keyspace must be byte-identical to the master.
+            # dataset must be byte-identical to the master.
             assert_equal $digest [$replica debug digest]
             assert_equal [lsort [$replica hgetall bulk:0]] \
                          [lsort [$master hgetall bulk:0]]
@@ -2512,96 +2574,6 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
         wait_num_template_keys $K
         assert_equal $digest [r debug digest]
         assert_equal [r hget bulk:0 f0_email] "user0@example.com"
-    }
-}
-
-# HRANDFIELD batch optimization tests 
-start_server {tags {"hash" "cluster:skip"}} {
-    test {HRANDFIELD large count batching on TMPL_LP} {
-        # Test batch random sampling optimization (avoid O(count*n) lpSeek overhead).
-        r config set hash-min-template-entries 50
-
-        r del h1 h2
-        set fields {}
-        for {set i 0} {$i < 100} {incr i} {
-            lappend fields "f$i" "v$i"
-        }
-        # Two hashes with same fields -> triggers template
-        r hset h1 {*}$fields
-        r hset h2 {*}$fields
-
-        set enc [r object encoding h1]
-        assert_equal template-listpack $enc
-
-        # Large count with duplicates (negative count)
-        set result [r hrandfield h1 -500]
-        assert_equal [llength $result] 500
-
-        foreach field $result {
-            assert_match "f*" $field
-        }
-
-        # With WITHVALUES: each field "fN" must pair with its own value "vN"
-        # (regression for the O(1) value-pointer index that replaced per-draw lpSeek).
-        set result [r hrandfield h1 -300 WITHVALUES]
-        assert_equal [llength $result] 600
-        for {set i 0} {$i < 600} {incr i 2} {
-            set f [lindex $result $i]
-            set v [lindex $result [expr {$i + 1}]]
-            assert_match "f*" $f
-            assert_equal "v[string range $f 1 end]" $v
-        }
-    }
-
-    test {HRANDFIELD positive count WITHVALUES pairs correctly on TMPL_LP} {
-        # Positive count exercises the unique-index path (CASE 2.5b), which also
-        # collects value pointers in a single pass instead of per-draw lpSeek.
-        r config set hash-min-template-entries 50
-
-        r del h1 h2
-        set fields {}
-        for {set i 0} {$i < 100} {incr i} {
-            lappend fields "f$i" "v$i"
-        }
-        r hset h1 {*}$fields
-        r hset h2 {*}$fields
-        assert_equal template-listpack [r object encoding h1]
-
-        # 40 unique fields, each paired with its own value, no duplicates.
-        set result [r hrandfield h1 40 WITHVALUES]
-        assert_equal [llength $result] 80
-        set seen {}
-        for {set i 0} {$i < 80} {incr i 2} {
-            set f [lindex $result $i]
-            set v [lindex $result [expr {$i + 1}]]
-            assert_equal "v[string range $f 1 end]" $v
-            assert {[lsearch -exact $seen $f] == -1}
-            lappend seen $f
-        }
-    }
-
-    test {HRANDFIELD large count on TMPL_ARRAY} {
-        r config set hash-min-template-entries 50
-
-        r del big1 big2
-        set fields {}
-        # Use 600 fields to definitely exceed listpack limit
-        for {set i 0} {$i < 600} {incr i} {
-            lappend fields "field$i" "value$i"
-        }
-        r hset big1 {*}$fields
-        r hset big2 {*}$fields
-
-        set enc [r object encoding big1]
-        assert_equal template-array $enc
-
-        # TMPL_ARRAY uses simple loop (O(1) array access)
-        set result [r hrandfield big1 -1000]
-        assert_equal [llength $result] 1000
-
-        foreach field $result {
-            assert_match "field*" $field
-        }
     }
 }
 
