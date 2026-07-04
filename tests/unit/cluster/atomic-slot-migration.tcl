@@ -3233,76 +3233,70 @@ start_cluster 3 0 [list tags {external:skip cluster tls:skip modules} config_lin
 }
 
 start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {
-    # A template-encoded HIMPORT SET issued to the SOURCE while a slot migration is
-    # in flight: the source (still the slot owner) applies it and streams it to the
-    # destination as a self-contained RESTORE that rebuilds the template + fields_lp
-    # blob on load; both masters propagate to their replicas. Then DEL must free the
-    # template (registry key-refs drain) on master and replica.
+    # A template-encoded HIMPORT SET issued to the SOURCE while a slot migration
+    # is in progress.
     test "ASM forwards a live HIMPORT SET on the source to dest master+replica" {
-        foreach n {0 1 3 4} { R $n config set hash-min-template-entries 0 }
         R 0 flushall
+        # Migrate slots 0-100 from node 0 to node 1, with a per-key save delay
+        # so the live HIMPORT writes below land while the migration is still streaming.
+        set task_id [setup_slot_migration_with_delay 0 1 0 100 2 1000000]
 
-        # Fresh cluster: node 0 owns slot 0-100. Fill it and slow the source
-        # snapshot so the migration has a wide window to write into.
-        populate_slot 100 -idx 0 -slot 0
-        R 0 config set rdb-key-save-delay 30000
-
-        # Start the migration (async) pulling slot 0-100 to node 1, then wait until
-        # it is actively running.
-        R 1 CLUSTER MIGRATION IMPORT 0 100
-        wait_for_condition 200 10 {
-            [CI 1 cluster_slot_migration_active_tasks] == 1
-        } else { fail "ASM task did not start" }
-
-        # Live template writes to the source mid-migration: template-listpack (small
-        # values), template-array (a >64-byte value), and template-listpack whose
-        # field NAMES don't fit a listpack (>64-byte name -> FIELDS_RAW dump form).
-        set lp_key [slot_key 0 htmpllp]
-        set ar_key [slot_key 0 htmplar]
-        set raw_key [slot_key 0 htmplraw]
-        R 0 himport prepare fieldset1 name email age
-        R 0 himport set $lp_key fieldset1 alice alice@example.com 25
-        R 0 himport prepare fieldset2 f1 f2 f3
-        R 0 himport set $ar_key fieldset2 v1 [string repeat x 100] v3
-        R 0 himport prepare fieldset3 f0 f1 [string repeat n 70]
-        R 0 himport set $raw_key fieldset3 v1 v2 v3
-        assert_equal {template-listpack} [R 0 object encoding $lp_key]
-        assert_equal {template-array}    [R 0 object encoding $ar_key]
-        assert_equal {template-listpack} [R 0 object encoding $raw_key]
+        # Write template keys during ASM
+        set lp_short_fields [slot_key 0 lp1]
+        R 0 himport prepare fieldset1 f1 f2 f3 f4 f5
+        R 0 himport set $lp_short_fields fieldset1 v1 v2 v3 v4 v5
+        assert_equal {template-listpack} [R 0 object encoding $lp_short_fields]
+        
+        set lp_long_fields [slot_key 0 lp2]
+        R 0 himport prepare fieldset2 f1 f2 f3 [string repeat e 100]
+        R 0 himport set $lp_long_fields fieldset2 v1 v2 v3 v4
+        assert_equal {template-listpack} [R 0 object encoding $lp_long_fields]
+        
+        set arr_short_fields [slot_key 0 ar1]
+        R 0 himport prepare fieldset3 f1 f2 f3
+        R 0 himport set $arr_short_fields fieldset3 v1 [string repeat z 100] v3
+        assert_equal {template-array} [R 0 object encoding $arr_short_fields]
+        
+        set arr_long_fields [slot_key 0 ar2]
+        R 0 himport prepare fieldset4 f1 f2 f3 [string repeat y 100]
+        R 0 himport set $arr_long_fields fieldset4 v1 v2 v3 [string repeat y 100]
+        assert_equal {template-array} [R 0 object encoding $arr_long_fields]
+        
+        # Wait for the migration to complete
+        wait_for_asm_done
         R 0 config set rdb-key-save-delay 0
 
-        wait_for_asm_done
+        # All keys reached destination
+        assert_equal {template-listpack} [R 1 object encoding $lp_short_fields]
+        assert_equal {f1 v1 f2 v2 f3 v3 f4 v4 f5 v5} [R 1 hgetall $lp_short_fields]
+        assert_equal {template-listpack} [R 1 object encoding $lp_long_fields]
+        assert_equal "f1 v1 f2 v2 f3 v3 [string repeat e 100] v4" [R 1 hgetall $lp_long_fields]
+        assert_equal {template-array} [R 1 object encoding $arr_short_fields]
+        assert_equal "f1 v1 f2 [string repeat z 100] f3 v3" [R 1 hgetall $arr_short_fields]
+        assert_equal {template-array}  [R 1 object encoding $arr_long_fields]
+        assert_equal "f1 v1 f2 v2 f3 v3 [string repeat y 100] [string repeat y 100]" [R 1 hgetall $arr_long_fields]
 
-        # Both mid-migration writes reached the destination, with the encoding
-        # rebuilt from the streamed RESTORE.
-        assert_equal {template-listpack} [R 1 object encoding $lp_key]
-        assert_equal {age 25 name alice email alice@example.com} [R 1 hgetall $lp_key]
-        assert_equal {template-array}    [R 1 object encoding $ar_key]
-        assert_equal "f1 v1 f2 [string repeat x 100] f3 v3" [R 1 hgetall $ar_key]
-        assert_equal {template-listpack} [R 1 object encoding $raw_key]
-        assert_equal "f0 v1 f1 v2 [string repeat n 70] v3" [R 1 hgetall $raw_key]
-
-        # ... and the destination's replica (node 4).
+        # All keys reached destination replica
         wait_for_ofs_sync [Rn 1] [Rn 4]
         R 4 readonly
-        assert_equal {template-listpack} [R 4 object encoding $lp_key]
-        assert_equal {age 25 name alice email alice@example.com} [R 4 hgetall $lp_key]
-        assert_equal {template-array}    [R 4 object encoding $ar_key]
-        assert_equal "f1 v1 f2 [string repeat x 100] f3 v3" [R 4 hgetall $ar_key]
-        assert_equal {template-listpack} [R 4 object encoding $raw_key]
-        assert_equal "f0 v1 f1 v2 [string repeat n 70] v3" [R 4 hgetall $raw_key]
+        assert_equal {template-listpack} [R 4 object encoding $lp_short_fields]
+        assert_equal {f1 v1 f2 v2 f3 v3 f4 v4 f5 v5} [R 4 hgetall $lp_short_fields]
+        assert_equal {template-listpack} [R 4 object encoding $lp_long_fields]
+        assert_equal "f1 v1 f2 v2 f3 v3 [string repeat e 100] v4" [R 4 hgetall $lp_long_fields]
+        assert_equal {template-array} [R 4 object encoding $arr_short_fields]
+        assert_equal "f1 v1 f2 [string repeat z 100] f3 v3" [R 4 hgetall $arr_short_fields]
+        assert_equal {template-array} [R 4 object encoding $arr_long_fields]
+        assert_equal "f1 v1 f2 v2 f3 v3 [string repeat y 100] [string repeat y 100]" [R 4 hgetall $arr_long_fields]
 
-        # DEL frees the templates: keys gone and key-refs drain on master + replica.
-        R 1 del $lp_key
-        R 1 del $ar_key
-        R 1 del $raw_key
+        # DEL frees the templates on master + replica.
+        foreach k [list $lp_short_fields $lp_long_fields $arr_short_fields $arr_long_fields] {
+            R 1 del $k
+        }
         wait_for_ofs_sync [Rn 1] [Rn 4]
-        assert_equal 0 [R 1 exists $lp_key]
-        assert_equal 0 [R 1 exists $ar_key]
-        assert_equal 0 [R 1 exists $raw_key]
-        assert_equal 0 [R 4 exists $lp_key]
-        assert_equal 0 [R 4 exists $ar_key]
-        assert_equal 0 [R 4 exists $raw_key]
+        foreach k [list $lp_short_fields $lp_long_fields $arr_short_fields $arr_long_fields] {
+            assert_equal 0 [R 1 exists $k]
+            assert_equal 0 [R 4 exists $k]
+        }
         wait_for_condition 50 100 {
             [status [Rn 1] hash_template_keys] == 0 && [status [Rn 4] hash_template_keys] == 0
         } else {

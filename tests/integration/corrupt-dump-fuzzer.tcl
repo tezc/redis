@@ -75,10 +75,9 @@ if 0 {
     # create bigger objects with 10 items (more than a single ziplist / listpack)
     generate_collections big 10
 
-    # Hash templates: cover all four DUMP shapes. Value encoding depends on whether
-    # the VALUES fit a listpack; the field-name format on whether the field NAMES do.
-    # A count over hash-max-listpack-entries or an element over hash-max-listpack-value
-    # forces the array / raw form.
+    # Hash templates: cover all four DUMP types. Value encoding depends on whether
+    # the VALUES fit a listpack; the field-name format depends on whether the fields
+    # fit in a listpack. 
     r himport prepare fs_lp_lp f0 f1 f2                          ;# TMPL_LP + FIELDS_LP
     r himport set htmpl_lp_lp fs_lp_lp 0 1 2
     r himport prepare fs_arr_raw f0 f1 f2 f3 f4 f5 f6 f7 f8 f9   ;# TMPL_ARRAY + FIELDS_RAW (count > 5)

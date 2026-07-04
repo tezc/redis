@@ -763,6 +763,7 @@ test {diskless loading short read} {
             }
 
             r himport prepare fieldset1 f0 f1 f2 f3 f4 f5 f6 f7 f8 f9
+            r himport prepare fieldset2 g0 g1 g2 g3 g4 g5 g6 g7 g8 [string repeat z 250]
 
             set has_vector_sets [server_has_command vadd]
 
@@ -801,6 +802,8 @@ test {diskless loading short read} {
                 }
                 r himport set "$k tmpl_small" fieldset1 {*}$tmpl_small_vals
                 r himport set "$k tmpl_large" fieldset1 {*}$tmpl_large_vals
+                r himport set "$k tmpl_long_field_small" fieldset2 {*}$tmpl_small_vals
+                r himport set "$k tmpl_long_field_large" fieldset2 {*}$tmpl_large_vals
             }
 
             if {$::verbose} {

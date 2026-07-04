@@ -340,7 +340,7 @@ proc createComplexDataset {r ops {opt {}}} {
     }
 
     # Prepare a fieldset so we can mix in template-encoded hash keys via HIMPORT SET.
-    {*}$r himport prepare cds_fs f0 f1 f2
+    {*}$r himport prepare fs f0 f1 f2
 
     for {set j 0} {$j < $ops} {incr j} {
         set k [randomKey]$tag
@@ -381,9 +381,9 @@ proc createComplexDataset {r ops {opt {}}} {
             } {
                 {*}$r hset $k $f $v
             } {
-                # template-encoded hash (fixed fieldset, random values). Short/long
-                # values naturally produce both TMPL_LP and TMPL_ARRAY encodings.
-                {*}$r himport set $k cds_fs $v [randomValue] [randomValue]
+                # template-encoded hash. Short/long values naturally produce 
+                # both TMPL_LP and TMPL_ARRAY encodings.
+                {*}$r himport set $k fs $v [randomValue] [randomValue]
             } {
                 {*}$r del $k
             }

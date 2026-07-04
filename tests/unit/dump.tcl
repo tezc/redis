@@ -325,38 +325,40 @@ start_server {tags {"dump"}} {
         set first [srv 0 client]
         r flushdb
         r config set hash-min-template-entries 0
-        r himport prepare fieldset1 name email age
-        r himport set lp_key fieldset1 alice alice@example.com 25
-        r himport prepare fieldset2 f1 f2 f3
-        r himport set array_key fieldset2 v1 [string repeat x 100] v3
-        # A long field name keeps the field NAMES out of a listpack (FIELDS_RAW dump
-        # form) while the small values still fit (template-listpack value encoding).
-        r himport prepare fieldset3 f0 f1 [string repeat n 70]
-        r himport set raw_key fieldset3 v1 v2 v3
+
+        r himport prepare fs_short  f1 f2 f3
+        r himport prepare fs_long f1 f2 [string repeat q 70]
+        r himport set lp_short_fields fs_short v1 v2 v3
+        r himport set arr_short_fields fs_short v1 [string repeat x 100] v3
+        r himport set lp_long_fields fs_long v1 v2 v3
+        r himport set arr_long_fields fs_long v1 v2 [string repeat x 100]
         start_server {tags {"repl"}} {
             set second [srv 0 client]
             set second_host [srv 0 host]
             set second_port [srv 0 port]
             $second config set hash-min-template-entries 0
 
-            set ret [r -1 migrate $second_host $second_port "" 9 10000 keys lp_key array_key raw_key]
+            set ret [r -1 migrate $second_host $second_port "" 9 10000 keys lp_short_fields arr_short_fields lp_long_fields arr_long_fields]
             assert {$ret eq {OK}}
-            assert {[$first exists lp_key] == 0}
-            assert {[$first exists array_key] == 0}
-            assert {[$first exists raw_key] == 0}
+            assert {[$first exists lp_short_fields] == 0}
+            assert {[$first exists arr_short_fields] == 0}
+            assert {[$first exists lp_long_fields] == 0}
+            assert {[$first exists arr_long_fields] == 0}
 
             # verify keys are migrated with the correct content and encoding
-            assert_equal {age 25 name alice email alice@example.com} [$second hgetall lp_key]
-            assert_equal "f1 v1 f2 [string repeat x 100] f3 v3" [$second hgetall array_key]
-            assert_equal "f0 v1 f1 v2 [string repeat n 70] v3" [$second hgetall raw_key]
-            assert_equal {template-listpack} [$second object encoding lp_key]
-            assert_equal {template-array} [$second object encoding array_key]
-            assert_equal {template-listpack} [$second object encoding raw_key]
+            assert_equal {f1 v1 f2 v2 f3 v3} [$second hgetall lp_short_fields]
+            assert_equal "f1 v1 f2 [string repeat x 100] f3 v3" [$second hgetall arr_short_fields]
+            assert_equal "f1 v1 f2 v2 [string repeat q 70] v3" [$second hgetall lp_long_fields]
+            assert_equal "f1 v1 f2 v2 [string repeat q 70] [string repeat x 100]" [$second hgetall arr_long_fields]
+            assert_equal {template-listpack} [$second object encoding lp_short_fields]
+            assert_equal {template-array} [$second object encoding arr_short_fields]
+            assert_equal {template-listpack} [$second object encoding lp_long_fields]
+            assert_equal {template-array} [$second object encoding arr_long_fields]
 
-            # The three distinct field sets must rebuild as three templates holding
-            # one key each on the destination registry.
-            assert_equal 3 [status $second hash_templates]
-            assert_equal 3 [status $second hash_template_keys]
+            # The two distinct field sets rebuild as two templates on the
+            # destination registry, holding four keys in total.
+            assert_equal 2 [status $second hash_templates]
+            assert_equal 4 [status $second hash_template_keys]
         }
     } {} {external:skip}
 

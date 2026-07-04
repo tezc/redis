@@ -1246,11 +1246,11 @@ run_solo {defrag} {
             r config set active-defrag-cycle-max 75
             r config set active-defrag-ignore-bytes 100kb
             r config set maxmemory 0
-            # Field count drives the encoding: the 3-field schema stays
-            # template-listpack, the 40-field schema becomes template-array.
+            # Field count drives the encoding: the 3-field template stays
+            # template-listpack, the 40-field template becomes template-array.
             r config set hash-max-listpack-entries 16
 
-            # Two shared schemas: small -> template-listpack, big -> template-array.
+            # Two shared templates: small -> template-listpack, big -> template-array.
             set big_fields {}
             for {set f 0} {$f < 40} {incr f} { lappend big_fields field_[format %02d $f] }
             set bigval [string repeat x 80]
@@ -1277,7 +1277,7 @@ run_solo {defrag} {
             assert_equal template-listpack [r object encoding k:0]
             assert_equal template-array    [r object encoding k:1]
 
-            # Fragment: delete half (j%4<2) so both schemas survive and both
+            # Fragment: delete half (j%4<2) so both templates survive and both
             # are freed, leaving holes in their size classes.
             set deleted 0
             for {set j 0} {$j < $n} {incr j} {
@@ -1311,8 +1311,8 @@ run_solo {defrag} {
             r save ;# iterate over all data / pointers
         } {OK}
 
-        # The test above uses two shared schemas, so it fragments the per-key
-        # values. Here every key has a DISTINCT schema, so the fragmented and
+        # The test above uses two shared templates, so it fragments the per-key
+        # values. Here every key has a DISTINCT template, so the fragmented and
         # defragged memory is the template registry's field-name arrays/strings.
         # The registry defrag stage relocates those in place (struct/by_id stay).
         test "Active defrag hash template registry: $type" {
