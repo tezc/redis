@@ -687,6 +687,41 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         wait_for_asm_done
     }
 
+    test "Slot migration preserves template-encoded hashes" {
+        R 0 flushall
+        R 1 flushall
+        R 0 config set hash-min-template-entries 0
+        R 1 config set hash-min-template-entries 0
+        
+        # key with template-listpack encoding
+        set lp_key [slot_key 0 htmpllp]
+        R 1 himport prepare fieldset1 name email age
+        R 1 himport set $lp_key fieldset1 alice alice@example.com 25
+        assert_equal {template-listpack} [R 1 object encoding $lp_key]
+        
+        # key with template-array encoding
+        set ar_key [slot_key 0 htmplar]
+        R 1 himport prepare fieldset2 f1 f2 f3
+        R 1 himport set $ar_key fieldset2 v1 [string repeat x 100] v3
+        assert_equal {template-array} [R 1 object encoding $ar_key]
+
+        # migrate slot 0-100 to R 0 and verify both encodings/data survive
+        R 0 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_asm_done
+        
+        # verify the encoding and data of template-listpack
+        assert_equal {template-listpack} [R 0 object encoding $lp_key]
+        assert_equal {age 25 name alice email alice@example.com} [R 0 hgetall $lp_key]
+        
+        # verify the encoding and data of template-array
+        assert_equal {template-array} [R 0 object encoding $ar_key]
+        assert_equal "f1 v1 f2 [string repeat x 100] f3 v3" [R 0 hgetall $ar_key]
+
+        # migrate slot 0-100 back to R 1
+        R 1 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_asm_done
+    }
+
     proc asm_basic_error_handling_test {operation channel all_states} {
         foreach state $all_states {
             if {$::verbose} { puts "Testing $operation $channel channel with state: $state"}
@@ -3091,4 +3126,83 @@ start_server {tags "cluster external:skip"} {
         assert_equal $ranges {}
     }
 }
+}
+
+start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 60000 cluster-allow-replica-migration no}} {
+    # A template-encoded HIMPORT SET issued to the SOURCE while a slot migration is
+    # in flight: the source (still the slot owner) applies it and streams it to the
+    # destination as a self-contained RESTORE that rebuilds the template + fields_lp
+    # blob on load; both masters propagate to their replicas. Then DEL must free the
+    # template (registry key-refs drain) on master and replica.
+    test "ASM forwards a live HIMPORT SET on the source to dest master+replica" {
+        foreach n {0 1 3 4} { R $n config set hash-min-template-entries 0 }
+        R 0 flushall
+
+        # Fresh cluster: node 0 owns slot 0-100. Fill it and slow the source
+        # snapshot so the migration has a wide window to write into.
+        populate_slot 100 -idx 0 -slot 0
+        R 0 config set rdb-key-save-delay 30000
+
+        # Start the migration (async) pulling slot 0-100 to node 1, then wait until
+        # it is actively running.
+        R 1 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_condition 200 10 {
+            [CI 1 cluster_slot_migration_active_tasks] == 1
+        } else { fail "ASM task did not start" }
+
+        # Live template writes to the source mid-migration: template-listpack (small
+        # values), template-array (a >64-byte value), and template-listpack whose
+        # field NAMES don't fit a listpack (>64-byte name -> FIELDS_RAW dump form).
+        set lp_key [slot_key 0 htmpllp]
+        set ar_key [slot_key 0 htmplar]
+        set raw_key [slot_key 0 htmplraw]
+        R 0 himport prepare fieldset1 name email age
+        R 0 himport set $lp_key fieldset1 alice alice@example.com 25
+        R 0 himport prepare fieldset2 f1 f2 f3
+        R 0 himport set $ar_key fieldset2 v1 [string repeat x 100] v3
+        R 0 himport prepare fieldset3 f0 f1 [string repeat n 70]
+        R 0 himport set $raw_key fieldset3 v1 v2 v3
+        assert_equal {template-listpack} [R 0 object encoding $lp_key]
+        assert_equal {template-array}    [R 0 object encoding $ar_key]
+        assert_equal {template-listpack} [R 0 object encoding $raw_key]
+        R 0 config set rdb-key-save-delay 0
+
+        wait_for_asm_done
+
+        # Both mid-migration writes reached the destination, with the encoding
+        # rebuilt from the streamed RESTORE.
+        assert_equal {template-listpack} [R 1 object encoding $lp_key]
+        assert_equal {age 25 name alice email alice@example.com} [R 1 hgetall $lp_key]
+        assert_equal {template-array}    [R 1 object encoding $ar_key]
+        assert_equal "f1 v1 f2 [string repeat x 100] f3 v3" [R 1 hgetall $ar_key]
+        assert_equal {template-listpack} [R 1 object encoding $raw_key]
+        assert_equal "f0 v1 f1 v2 [string repeat n 70] v3" [R 1 hgetall $raw_key]
+
+        # ... and the destination's replica (node 4).
+        wait_for_ofs_sync [Rn 1] [Rn 4]
+        R 4 readonly
+        assert_equal {template-listpack} [R 4 object encoding $lp_key]
+        assert_equal {age 25 name alice email alice@example.com} [R 4 hgetall $lp_key]
+        assert_equal {template-array}    [R 4 object encoding $ar_key]
+        assert_equal "f1 v1 f2 [string repeat x 100] f3 v3" [R 4 hgetall $ar_key]
+        assert_equal {template-listpack} [R 4 object encoding $raw_key]
+        assert_equal "f0 v1 f1 v2 [string repeat n 70] v3" [R 4 hgetall $raw_key]
+
+        # DEL frees the templates: keys gone and key-refs drain on master + replica.
+        R 1 del $lp_key
+        R 1 del $ar_key
+        R 1 del $raw_key
+        wait_for_ofs_sync [Rn 1] [Rn 4]
+        assert_equal 0 [R 1 exists $lp_key]
+        assert_equal 0 [R 1 exists $ar_key]
+        assert_equal 0 [R 1 exists $raw_key]
+        assert_equal 0 [R 4 exists $lp_key]
+        assert_equal 0 [R 4 exists $ar_key]
+        assert_equal 0 [R 4 exists $raw_key]
+        wait_for_condition 50 100 {
+            [status [Rn 1] hash_template_keys] == 0 && [status [Rn 4] hash_template_keys] == 0
+        } else {
+            fail "templates not drained (dest=[status [Rn 1] hash_template_keys] replica=[status [Rn 4] hash_template_keys])"
+        }
+    }
 }
