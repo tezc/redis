@@ -1025,7 +1025,7 @@ static unsigned char *hashTemplateLpCreate(hashTemplate *tmpl, sds *values) {
     return lp;
 }
 
-/* Free a template listpack: release its key-ref and free the listpack. May run
+/* Free a template listpack: release its key ref and free the listpack. May run
  * in a BIO lazyfree thread, so the id->template lookup is done under the lock
  * (the main thread may be growing by_id concurrently). The template stays valid
  * while this outstanding key-ref exists, so the pointer is safe to decrement. */
@@ -1059,7 +1059,7 @@ static hashTemplateArray *hashTemplateArrayCreate(hashTemplate *tmpl, sds *value
     return hta;
 }
 
-/* Free a hashTemplateArray (release key-ref and free data). May run in a BIO
+/* Free a hashTemplateArray (release key ref and free data). May run in a BIO
  * lazyfree thread; the template pointer and its id/field_count are immutable
  * and stay valid while this key-ref is outstanding. */
 void hashTemplateArrayFree(hashTemplateArray *hta) {
@@ -3018,7 +3018,7 @@ static int hashTypeTryConvertCmpPair(const void *a, const void *b) {
 }
 
 /* ------------------------------------------------------------------------- *
- * RDB-load template load-time context
+ * RDB-load automatic template conversion
  *
  * Background: a template holds one shared copy of a hash's field names, so many
  * hashes with the same fields can drop their per-key field-name copies and point
@@ -4106,8 +4106,8 @@ void himportSetCommand(client *c) {
 
     robj *o = createHashObjectFromTemplate(tmpl, values, 0);
 
-    /* How to propagate this write to replicas/AOF. Ideally we'd mirror how the
-     * client does it (a HIMPORT PREPARE for the fields, then a SET), but
+    /* How to propagate this write to replicas/AOF/ASM?. Ideally we'd mirror how 
+     * the client does it (a HIMPORT PREPARE for the fields, then a SET), but
      * propagating the fields separately gets complex once replicas, sub-replicas
      * and atomic slot migration are in the picture. So we send the fields
      * together with the values in one command. A plain HSET-like command would

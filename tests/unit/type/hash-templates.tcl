@@ -11,7 +11,7 @@ proc make_hashtmpl {key args} {
     r himport set $key $fsname {*}$values
 }
 
-# A key-ref released by a BIO lazyfree thread (flushall, resync, etc.) is
+# A key ref released by a BIO lazyfree thread (flushall etc.) is
 # dropped on that background thread, so num_template_keys is eventually
 # consistent: it settles once the BIO free job runs.
 proc wait_num_template_keys {expected {level ""}} {

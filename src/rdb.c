@@ -1293,8 +1293,8 @@ ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key, int dbid) {
                  *       when the field names don't fit a listpack.
                  *
                  * Values follow per the RDB type:
-                 *   TMPL_LP    (29): values are one listpack blob
-                 *   TMPL_ARRAY (31): field_count value strings
+                 *   TMPL_LP    : values are one listpack blob
+                 *   TMPL_ARRAY : field_count value strings
                  *
                  * The two are independent: fits_in_listpack picks the field format,
                  * the value encoding picks the value format (e.g. ARRAY+FIELDS_LP

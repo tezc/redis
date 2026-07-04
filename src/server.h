@@ -3917,9 +3917,8 @@ typedef struct hashTemplate {
     unsigned char *fields_lp; /* Lazily-built listpack of the sorted field names
                           * ([f0][f1]...[fN-1]), also the by_fields_lp key. NULL
                           * until first needed. Lets the self-contained DUMP/RESTORE
-                          * TMPL_LP form ship one blob instead of N strings, and lets
-                          * RESTORE find the template with one O(1) blob lookup.
-                          * Owned here. */
+                          * ship fields as one blob instead of N strings, and lets
+                          * RESTORE find the template with one O(1) blob lookup.*/
     mstime_t fields_lp_last_used; /* Last time fields_lp was used, for cron idle reclaim. */
     unsigned int fits_in_listpack;  /* 1 if fields fit in listpack (DUMP serializes them as LP blob) */
     robj **field_robjs;  /* Lazy-built cached field-name robjs (one per field, in
@@ -3931,7 +3930,7 @@ typedef struct hashTemplate {
 typedef struct hashTemplateRegistry {
     dict *by_fields;            /* field set -> template lookup */
     dict *by_fields_lp;         /* fields-listpack blob -> template lookup, used
-                                 * to resolve a self-contained TMPL_LP RESTORE in
+                                 * to resolve template on RESTORE command in
                                  * O(1) without reading field names one by one. */
     hashTemplate **by_id;       /* ID -> template lookup */
     size_t by_id_cap;           /* Allocated slots in by_id array. */
@@ -4006,9 +4005,6 @@ static inline size_t *htGetMetadataSize(dict *d) {
 #define HFE_LAZY_NO_UPDATE_KEYSIZES  (1<<5) /* If field lazy deleted, avoid updating keysizes histogram */
 #define HFE_LAZY_NO_UPDATE_ALLOCSIZES (1<<6) /* If field lazy deleted, avoid updating slot allocation sizes */
 
-/* Opaque here; rdb.c just holds a pointer and calls the helpers below. See the
- * comment above struct rdbLoadTemplateCtx in t_hash.c for what it does and
- * when it is active. */
 typedef struct rdbLoadTemplateCtx rdbLoadTemplateCtx;
 rdbLoadTemplateCtx *rdbLoadTemplateCtxCreate(size_t disassembly_threshold);
 int rdbLoadTemplateCtxTryConvert(rdbLoadTemplateCtx *ctx, robj *o);
