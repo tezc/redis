@@ -1389,12 +1389,14 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
     }
 }
 
-# Tests under hash-min-template-entries=1.
-# In this mode plain HSET-alike commands auto-converts to a template encoding.
+# Tests under hash-min-template-entries=1: plain HSET-alike commands auto-convert
+# to a template encoding.
+foreach encoding {template-listpack template-array} {
 start_server {tags {"hash" "needs:debug" "cluster:skip"}
               overrides {hash-min-template-entries 1}} {
+    if {$encoding eq "template-array"} { r config set hash-max-listpack-entries 0 }
 
-    test {HSET auto-converts to template encoding} {
+    test "HSET auto-converts to template encoding ($encoding)" {
         r flushall
         wait_num_templates 0
 
@@ -1403,12 +1405,11 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
         r hset key1 a 1 b 2 c 3
         assert_equal 1 [s hash_templates]
         assert_equal 1 [s hash_template_keys]
-        assert_equal [r object encoding key1] "template-listpack"
-        assert_match "*encoding:template-listpack*" [r debug object key1]
+        assert_equal [r object encoding key1] $encoding
         assert_equal [r hgetall key1] {a 1 b 2 c 3}
     }
 
-    test {same field set shares a single template} {
+    test "same field set shares a single template ($encoding)" {
         r flushall
         wait_num_templates 0
         r hset key1 a 1 b 2 c 3
@@ -1420,61 +1421,38 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
         assert_equal [r hget key2 b] 8
     }
 
-    test {large hash auto-converts to template-array} {
+    test "HFE prevents template conversion ($encoding)" {
         r flushall
         wait_num_templates 0
-
-        set saved [lindex [r config get hash-max-listpack-entries] 1]
-        r config set hash-max-listpack-entries 16
-        
-        set pairs {}
-        for {set i 0} {$i < 32} {incr i} { lappend pairs "f$i" "v$i" }
-        r hset big:1 {*}$pairs
-
-        assert_equal [r object encoding big:1] "template-array"
-        assert_equal [r hget big:1 f10] "v10"
-        assert_equal [r hlen big:1] 32
-        r config set hash-max-listpack-entries $saved
-    }
-
-    test {threshold=1: HFE prevents template conversion} {
-        r flushall
-        wait_num_templates 0
+        # HFE forces the hash away from the template encoding: a small hash lands
+        # on listpackex, one too big for a listpack (array config here) on hashtable.
+        set hfe_enc [expr {$encoding eq "template-array" ? "hashtable" : "listpackex"}]
         r hset hfe:1 a 1 b 2 c 3
-        # Auto-converted to template; HEXPIRE forces back to listpackex.
         r hexpire hfe:1 100 FIELDS 1 a
-        assert_equal [r object encoding hfe:1] "listpackex"
-        # New hash created with HFE from start: never templates.
+        assert_equal [r object encoding hfe:1] $hfe_enc
+        # New hash created with HFE from the start: never a template.
         r hsetex hfe:2 EX 100 FIELDS 1 a 1
-        assert_equal [r object encoding hfe:2] "listpackex"
+        assert_equal [r object encoding hfe:2] $hfe_enc
     }
 
-    test {threshold=1: RDB save/load preserves template-converted hashes} {
-        # Run for both value encodings: default listpack, and array forced via
-        # hash-max-listpack-entries 0 (values then can't fit a listpack).
-        set saved [lindex [r config get hash-max-listpack-entries] 1]
-        foreach {enc maxlp} [list template-listpack $saved template-array 0] {
-            r flushall
-            wait_num_templates 0
-            r config set hash-max-listpack-entries $maxlp
+    test "RDB save/load preserves template-converted hashes ($encoding)" {
+        r flushall
+        wait_num_templates 0
+        r hset rdb:k1 a 1 b 2 c 3
+        r hset rdb:k2 a 9 b 8 c 7
+        assert_equal 1 [s hash_templates]
+        assert_equal 2 [s hash_template_keys]
 
-            r hset rdb:k1 a 1 b 2 c 3
-            r hset rdb:k2 a 9 b 8 c 7
-            assert_equal 1 [s hash_templates]
-            assert_equal 2 [s hash_template_keys]
+        r debug reload
+        assert_equal 1 [s hash_templates]
+        assert_equal 2 [s hash_template_keys]
 
-            r debug reload
-            assert_equal 1 [s hash_templates]
-            assert_equal 2 [s hash_template_keys]
-
-            assert_equal [r hgetall rdb:k1] {a 1 b 2 c 3}
-            assert_equal [r hget rdb:k2 b] 8
-            assert_equal [r object encoding rdb:k1] $enc
-        }
-        r config set hash-max-listpack-entries $saved
+        assert_equal [r hgetall rdb:k1] {a 1 b 2 c 3}
+        assert_equal [r hget rdb:k2 b] 8
+        assert_equal [r object encoding rdb:k1] $encoding
     }
 
-    test {threshold=1: HDEL releases template ref when key is dropped} {
+    test "HDEL releases template ref when key is dropped ($encoding)" {
         r flushall
         wait_num_templates 0
         r hset del:1 a 1 b 2 c 3
@@ -1484,114 +1462,112 @@ start_server {tags {"hash" "needs:debug" "cluster:skip"}
         assert_equal [expr {$k1 - $k2}] 1
     }
 
-    test {threshold=1: AOF rewrite preserves auto-converted hashes} {
+    test "AOF rewrite preserves auto-converted hashes ($encoding)" {
         r config set aof-use-rdb-preamble no
-        # Run for both value encodings: default listpack, and array forced via
-        # hash-max-listpack-entries 0 (values then can't fit a listpack).
-        set saved [lindex [r config get hash-max-listpack-entries] 1]
-        foreach {enc maxlp} [list template-listpack $saved template-array 0] {
-            r flushall
-            wait_num_templates 0
-            r config set hash-max-listpack-entries $maxlp
-            waitForBgrewriteaof r
-            r hset aof:1 a 1 b 2 c 3
-            r hset aof:2 a 9 b 8 c 7
-            set t_before [s hash_templates]
-            set k_before [s hash_template_keys]
-            r bgrewriteaof
-            waitForBgrewriteaof r
-            r debug loadaof
-            assert_equal $t_before [s hash_templates]
-            assert_equal $k_before [s hash_template_keys]
-            assert_equal [r hgetall aof:1] {a 1 b 2 c 3}
-            assert_equal [r object encoding aof:1] $enc
-        }
-        r config set hash-max-listpack-entries $saved
+        r flushall
+        wait_num_templates 0
+        waitForBgrewriteaof r
+        r hset aof:1 a 1 b 2 c 3
+        r hset aof:2 a 9 b 8 c 7
+        assert_equal 1 [s hash_templates]
+        assert_equal 2 [s hash_template_keys]
+        r bgrewriteaof
+        waitForBgrewriteaof r
+        r debug loadaof
+        assert_equal 1 [s hash_templates]
+        assert_equal 2 [s hash_template_keys]
+        assert_equal [r hgetall aof:1] {a 1 b 2 c 3}
+        assert_equal [r object encoding aof:1] $encoding
     }
 
-    test {threshold=1: every convert-triggering write path auto-converts} {
+    test "every convert-triggering write path auto-converts ($encoding)" {
+        r flushall
+        wait_num_templates 0
         # Each command creates a fresh single-field key that crosses the
         # threshold; every write path that triggers conversion must end up
-        # template-encoded (HSET is covered separately above). Run it for both
-        # value encodings: the default listpack one, and the array one forced by
-        # hash-max-listpack-entries 0 (a single field then can't fit a listpack).
-        set saved [lindex [r config get hash-max-listpack-entries] 1]
-        foreach {enc maxlp} [list template-listpack $saved template-array 0] {
-            r flushall
-            wait_num_templates 0
-            r config set hash-max-listpack-entries $maxlp
-            foreach {name cmd} {
-                hsetnx       {hsetnx conv:hsetnx f v}
-                hsetex       {hsetex conv:hsetex FIELDS 1 f v}
-                hincrby      {hincrby conv:hincrby f 5}
-                hincrbyfloat {hincrbyfloat conv:hincrbyfloat f 1.5}
-            } {
-                r {*}$cmd
-                set key [lindex $cmd 1]
-                assert_equal [r object encoding $key] $enc \
-                    "$name should auto-convert $key to $enc"
-            }
+        # template-encoded (HSET is covered separately above).
+        foreach {name cmd} {
+            hsetnx       {hsetnx conv:hsetnx f v}
+            hsetex       {hsetex conv:hsetex FIELDS 1 f v}
+            hincrby      {hincrby conv:hincrby f 5}
+            hincrbyfloat {hincrbyfloat conv:hincrbyfloat f 1.5}
+        } {
+            r {*}$cmd
+            set key [lindex $cmd 1]
+            assert_equal [r object encoding $key] $encoding \
+                "$name should auto-convert $key to $encoding"
         }
-        r config set hash-max-listpack-entries $saved
     }
-
+}
 }
 
 # ============================================================
-# Tests under hash-max-template-entries (upper bound).
-# Only hashes whose field count is within [min, max] auto-convert;
-# wider hashes are kept out of the shared template registry.
+# Conversion bounds: a hash auto-converts only when its field count is within
+# [hash-min-template-entries, hash-max-template-entries]; below min or above max
+# it stays plain.
 # ============================================================
+foreach encoding {template-listpack template-array} {
 start_server {tags {"hash" "needs:debug" "cluster:skip"}
-              overrides {hash-min-template-entries 2 hash-max-template-entries 4}} {
+              overrides {hash-min-template-entries 3 hash-max-template-entries 4}} {
+    if {$encoding eq "template-array"} { r config set hash-max-listpack-entries 0 }
+    # Plain (non-template) encoding of a small hash under the current config.
+    set plain_enc [expr {$encoding eq "template-array" ? "hashtable" : "listpack"}]
 
-    test {max bound: hash within [min,max] auto-converts} {
+    test "bound: hash within min..max auto-converts ($encoding)" {
         r flushall
         wait_num_templates 0
         r hset mid a 1 b 2 c 3
-        assert_equal [r object encoding mid] "template-listpack"
+        assert_equal [r object encoding mid] $encoding
         assert_equal [s hash_templates] 1
     }
 
-    test {max bound: hash above max stays plain} {
+    test "bound: hashes below min stay plain ($encoding)" {
+        r flushall
+        wait_num_templates 0
+        # 1..2 fields: below min (3) -> plain, no template created.
+        for {set n 1} {$n <= 2} {incr n} {
+            r del k
+            set pairs {}
+            for {set i 0} {$i < $n} {incr i} { lappend pairs f$i v$i }
+            r hset k {*}$pairs
+            assert_encoding $plain_enc k
+            assert_equal 0 [s hash_templates]
+        }
+    }
+
+    test "bound: growing a hash up to min converts it in place ($encoding)" {
+        r flushall
+        wait_num_templates 0
+        r hset k a 1 b 2       ;# 2 fields -> below min, still plain
+        assert_encoding $plain_enc k
+        assert_equal 0 [s hash_templates]
+        r hset k c 3           ;# 3rd field reaches min -> converts
+        assert_equal [r object encoding k] $encoding
+        assert_equal 1 [s hash_templates]
+    }
+
+    test "bound: hash above max stays plain ($encoding)" {
         r flushall
         wait_num_templates 0
         r hset wide f0 v0 f1 v1 f2 v2 f3 v3 f4 v4 f5 v5
-        assert_equal [r object encoding wide] "listpack"
+        assert_encoding $plain_enc wide
+        assert_equal [s hash_templates] 0
+        # Same via HSETEX (no TTL keyword, so it could otherwise template): the
+        # >max field count must keep it plain on this write path too.
+        r hsetex wide_ex FIELDS 6 f0 v0 f1 v1 f2 v2 f3 v3 f4 v4 f5 v5
+        assert_encoding $plain_enc wide_ex
         assert_equal [s hash_templates] 0
     }
 
-    test {max bound: hash below min stays plain} {
-        r flushall
-        wait_num_templates 0
-        r hset small a 1
-        assert_equal [r object encoding small] "listpack"
-        assert_equal [s hash_templates] 0
-    }
-
-    test {max bound: max=0 disables the upper bound} {
+    test "bound: max=0 disables the upper bound ($encoding)" {
         r flushall
         wait_num_templates 0
         r config set hash-max-template-entries 0
         r hset wide2 f0 v0 f1 v1 f2 v2 f3 v3 f4 v4 f5 v5
-        assert_equal [r object encoding wide2] "template-listpack"
+        assert_equal [r object encoding wide2] $encoding
         r config set hash-max-template-entries 4
     }
-
-    test {max bound: runtime change is applied lazily on next write} {
-        r flushall
-        wait_num_templates 0
-        # A 3-field hash converts while max=4.
-        r hset k a 1 b 2 c 3
-        assert_equal [r object encoding k] "template-listpack"
-        # Lowering max below the existing template's field count must not
-        # convert it back.
-        r config set hash-max-template-entries 2
-        # A new 3-field hash now exceeds max and stays plain.
-        r hset k2 a 1 b 2 c 3
-        assert_equal [r object encoding k2] "listpack"
-        r config set hash-max-template-entries 4
-    }
+}
 }
 
 
@@ -2103,6 +2079,8 @@ start_server {tags {"hash" "needs:debug" "cluster:skip" "external:skip"}
         r config rewrite
         r save
         restart_server 0 true false
+        # The load crossed the throttle and logged it (the important event here).
+        verify_log_message 0 "*Hash template creation throttled during RDB load*" 0
         # Every field set was single-use, so none survive as templates whether
         # they were throttled (never created) or disassembled at end of load.
         assert_equal 0 [s hash_templates]

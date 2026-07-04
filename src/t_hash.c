@@ -3190,8 +3190,15 @@ void rdbLoadTemplateCtxFree(rdbLoadTemplateCtx *ctx) {
 static int rdbLoadTemplateCtxShouldStopCreating(rdbLoadTemplateCtx *ctx) {
     if (!ctx->stop_creating) {
         size_t few_key = dictSize(ctx->reverse_lookup);
-        if (few_key > MIN_REVERSE_LOOKUP && few_key * 2 > ctx->number_of_templates)
+        if (few_key > MIN_REVERSE_LOOKUP && few_key * 2 > ctx->number_of_templates) {
             ctx->stop_creating = 1;
+            serverLog(LL_NOTICE,
+                "Hash template creation throttled during RDB load: %zu of the %zu "
+                "templates created so far hold fewer than %zu keys "
+                "(hash-rdb-load-template-disassembly-threshold); the few-key ones "
+                "dominate, so no new templates are created for the rest of the load.",
+                few_key, ctx->number_of_templates, ctx->disassembly_threshold);
+        }
     }
     return ctx->stop_creating;
 }
