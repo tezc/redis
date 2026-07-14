@@ -331,28 +331,35 @@ static hashTemplateArray *hashTemplateArrayCreate(hashTemplate *tmpl, sds *value
 
 /* Keys freed in BIO lazyfree thread sets a dict (template id->key_ref_count). 
  * Later, it is applied on main thread in cron, key refs are actually dropped. */
-static redisAtomic uintptr_t bio_pending_drops = 0;
+typedef struct {
+    uint64_t *counts;  /* counts[id] = pending key ref drops for template id */
+    size_t cap;
+} tmplPendingDrops;
 
-static uint64_t pendingDropHash(const void *key) { return (uint64_t)(uintptr_t)key; }
-static dictType pendingDropDictType = { pendingDropHash, NULL, NULL, NULL, NULL, NULL, NULL };
+static redisAtomic uintptr_t bio_pending_drops = 0;  /* tmplPendingDrops* mailbox */
 
-/* BIO thread: Increment deleted key count for the template id. */
+/* BIO thread: record one dropped key ref for template id. */
 static void hashTemplateRecordPendingDrop(uint64_t id) {
     serverAssert(bioIsLazyfreeWorker());
 
     uintptr_t cur;
     atomicExchangeAcquire(bio_pending_drops, 0, cur);
 
-    dict *d = cur ? (dict *)cur : dictCreate(&pendingDropDictType);
-    dictEntry *e;
-    dictEntry *de = dictAddRaw(d, (void *)(uintptr_t)id, &e);
-    
-    /* Increment deleted key count for the template id */
-    if (de) 
-        dictSetUnsignedIntegerVal(de, 1);
-    else    
-        dictSetUnsignedIntegerVal(e, dictGetUnsignedIntegerVal(e) + 1);
-    atomicSetRelease(bio_pending_drops, (uintptr_t)d);
+    tmplPendingDrops *p = (tmplPendingDrops *)cur;
+    if (p == NULL) {
+        p = zmalloc(sizeof(*p));
+        p->counts = NULL;
+        p->cap = 0;
+    }
+    if (id >= p->cap) {
+        size_t ncap = p->cap ? p->cap : 8;
+        while (ncap <= id) ncap *= 2;
+        p->counts = zrealloc(p->counts, ncap * sizeof(uint64_t));
+        memset(p->counts + p->cap, 0, (ncap - p->cap) * sizeof(uint64_t));
+        p->cap = ncap;
+    }
+    p->counts[id]++;
+    atomicSetRelease(bio_pending_drops, (uintptr_t)p);
 }
 
 /* Sum of the 'n' sds lengths, or -1 if any exceeds hash-max-listpack-value. */
@@ -683,9 +690,12 @@ void hashTemplateIncrHoldRef(hashTemplate *tmpl) {
 }
 
 /* Free the template when no key and no holder reference it. */
-static void hashTemplateFreeIfUnreferenced(hashTemplate *tmpl) {
-    if (tmpl->key_refcount == 0 && tmpl->hold_refcount == 0)
+static int hashTemplateFreeIfUnreferenced(hashTemplate *tmpl) {
+    if (tmpl->key_refcount == 0 && tmpl->hold_refcount == 0) {
         dictDelete(htemplates->by_fields, tmpl);
+        return 1;
+    }
+    return 0;
 }
 
 /* Drop one hold-ref (a client's prepared fieldset, or an in-progress RDB load).
@@ -719,16 +729,16 @@ static void hashTemplateDecrKeyRef(hashTemplate *tmpl) {
  * draining large batches (e.g. after FLUSHALL). */
 static void hashTemplateApplyPendingDrops(void) {
     /* Drain state kept across serverCron cycles (main-thread only). */
-    static dict *batch = NULL;
-    static dictIterator it;
+    static tmplPendingDrops *batch = NULL;
+    static size_t pos = 0;
 
     /* Acquire new batch if not already draining. */
     if (batch == NULL) {
         uintptr_t cur;
         atomicExchangeAcquire(bio_pending_drops, 0, cur);
         if (cur == 0) return;
-        batch = (dict *)cur;
-        dictInitSafeIterator(&it, batch);
+        batch = (tmplPendingDrops *)cur;
+        pos = 0;
     }
 
     /* Time limit: spread work across multiple cron cycles to avoid spikes. */
@@ -736,20 +746,26 @@ static void hashTemplateApplyPendingDrops(void) {
     long long timelimit = 1000000 / server.hz / 10;  /* 10% of a hz cycle */
     if (timelimit <= 0) timelimit = 1;
 
-    int i = 0;
-    dictEntry *de;
-    while ((de = dictNext(&it)) != NULL) {
-        hashTemplate *tmpl = hashTemplateGetById((uint64_t)(uintptr_t)dictGetKey(de));
-        uint64_t n = dictGetUnsignedIntegerVal(de);
-        serverAssert(tmpl != NULL && tmpl->key_refcount >= n);
-        htemplates->total_key_refs -= n;
-        tmpl->key_refcount -= n;
-        if (tmpl->key_refcount == 0) hashTemplateFreeIfUnreferenced(tmpl);
-        /* Check the clock every 64 drops. */
-        if ((++i & 63) == 0 && ustime() - start > timelimit) return;
+    unsigned long scanned = 0, freed = 0;
+    while (pos < batch->cap) {
+        size_t id = pos++; /* advance before any return, so we never reapply it */
+        uint64_t n = batch->counts[id];
+        int didfree = 0;
+        if (n) {
+            hashTemplate *tmpl = hashTemplateGetById(id);
+            serverAssert(tmpl != NULL && tmpl->key_refcount >= n);
+            htemplates->total_key_refs -= n;
+            tmpl->key_refcount -= n;
+            didfree = hashTemplateFreeIfUnreferenced(tmpl);
+            freed += didfree;
+        }
+        /* Budget check: every 1024 slots scanned or every 64 actual frees */
+        if (((++scanned & 1023) == 0 || (didfree && (freed & 63) == 0)) &&
+            ustime() - start > timelimit)
+            return;
     }
-    dictResetIterator(&it);
-    dictRelease(batch);
+    zfree(batch->counts);
+    zfree(batch);
     batch = NULL;
 }
 
