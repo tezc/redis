@@ -2764,20 +2764,32 @@ int updateClusterHumanNodename(const char **err) {
 }
 
 static int applyTlsCfg(const char **err) {
-    UNUSED(err);
-
     /* If TLS is enabled, try to configure OpenSSL. */
-    if ((server.tls_port || server.tls_replication || server.tls_cluster)
-         && connTypeConfigure(connectionTypeTls(), &server.tls_ctx_config, 1) == C_ERR) {
-        *err = "Unable to update TLS configuration. Check server logs.";
-        return 0;
+    if (server.tls_port || server.tls_replication || server.tls_cluster) {
+        ConnectionType *ct_tls = connectionTypeTls();
+        /* Refuse if no TLS support compiled in */
+        if (!ct_tls) {
+            *err = "TLS support is not compiled in, cannot enable TLS options.";
+            return 0;
+        }
+        if (connTypeConfigure(ct_tls, &server.tls_ctx_config, 1) == C_ERR) {
+            *err = "Unable to update TLS configuration. Check server logs.";
+            return 0;
+        }
     }
     return 1;
 }
 
 static int applyTLSPort(const char **err) {
+    ConnectionType *ct_tls = connectionTypeTls();
+    /* Refuse if no TLS support compiled in */
+    if (!ct_tls) {
+        *err = "TLS support is not compiled in, cannot set a TLS port.";
+        return 0;
+    }
+
     /* Configure TLS in case it wasn't enabled */
-    if (connTypeConfigure(connectionTypeTls(), &server.tls_ctx_config, 0) == C_ERR) {
+    if (connTypeConfigure(ct_tls, &server.tls_ctx_config, 0) == C_ERR) {
         *err = "Unable to update TLS configuration. Check server logs.";
         return 0;
     }
@@ -3357,6 +3369,12 @@ standardConfig static_configs[] = {
 
     /* Size_t configs */
     createSizeTConfig("hash-max-listpack-entries", "hash-max-ziplist-entries", MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_max_listpack_entries, 512, INTEGER_CONFIG, NULL, NULL),
+    createSizeTConfig("hash-min-template-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_min_template_entries, 0, INTEGER_CONFIG, NULL, NULL),
+    createSizeTConfig("hash-max-template-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_max_template_entries, 0, INTEGER_CONFIG, NULL, NULL),
+    createSizeTConfig("hash-rdb-load-min-template-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_rdb_load_min_template_entries, 0, INTEGER_CONFIG, NULL, NULL),
+    createSizeTConfig("hash-rdb-load-max-template-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_rdb_load_max_template_entries, 0, INTEGER_CONFIG, NULL, NULL),
+    createSizeTConfig("hash-rdb-load-template-disassembly-threshold", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_rdb_load_template_disassembly_threshold, 0, INTEGER_CONFIG, NULL, NULL),
+
     createSizeTConfig("set-max-intset-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.set_max_intset_entries, 512, INTEGER_CONFIG, NULL, NULL),
     createSizeTConfig("set-max-listpack-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.set_max_listpack_entries, 128, INTEGER_CONFIG, NULL, NULL),
     createSizeTConfig("set-max-listpack-value", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.set_max_listpack_value, 64, INTEGER_CONFIG, NULL, NULL),

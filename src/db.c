@@ -373,9 +373,10 @@ kvobj *lookupKeyWrite(redisDb *db, robj *key) {
 
 /* Like lookupKeyWrite(), but accepts ref to optional `link`
  *
- * link - If key found, updated to link the key.
- *        If key not found, updated to the bucket where the key should be added.
- *        If key not found and dict is empty, it is set to NULL
+ *   found & valid    -> returns the kvobj; link = the key's entry.
+ *   absent           -> returns NULL;      link = the bucket to add it to.
+ *   expired/trimmed  -> returns NULL;      link = NULL (key may still remain in the dict).
+ *   empty dict       -> returns NULL;      link = NULL.
  */
 kvobj *lookupKeyWriteWithLink(redisDb *db, robj *key, dictEntryLink *link) {
     return lookupKey(db, key, LOOKUP_NONE | LOOKUP_WRITE, link);
@@ -2095,6 +2096,48 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
             p = lpNext(lp, p);
         }
         setDeferredArrayLen(c,replylen,cur_length);
+        return;
+    } else if (o->type == OBJ_HASH &&
+               (o->encoding == OBJ_ENCODING_TMPL_LP ||
+                o->encoding == OBJ_ENCODING_TMPL_ARRAY))
+    {
+        unsigned long n = hashTypeLength(o, 0);
+        vecRelease(&keys);
+        addReplyArrayLen(c, 2);
+        /* Cursor is always 0 given we iterate over all hash fields. */
+        addReplyBulkLongLong(c, 0);
+
+        void *replylen = NULL;
+        unsigned long cur_length = 0;
+        if (use_pattern)
+            replylen = addReplyDeferredLen(c);
+        else
+            addReplyArrayLen(c, no_values ? n : n * 2);
+
+        hashTypeIterator hi;
+        hashTypeInitIterator(&hi, o);
+        while (hashTypeNext(&hi, 0) != C_ERR) {
+            unsigned char *vstr;
+            size_t vlen;
+            long long vll;
+            hashTypeCurrentObject(&hi, OBJ_HASH_KEY, &vstr, &vlen, &vll, NULL);
+            if (use_pattern && !stringmatchlen(pat, patlen, (char*)vstr, vlen, 0))
+                continue;
+            addReplyBulkCBuffer(c, vstr, vlen);
+            cur_length++;
+            if (!no_values) {
+                hashTypeCurrentObject(&hi, OBJ_HASH_VALUE, &vstr, &vlen, &vll, NULL);
+                if (vstr)
+                    addReplyBulkCBuffer(c, vstr, vlen);
+                else
+                    addReplyBulkLongLong(c, vll);
+                cur_length++;
+            }
+        }
+        hashTypeResetIterator(&hi);
+
+        if (use_pattern)
+            setDeferredArrayLen(c, replylen, cur_length);
         return;
     } else {
         serverPanic("Not handled encoding in SCAN.");

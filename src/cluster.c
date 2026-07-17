@@ -85,20 +85,42 @@ ConnectionType *connTypeOfCluster(void) {
  * -------------------------------------------------------------------------- */
 
 /* Generates a DUMP-format representation of the object 'o', adding it to the
- * io stream pointed by 'rio'. This function can't fail. */
-void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int skip_checksum) {
+ * io stream pointed by 'rio'. Flags can omit the checksum or key metadata.
+ * This function can't fail. */
+void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int flags, size_t size_hint) {
     unsigned char buf[2];
     uint64_t crc = 0;
 
     /* Serialize the object in an RDB-like format. It consist of an object type
-     * byte followed by the serialized object. This is understood by RESTORE. */
-    rioInitWithBuffer(payload,sdsempty());
+     * byte followed by the serialized object. This is understood by RESTORE.
+     * 'size_hint', when non-zero, sizes the buffer to the caller's estimate of
+     * the payload in a single allocation to avoid reallocations. */
+    sds buffer;
+    if (size_hint) {
+        buffer = sdsnewlen(SDS_NOINIT, size_hint);
+        sdssetlen(buffer, 0);
+        buffer[0] = '\0';
+    } else {
+        buffer = sdsempty();
+    }
+    rioInitWithBuffer(payload,buffer);
 
-    /* Save key metadata if present without (handles TTL separately via command args) */
-    if (getModuleMetaBits(o->metabits))
+    /* A DUMP payload is standalone: serialize objects self-contained (not ref
+     * form), and skip LZF when the caller asked for raw bytes. */
+    int prev_ref = rdbSaveSetRefMode(0);
+    int prev_comp = server.rdb_compression;
+    if (flags & DUMP_PAYLOAD_DONT_COMPRESS) server.rdb_compression = 0;
+
+    /* Save key metadata if present (TTL is handled separately via command
+     * args). AOF RESTORE payloads omit it because AOF rewrite handles module
+     * metadata separately through keyMetaOnAof(). */
+    if (!(flags & DUMP_PAYLOAD_SKIP_KEY_META) && getModuleMetaBits(o->metabits))
         serverAssert(rdbSaveKeyMetadata(payload, key, o, dbid) != -1);
     serverAssert(rdbSaveObjectType(payload,o));
     serverAssert(rdbSaveObject(payload,o,key,dbid));
+
+    server.rdb_compression = prev_comp;
+    rdbSaveSetRefMode(prev_ref);
 
     /* Write the footer, this is how it looks like:
      * ----------------+---------------------+---------------+
@@ -114,13 +136,22 @@ void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int skip_chec
 
     /* If crc checksum is disabled, crc is set to 0 and no checksum validation
      * will be performed on RESTORE. */
-    if (!skip_checksum) {
+    if (!(flags & DUMP_PAYLOAD_SKIP_CHECKSUM)) {
         /* CRC64 */
         crc = crc64(0,(unsigned char*)payload->io.buffer.ptr,
                     sdslen(payload->io.buffer.ptr));
         memrev64ifbe(&crc);
     }
     payload->io.buffer.ptr = sdscatlen(payload->io.buffer.ptr,&crc,8);
+}
+
+/* CRC-less, compression-less DUMP payload for RESTORE; returns an sds the caller
+ * owns. size_hint (if nonzero) presizes. */
+sds createRawDumpPayload(robj *o, robj *key, int dbid, int flags, size_t size_hint) {
+    rio payload;
+    createDumpPayload(&payload, o, key, dbid,
+                      DUMP_PAYLOAD_SKIP_CHECKSUM | DUMP_PAYLOAD_DONT_COMPRESS | flags, size_hint);
+    return payload.io.buffer.ptr;
 }
 
 /* Verify that the RDB version of the dump payload matches the one of this Redis
@@ -172,7 +203,7 @@ void dumpCommand(client *c) {
     }
 
     /* Create the DUMP encoded representation. */
-    createDumpPayload(&payload,o,c->argv[1],c->db->id,0);
+    createDumpPayload(&payload,o,c->argv[1],c->db->id,0,0);
 
     /* Transfer to the client */
     addReplyBulkSds(c,payload.io.buffer.ptr);
@@ -222,9 +253,7 @@ void restoreCommand(client *c) {
 
     /* Make sure this key does not already exist here... */
     robj *key = c->argv[1];
-    kvobj *oldval = lookupKeyWrite(c->db,key);
-    int oldtype = oldval ? oldval->type : -1;
-    if (!replace && oldval) {
+    if (!replace && lookupKeyWrite(c->db,key) != NULL) {
         addReplyErrorObject(c,shared.busykeyerr);
         return;
     }
@@ -271,10 +300,21 @@ void restoreCommand(client *c) {
         return;
     }
 
-    /* Remove the old key if needed. */
+    /* Resolve the key's existence and its insertion link. On the common new-key
+     * path dbAddInternal() below reuses the link instead of probing again. */
+    dictEntryLink link = NULL;
+    kvobj *oldval = lookupKeyWriteWithLink(c->db, key, &link);
+    int oldtype = oldval ? oldval->type : -1;
+
+    /* Call dbDelete() only when a key is actually present:
+     *   oldval != NULL -> key exists.
+     *   link  == NULL  -> an expired key might still be physically present and 
+     *                     must be deleted. */
     int deleted = 0;
-    if (replace)
+    if (replace && (oldval || !link)) {
         deleted = dbDelete(c->db,key);
+        link = NULL; /* dbDelete invalidated the link */
+    }
 
     if (ttl && checkAlreadyExpired(ttl)) {
         if (deleted) {
@@ -293,7 +333,7 @@ void restoreCommand(client *c) {
     }
 
     /* Create the key and set the TTL if any */
-    kvobj *kv = dbAddInternal(c->db, key, &obj, NULL, &keymeta);
+    kvobj *kv = dbAddInternal(c->db, key, &obj, &link, &keymeta);
 
     /* Save type: kv may be reallocated by module callbacks during notifyKeyspaceEvent below. */
     int kvtype = kv->type;
@@ -612,7 +652,7 @@ void migrateCommand(client *c) {
 
         /* Emit the payload argument, that is the serialized object using
          * the DUMP format. */
-        createDumpPayload(&payload,kvArray[j],keyArray[j],dbid,0);
+        createDumpPayload(&payload,kvArray[j],keyArray[j],dbid,0,0);
         serverAssertWithInfo(c,NULL,
                              rioWriteBulkString(&cmd,payload.io.buffer.ptr,
                                                 sdslen(payload.io.buffer.ptr)));
@@ -1501,6 +1541,7 @@ int clusterRedirectBlockedClientIfNeeded(client *c) {
     clusterNode *myself = getMyClusterNode();
     if (c->flags & CLIENT_BLOCKED &&
         (c->bstate.btype == BLOCKED_LIST ||
+         c->bstate.btype == BLOCKED_LIST_NONEMPTY ||
          c->bstate.btype == BLOCKED_ZSET ||
          c->bstate.btype == BLOCKED_STREAM ||
          c->bstate.btype == BLOCKED_MODULE))

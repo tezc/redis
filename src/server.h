@@ -495,6 +495,12 @@ typedef enum blocking_type {
     BLOCKED_POSTPONE_TRIM, /* Master client is blocked due to an active trim job. */
     BLOCKED_SHUTDOWN, /* SHUTDOWN. */
     BLOCKED_LAZYFREE, /* LAZYFREE */
+    BLOCKED_LIST_NONEMPTY, /* Blocked waiting for an already-existing list to
+                            * grow enough (BLMOVEM EXACTLY). Woken by list
+                            * creation (like BLOCKED_LIST) and by writes that
+                            * grow a pre-existing list, but NOT limited to key
+                            * availability. Unlike BLOCKED_LIST, module clients
+                            * are not woken by the "list grew" signal. */
     BLOCKED_NUM,      /* Number of blocked states. */
     BLOCKED_END       /* End of enumeration */
 } blocking_type;
@@ -1323,6 +1329,12 @@ typedef struct blockingState {
 typedef struct readyList {
     redisDb *db;
     robj *key;
+    int wake_modules;           /* Whether module-blocked clients on this key
+                                 * should be served. Set to 0 by signals coming
+                                 * from BLOCKED_LIST_NONEMPTY (plain writes to a
+                                 * pre-existing list), so module clients keep
+                                 * being woken only by RM_SignalKeyAsReady or
+                                 * key (re)creation. */
 } readyList;
 
 /* List of pending commands. */
@@ -1663,6 +1675,7 @@ typedef struct client {
     size_t stat_total_read_events; /* Number of times readQueryFromClient() was called */
     size_t stat_avg_pipeline_length_sum; /* Sum of pipeline lengths for computing average */
     size_t stat_avg_pipeline_length_cnt; /* Count of pipeline length samples */
+    void *himport_fieldsets;      /* Session-local HIMPORT fieldsets */
 } client;
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
@@ -1735,10 +1748,11 @@ struct sharedObjectsStruct {
     *masterdownerr, *roslaveerr, *execaborterr, *noautherr, *noreplicaserr,
     *busykeyerr, *oomerr, *plus, *messagebulk, *pmessagebulk, *subscribebulk,
     *unsubscribebulk, *psubscribebulk, *punsubscribebulk, *del, *unlink,
-    *rpop, *lpop, *lpush, *rpoplpush, *lmove, *blmove, *zpopmin, *zpopmax,
+    *rpop, *lpop, *lpush, *rpoplpush, *lmove, *blmove, *lmovem, *exactly,
+    *obo, *bulk, *zpopmin, *zpopmax,
     *emptyscan, *multi, *exec, *left, *right, *hset, *srem, *xgroup, *xclaim, *xack,
     *script, *replconf, *eval, *persist, *set, *pexpireat, *pexpire,
-    *hdel, *hpexpireat, *hpersist, *hsetex,
+    *hdel, *hpexpireat, *hpersist, *hsetex, *restore, *replace,
     *time, *pxat, *absttl, *retrycount, *force, *justid, *entriesread,
     *lastid, *ping, *setid, *keepttl, *load, *createconsumer, *fields,
     *getack, *special_asterick, *special_equals, *default_username, *redacted,
@@ -1833,6 +1847,7 @@ struct redisMemOverhead {
     size_t eval_caches;
     size_t functions_caches;
     size_t script_vm;
+    size_t hash_templates;
     size_t overhead_total;
     size_t dataset;
     size_t total_keys;
@@ -2054,7 +2069,6 @@ struct redisServer {
     int module_pipe[2];         /* Pipe used to awake the event loop by module threads. */
     pid_t child_pid;            /* PID of current child */
     int child_type;             /* Type of current child */
-    int debug_fork_fail;        /* Make the next redisFork() fail. (used by tests) */
     redisAtomic int module_gil_acquring; /* Indicates whether the GIL is being acquiring by the main thread. */
     /* Networking */
     int port;                   /* TCP listening port */
@@ -2382,6 +2396,7 @@ struct redisServer {
     int repl_ping_slave_period;     /* Master pings the slave every N seconds */
     replBacklog *repl_backlog;      /* Replication backlog for partial syncs */
     long long repl_backlog_size;    /* Backlog circular buffer size */
+    long long repl_last_flush_offset;  /* master_repl_offset at the last replica flush */
     long long repl_full_sync_buffer_limit; /* Accumulated repl data limit during rdb channel replication */
     replDataBuf repl_full_sync_buffer;  /* Accumulated replication data for rdb channel replication */
     time_t repl_backlog_time_limit; /* Time without slaves after the backlog
@@ -2485,6 +2500,38 @@ struct redisServer {
     /* Zip structure config, see redis.conf for more information  */
     size_t hash_max_listpack_entries;
     size_t hash_max_listpack_value;
+    /* Hash template config */
+    size_t hash_min_template_entries; /* Field-count threshold at which regular
+                                       * hashes are auto-converted to template
+                                       * encoding. Applies to the live command
+                                       * path (e.g. HSET), not RDB load (which has
+                                       * its own hash_rdb_load_* configs below).
+                                       * 0 disables auto-convert. */
+    size_t hash_max_template_entries; /* Upper field-count bound for that
+                                       * auto-convert: hashes with more fields than
+                                       * this are not converted. 0 disables the
+                                       * upper bound. */
+    size_t hash_rdb_load_min_template_entries; /* Like hash_min_template_entries
+                                       * but applied on the RDB-load path (which
+                                       * the AOF RDB preamble also uses). Only
+                                       * effective if the RDB does not already
+                                       * include templates; otherwise it is loaded
+                                       * as-is. 0 disables. */
+    size_t hash_rdb_load_max_template_entries; /* Upper field-count bound for the
+                                       * RDB-load path. 0 disables the bound. */
+    size_t hash_rdb_load_template_disassembly_threshold; /* Relevant only when
+                                       * RDB-load auto-convert is on (i.e.
+                                       * hash_rdb_load_min_template_entries > 0).
+                                       * That auto-convert turns plain hashes into
+                                       * templates as the RDB loads; afterwards a
+                                       * template still shared by fewer than this
+                                       * many keys ("few-key") is disassembled back
+                                       * to a plain hash, so rarely-shared
+                                       * templates don't waste memory. Also drives
+                                       * the throttle that stops creating new
+                                       * templates once most are few-key. RDB-load
+                                       * only, not RESTORE/DUMP. 0 disables. */
+    struct hashTemplateRegistry *htemplates;   /* Global template registry */
     size_t set_max_intset_entries;
     size_t set_max_listpack_entries;
     size_t set_max_listpack_value;
@@ -3080,6 +3127,10 @@ typedef struct {
 
     dictIterator di;
     dictEntry *de;
+
+    /* For TMPL_LP and TMPL_ARRAY encodings. */
+    int tmpl_index;  /* Current field index in template (-1 = not started). */
+    struct hashTemplate *tmpl;  /* Cached template pointer. */
 } hashTypeIterator;
 
 #include "stream.h"  /* Stream data type header file. */
@@ -3158,6 +3209,7 @@ size_t moduleCount(void);
 void moduleAcquireGIL(void);
 int moduleTryAcquireGIL(void);
 void moduleReleaseGIL(void);
+int moduleThreadHoldsGIL(void);
 void moduleNotifyKeyspaceEvent(int type, const char *event, robj *key, int dbid, robj **subkeys, int count);
 void firePostExecutionUnitJobs(void);
 void firePerKeyJobsBetweenSubcommands(void);
@@ -3313,6 +3365,7 @@ int getClientType(client *c);
 int getClientTypeByName(char *name);
 char *getClientTypeName(int class);
 void flushSlavesOutputBuffers(void);
+void flushSlavesOutputBuffersIfNeeded(void);
 void disconnectSlaves(void);
 void evictClients(void);
 int listenToPort(connListener *fds);
@@ -3399,7 +3452,9 @@ void trackingLimitUsedSlots(void);
 uint64_t trackingGetTotalItems(void);
 uint64_t trackingGetTotalKeys(void);
 uint64_t trackingGetTotalPrefixes(void);
-void trackingBroadcastInvalidationMessages(void);
+void trackingBroadcastInvalidationMessages(user *u);
+void trackingBroadcastFlushClientPrefixes(client *c);
+void clientSetUser(client *c, user *new_user);
 int checkPrefixCollisionsOrReply(client *c, robj **prefix, size_t numprefix);
 
 /* List data type */
@@ -3603,6 +3658,7 @@ unsigned long ACLGetCommandID(sds cmdname);
 void ACLClearCommandID(void);
 user *ACLGetUserByName(const char *name, size_t namelen);
 int ACLUserCheckKeyPerm(user *u, const char *key, int keylen, int flags);
+int ACLUserHasUnrestrictedKeyAccess(user *u, int flags);
 int ACLUserCheckChannelPerm(user *u, sds channel, int literal);
 int ACLCheckAllUserCommandPerm(user *u, struct redisCommand *cmd, robj **argv, int argc, getKeysResult *key_result, int *idxptr);
 int ACLUserCheckCmdWithUnrestrictedKeyAccess(user *u, struct redisCommand *cmd, robj **argv, int argc, int flags);
@@ -3729,6 +3785,7 @@ void startCommandExecution(void);
 int incrCommandStatsOnError(struct redisCommand *cmd, int flags);
 void call(client *c, int flags);
 void alsoPropagate(int dbid, robj **argv, int argc, int target);
+int shouldPropagate(int target);
 void postExecutionUnitOperations(void);
 int redisOpArrayAppend(redisOpArray *oa, int dbid, robj **argv, int argc, int target);
 void redisOpArrayFree(redisOpArray *oa);
@@ -3779,6 +3836,7 @@ void checkChildrenDone(void);
 int setOOMScoreAdj(int process_class);
 void rejectCommandFormat(client *c, const char *fmt, ...);
 void *activeDefragAlloc(void *ptr);
+sds activeDefragSds(sds sdsptr);
 void *activeDefragAllocRaw(size_t size);
 void activeDefragFreeRaw(void *ptr);
 robj *activeDefragStringOb(robj* ob);
@@ -3835,6 +3893,71 @@ typedef struct listpackEx {
                          are ordered by ttl. */
 } listpackEx;
 
+/*-----------------------------------------------------------------------------
+ * Hash with shared template (Hash Templates) - OBJ_ENCODING_TMPL_LP/ARRAY
+ *
+ * These encodings store hash values without repeating field names. Instead,
+ * field names are stored once in a shared template structure and multiple
+ * hash keys can reference the same template.
+ * 
+ * Lookup for "Hash template registry internals" in t_hash.c for more details. 
+ *----------------------------------------------------------------------------*/
+
+/* Shared template for hash fields. Multiple hashes can reference the same
+ * template to save memory when they have identical field layouts. */
+typedef struct hashTemplate {
+    uint64_t id;         /* Runtime registry ID. Stored as the first listpack
+                          * entry in TMPL_LP (varint, ~1-2 bytes) instead of an
+                          * 8-byte template pointer, and written by RDB save
+                          * to identify the template. */
+    uint64_t hash;       /* Pre-computed commutative hash of the field-name set
+                          * (order-independent; see computeFieldsHash). */
+    unsigned long long key_refcount; /* Number of hash keys. */
+    unsigned long long hold_refcount; /* Non-key holders (a client's HIMPORT
+                          * PREPARE fieldset, RDB load); keeps a template alive
+                          * while it has no keys yet but is still referenced. */
+    unsigned long long field_count; /* Number of fields in the template. */
+    size_t mem_size;     /* Cached own allocation footprint: the struct, the
+                          * fields array, and the duplicated field-name SDS.
+                          * Constant after creation (templates are immutable;
+                          * a changed field set creates a new template). Used to
+                          * attribute a holder's share to client memory. */
+    sds *fields;         /* Ordered array of field names. */
+    unsigned char *fields_lp; /* Lazily-built listpack of the sorted field names
+                          * ([f0][f1]...[fN-1]), also the by_fields_lp key. NULL
+                          * until first needed. Lets the self-contained DUMP/RESTORE
+                          * ship fields as one blob instead of N strings, and lets
+                          * RESTORE find the template with one O(1) blob lookup.*/
+    mstime_t fields_lp_last_used; /* Last time fields_lp was used, for cron idle reclaim. */
+    unsigned int fits_in_listpack;  /* 1 if fields fit in listpack (DUMP serializes them as LP blob) */
+} hashTemplate;
+
+/* Global registry for hash templates. */
+typedef struct hashTemplateRegistry {
+    dict *by_fields;            /* field set -> template lookup */
+    dict *by_fields_lp;         /* fields-listpack blob -> template lookup, used
+                                 * to resolve template on RESTORE command in
+                                 * O(1) without reading field names one by one. */
+    struct tmplIdChunk **by_id; /* ID -> template lookup (chunked array). */
+    size_t by_id_cap;           /* How many chunk pointers by_id can hold. */
+    size_t by_id_chunks;        /* How many chunks are currently allocated. */
+    size_t by_id_next;          /* The next id that has never been used. */
+    size_t total_key_refs;      /* Sum of key_refcount across all templates. */
+    size_t total_mem_size;      /* Sum of every live template's mem_size, plus any
+                                 * attached fields_lp blobs. */
+} hashTemplateRegistry;
+
+/* 1. OBJ_ENCODING_TMPL_LP: o->ptr points directly to a listpack.
+ *   Format: [template_id (varint)][value1][value2]...
+ *   Template is looked up via hashTemplateGetById().
+ * 2. OBJ_ENCODING_TMPL_ARRAY: Hash with template, values stored in array.
+ *   Values are stored as sds array in template field order. */
+typedef struct hashTemplateArray {
+    uint64_t tmpl_id;    /* Template id; resolve via hashTemplateGetById. */
+    unsigned long long field_count;
+    sds values[];       /* Flexible array: values in template field order. */
+} hashTemplateArray;
+
 /* Each dict of hash object that has fields with time-Expiration will have the
  * following metadata attached to dict header.
  * Note that alloc_size field must be first because hash objects without expre
@@ -3875,24 +3998,34 @@ static inline size_t *htGetMetadataSize(dict *d) {
 #define HFE_LAZY_NO_UPDATE_KEYSIZES  (1<<5) /* If field lazy deleted, avoid updating keysizes histogram */
 #define HFE_LAZY_NO_UPDATE_ALLOCSIZES (1<<6) /* If field lazy deleted, avoid updating slot allocation sizes */
 
+typedef struct rdbLoadTemplateCtx rdbLoadTemplateCtx;
+rdbLoadTemplateCtx *rdbLoadTemplateCtxCreate(size_t disassembly_threshold);
+int rdbLoadTemplateCtxTryConvert(rdbLoadTemplateCtx *ctx, robj *o);
+void rdbLoadTemplateCtxRecord(rdbLoadTemplateCtx *ctx, robj *kv, redisDb *db);
+void rdbLoadTemplateCtxDisassemble(rdbLoadTemplateCtx *ctx);
+void rdbLoadTemplateCtxFree(rdbLoadTemplateCtx *ctx);
+
 void hashTypeConvert(redisDb *db, robj *o, int enc);
+int hashTypeTryConvertToTemplate(robj *o, size_t min_fields, size_t max_fields,
+                                 rdbLoadTemplateCtx *ctx);
 void hashTypeTryConversion(redisDb *db, kvobj *kv, robj **argv, int start, int end);
 int hashTypeExists(redisDb *db, kvobj *kv, sds field, int hfeFlags, int *isHashDeleted);
 int hashTypeDelete(robj *o, void *key);
 unsigned long hashTypeLength(const robj *o, int subtractExpiredFields);
 size_t hashTypeAllocSize(const robj *o);
+size_t hashTemplatePerKeyMemoryShare(const robj *o);
 void hashTypeInitIterator(hashTypeIterator *hi, robj *subject);
 void hashTypeResetIterator(hashTypeIterator *hi);
 int hashTypeNext(hashTypeIterator *hi, int skipExpiredFields);
 void hashTypeCurrentFromListpack(hashTypeIterator *hi, int what,
                                  unsigned char **vstr,
-                                 unsigned int *vlen,
+                                 size_t *vlen,
                                  long long *vll,
                                  uint64_t *expireTime);
 void hashTypeCurrentFromHashTable(hashTypeIterator *hi, int what, char **str,
                                   size_t *len, uint64_t *expireTime);
 void hashTypeCurrentObject(hashTypeIterator *hi, int what, unsigned char **vstr,
-                           unsigned int *vlen, long long *vll, uint64_t *expireTime);
+                           size_t *vlen, long long *vll, uint64_t *expireTime);
 sds hashTypeCurrentObjectNewSds(hashTypeIterator *hi, int what);
 Entry *hashTypeCurrentObjectNewEntry(hashTypeIterator *hi, size_t *usable);
 int hashTypeGetValueObject(redisDb *db, kvobj *kv, sds field, int hfeFlags,
@@ -3902,6 +4035,29 @@ robj *hashTypeDup(kvobj *kv, uint64_t *minHashExpire);
 uint64_t hashTypeExpire(redisDb *db, kvobj *o, uint32_t *quota, int updateSubexpires, int activeEx);
 void hashTypeFree(robj *o);
 int hashTypeIsExpired(const robj *o, uint64_t expireAt);
+
+/* Hash Templates functions */
+void hashTemplatesInit(void);
+hashTemplate *hashTemplateGetOrCreate(sds *fields, unsigned long long field_count);
+hashTemplate *hashTemplateGetByFieldsLp(unsigned char *fields_lp);
+hashTemplate *hashTemplateGetById(uint64_t id);
+hashTemplate *hashTemplateDefrag(hashTemplate *tmpl);
+int hashTemplateDefragByIdChunk(unsigned long chunk_idx);
+hashTemplate *hashTypeGetTemplate(robj *o);
+void hashTemplateIncrKeyRef(hashTemplate *tmpl);
+void hashTemplateIncrHoldRef(hashTemplate *tmpl);
+void hashTemplateDecrHoldRef(hashTemplate *tmpl);
+unsigned char *hashTemplateGetFieldsLp(hashTemplate *tmpl, int cache);
+void hashTemplateIndexFieldsLp(hashTemplate *tmpl, unsigned char *fields_lp);
+void hashTemplatesCron(void);
+robj *createHashObjectFromTemplate(hashTemplate *tmpl, sds *values, int take);
+int hashTemplateValidateFields(sds *fields, unsigned long long field_count);
+size_t hashTemplatesMemUsage(void);
+size_t hashTemplateRegistrySize(void);
+size_t hashTemplateKeyCount(void);
+int64_t himportFieldsetsFree(client *c);
+size_t himportFieldsetsMemOverhead(client *c);
+
 unsigned char *hashTypeListpackGetLp(robj *o);
 uint64_t hashTypeGetMinExpire(robj *o, int accurate);
 ebuckets *hashTypeGetDictMetaHFE(dict *d);
@@ -4224,6 +4380,7 @@ int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int 
 void disconnectAllBlockedClients(void);
 void handleClientsBlockedOnKeys(void);
 void signalKeyAsReady(redisDb *db, robj *key, int type);
+void signalKeyAsReadyNonEmptyList(redisDb *db, robj *key);
 void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeout, int unblock_on_nokey);
 void blockClientShutdown(client *c);
 void blockPostponeClient(client *c);
@@ -4391,6 +4548,7 @@ void lremCommand(client *c);
 void lposCommand(client *c);
 void rpoplpushCommand(client *c);
 void lmoveCommand(client *c);
+void lmovemCommand(client *c);
 void infoCommand(client *c);
 void mgetCommand(client *c);
 void monitorCommand(client *c);
@@ -4442,12 +4600,17 @@ void brpopCommand(client *c);
 void blmpopCommand(client *c);
 void brpoplpushCommand(client *c);
 void blmoveCommand(client *c);
+void blmovemCommand(client *c);
 void appendCommand(client *c);
 void strlenCommand(client *c);
 void zrankCommand(client *c);
 void zrevrankCommand(client *c);
 void hsetCommand(client *c);
 void hsetexCommand(client *c);
+void himportPrepareCommand(client *c);
+void himportSetCommand(client *c);
+void himportDiscardCommand(client *c);
+void himportDiscardallCommand(client *c);
 void hpexpireCommand(client *c);
 void hexpireCommand(client *c);
 void hpexpireatCommand(client *c);
@@ -4509,6 +4672,11 @@ void readonlyCommand(client *c);
 void readwriteCommand(client *c);
 void sflushCommand(client *c);
 int verifyDumpPayload(unsigned char *p, size_t len, uint16_t *rdbver_ptr);
+#define DUMP_PAYLOAD_SKIP_CHECKSUM (1<<0)
+#define DUMP_PAYLOAD_SKIP_KEY_META (1<<1)
+#define DUMP_PAYLOAD_DONT_COMPRESS (1<<2)
+void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int flags, size_t size_hint);
+sds createRawDumpPayload(robj *o, robj *key, int dbid, int flags, size_t size_hint);
 void dumpCommand(client *c);
 void clientCommand(client *c);
 void helloCommand(client *c);
