@@ -512,31 +512,28 @@ int hashTemplateDefragByIdChunk(unsigned long chunk_idx) {
     return 1;
 }
 
-/* Limit the duplicate field-name representation retained for fast RESTORE
- * template lookup. Blobs that do not fit are used without being cached. */
-#define HASH_TEMPLATE_FIELDS_LP_CACHE_MAX_BYTES (16 * 1024 * 1024)
+/* HIMPORT SET propagation usually sends RESTORE commands with the same few
+ * field sets. ASM may send RESTORE commands with thousands of different field
+ * sets because keys arrive in arbitrary order. The cache holds at most one blob
+ * per template, so its size is naturally bounded by the template count. The
+ * explicit cap only protects against misuse that creates an excessive number
+ * of templates. */
+#define HASH_TMPL_FIELDS_LP_CACHE_MAX_BYTES (16 * 1024 * 1024)
 
 /* Cache 'fields_lp' as tmpl's fields-listpack (blob -> template), taking
- * ownership on success. Last one wins: a stale blob already attached is
- * dropped. Returns 0 without consuming fields_lp if the cache is full. */
+ * ownership on success. Keep an existing blob rather than replacing it with
+ * an alternate encoding of the same fields. Returns 0 without consuming
+ * fields_lp if tmpl is already indexed or the cache is full. */
 int hashTemplateIndexFieldsLp(hashTemplate *tmpl, unsigned char *fields_lp) {
+    if (tmpl->fields_lp) return 0;
+
+    size_t cached_bytes = htemplates->fields_lp_cache_bytes;
+    serverAssert(cached_bytes <= HASH_TMPL_FIELDS_LP_CACHE_MAX_BYTES);
+
     size_t bytes = lpBytes(fields_lp);
-    size_t old_bytes = tmpl->fields_lp ? lpBytes(tmpl->fields_lp) : 0;
-    serverAssert(htemplates->fields_lp_cache_bytes >= old_bytes);
-
-    size_t bytes_without_old = htemplates->fields_lp_cache_bytes - old_bytes;
-    if (bytes > HASH_TEMPLATE_FIELDS_LP_CACHE_MAX_BYTES ||
-        bytes_without_old > HASH_TEMPLATE_FIELDS_LP_CACHE_MAX_BYTES - bytes)
-    {
+    if (bytes > HASH_TMPL_FIELDS_LP_CACHE_MAX_BYTES - cached_bytes)
         return 0;
-    }
 
-    if (tmpl->fields_lp) {
-        dictDelete(htemplates->by_fields_lp, tmpl->fields_lp);
-        htemplates->fields_lp_cache_bytes -= old_bytes;
-        htemplates->total_mem_size -= old_bytes;
-        lpFree(tmpl->fields_lp);
-    }
     tmpl->fields_lp = fields_lp;
     tmpl->fields_lp_last_used = server.mstime;
     dictAdd(htemplates->by_fields_lp, fields_lp, tmpl);
