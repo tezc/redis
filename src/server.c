@@ -293,6 +293,13 @@ void exitFromChild(int retcode, int from_signal) {
     }
 #else
     UNUSED(from_signal);
+#ifdef PGO_TRAIN
+    /* PGO training build (see src/Makefile): _exit() skips the atexit handler
+     * that writes the profile, so the work done by forked children (RDB save,
+     * full sync, slot migration) would be lost. Write it explicitly. */
+    extern void __gcov_dump(void);
+    __gcov_dump();
+#endif
     _exit(retcode);
 #endif
 }

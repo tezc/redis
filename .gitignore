@@ -34,6 +34,7 @@ deps/tre/libtre.a
 deps/croaring/libroaring.a
 tests/tls/*
 .make-*
+src/pgo-profile/
 .prerequisites
 *.dSYM
 Makefile.dep

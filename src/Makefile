@@ -149,8 +149,50 @@ endif
 # Override default settings if possible
 -include .make-settings
 
-FINAL_CFLAGS=$(STD) $(WARN) $(OPT) $(DEBUG) $(CFLAGS) $(REDIS_CFLAGS)
-FINAL_LDFLAGS=$(LDFLAGS) $(OPT) $(REDIS_LDFLAGS) $(DEBUG)
+# Profile guided optimization (GCC only). A plain 'make' builds an instrumented
+# binary, runs the training workload in utils/pgo-train.sh against it and then
+# builds the final binary using the collected profile:
+#
+#   make            PGO build. The profile is collected again only when a source
+#                   file changed since the last training.
+#   make PGO=no     regular build, no training.
+#   make pgo-clean  remove the collected profile.
+#
+# If training fails the build falls back to a regular build. PGO is skipped for
+# clang, for -O0 builds (noopt, valgrind) and for sanitizer / gcov builds.
+PGO?=yes
+PGO_DIR=$(CURDIR)/pgo-profile
+PGO_STAMP=$(PGO_DIR)/.trained
+PGO_ENABLED=no
+ifeq ($(PGO),yes)
+ifneq (clang,$(CLANG))
+ifeq (,$(findstring -O0,$(OPTIMIZATION) $(OPT)))
+ifndef SANITIZER
+ifeq (,$(findstring -fprofile-arcs,$(REDIS_CFLAGS)))
+	PGO_ENABLED=yes
+endif
+endif
+endif
+endif
+endif
+PGO_CFLAGS=
+PGO_LDFLAGS=
+ifeq ($(PGO_ENABLED),yes)
+ifeq ($(PGO_STAGE),generate)
+	# prefer-atomic: io-threads update the counters concurrently.
+	PGO_CFLAGS=-fprofile-generate=$(PGO_DIR) -fprofile-update=prefer-atomic -DPGO_TRAIN
+	PGO_LDFLAGS=-fprofile-generate=$(PGO_DIR)
+else ifneq (,$(wildcard $(PGO_STAMP)))
+	# -Wno-maybe-uninitialized: with a profile GCC inlines differently and reports
+	# false positives, which break builds that use -Werror. The instrumented
+	# build above still compiles the same code with the warning enabled.
+	PGO_CFLAGS=-fprofile-use=$(PGO_DIR) -fprofile-correction -Wno-missing-profile -Wno-coverage-mismatch -Wno-maybe-uninitialized
+	PGO_LDFLAGS=-fprofile-use=$(PGO_DIR)
+endif
+endif
+
+FINAL_CFLAGS=$(STD) $(WARN) $(OPT) $(DEBUG) $(CFLAGS) $(REDIS_CFLAGS) $(PGO_CFLAGS)
+FINAL_LDFLAGS=$(LDFLAGS) $(OPT) $(REDIS_LDFLAGS) $(PGO_LDFLAGS) $(DEBUG)
 FINAL_LIBS=-lm
 
 # Replication compression (opt-in via BUILD_COMPRESSION=yes). When enabled the
@@ -422,10 +464,49 @@ REDIS_CHECK_RDB_NAME=redis-check-rdb$(PROG_SUFFIX)
 REDIS_CHECK_AOF_NAME=redis-check-aof$(PROG_SUFFIX)
 ALL_SOURCES=$(sort $(patsubst %.o,%.c,$(REDIS_SERVER_OBJ) $(REDIS_VEC_SETS_OBJ) $(REDIS_CLI_OBJ) $(REDIS_BENCHMARK_OBJ)))
 
-all: $(REDIS_SERVER_NAME) $(REDIS_SENTINEL_NAME) $(REDIS_CLI_NAME) $(REDIS_BENCHMARK_NAME) $(REDIS_CHECK_RDB_NAME) $(REDIS_CHECK_AOF_NAME) $(TLS_MODULE) module_tests
+ifeq ($(PGO_ENABLED)$(PGO_STAGE),yes)
+# PGO build: collect the profile if it is missing or older than the sources,
+# then build using it. Both steps run in a sub-make because the compiler flags
+# depend on the stage and on whether a profile exists.
+all:
+	@$(MAKE) pgo-profile
+	@$(MAKE) PGO_STAGE=use build-all
+else
+all: build-all
+endif
+
+build-all: $(REDIS_SERVER_NAME) $(REDIS_SENTINEL_NAME) $(REDIS_CLI_NAME) $(REDIS_BENCHMARK_NAME) $(REDIS_CHECK_RDB_NAME) $(REDIS_CHECK_AOF_NAME) $(TLS_MODULE) module_tests
 	@echo ""
 	@echo "Hint: It's a good idea to run 'make test' ;)"
 	@echo ""
+
+.PHONY: build-all
+
+# The profile is stale when any source file is newer than the last training.
+PGO_TRAIN_DEPS=$(filter-out release.h,$(wildcard *.c *.h *.def)) Makefile ../utils/pgo-train.sh
+
+$(PGO_STAMP): $(PGO_TRAIN_DEPS)
+	@echo ""
+	@echo "PGO: building the instrumented binaries (use 'make PGO=no' to skip)"
+	@echo ""
+	@rm -rf $(PGO_DIR)
+	@if $(MAKE) PGO_STAGE=generate build-all; then \
+		echo ""; echo "PGO: running the training workload"; echo ""; \
+		if ../utils/pgo-train.sh $(CURDIR)/$(REDIS_SERVER_NAME) $(CURDIR)/$(REDIS_CLI_NAME) $(CURDIR)/$(REDIS_BENCHMARK_NAME); then \
+			mkdir -p $(PGO_DIR) && touch $(PGO_STAMP); \
+		else \
+			rm -rf $(PGO_DIR); echo "PGO: training failed, falling back to a regular build"; \
+		fi; \
+	else \
+		rm -rf $(PGO_DIR); echo "PGO: instrumented build failed, falling back to a regular build"; \
+	fi
+
+pgo-profile: $(PGO_STAMP)
+
+pgo-clean:
+	rm -rf $(PGO_DIR)
+
+.PHONY: pgo-profile pgo-clean
 
 Makefile.dep:
 	-$(REDIS_CC) -MM $(ALL_SOURCES) > Makefile.dep 2> /dev/null || true
