@@ -98,6 +98,7 @@ asm_done() { cli "$1" cluster migration status all | grep -A1 -x state | grep -q
 
 V=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx     # 48 bytes: raw string
 S=xxxxxxxxxxxxxxxx                                     # 16 bytes: embstr
+LONG=$V$V$V$V$V$V$V$V; LONG=$LONG$LONG$LONG            # 1152 bytes: long member
 
 # ------------------------------------------------------------------ commands
 # "<tier> <command>". Tier 1: the commands that dominate real workloads.
@@ -339,6 +340,12 @@ CMDS_STANDALONE="
 3 info
 3 time
 "
+# MGET with many keys: more keys than one prefetch batch.
+MK=""; i=0; while [ $i -lt 30 ]; do MK="$MK key:__rand_int__"; i=$((i+1)); done
+CMDS_STANDALONE="$CMDS_STANDALONE
+2 mget$MK
+2 mget$MK$MK$MK key:__rand_int__ nokey:__rand_int__
+"
 
 # commands <port> <list> <scale> [max tier]: each command pipelined, tier 1
 # also not pipelined
@@ -370,6 +377,22 @@ strings() {
     bench "$1" 16 8000 -r 8000 -d 4096 -t set,get || return 1
     bench "$1" 4 2000 -r 2000 -d 16384 -t set,get || return 1
     bench "$1" 1 5000 -r 100000 -d 64 -t set,get || return 1
+    # The values above are a single repeated byte. Add values that look like
+    # real data, otherwise RDB compression is trained only on the best case:
+    # text made of words (16 bytes - 4KB) and, one in eight, random bytes.
+    local sha
+    sha=$(cli "$1" script load 'local w={} math.randomseed(7)
+for i=1,128 do local t={} for j=1,math.random(3,10) do t[j]=string.char(96+math.random(26)) end w[i]=table.concat(t) end
+math.randomseed(tonumber(ARGV[1]))
+local sizes={16,64,256,512,1024,4096} local len=sizes[math.random(6)] local t,l={},0
+if math.random(8)==1 then
+  while l<len do l=l+1 t[l]=string.char(math.random(0,255)) end
+  return redis.call("set",KEYS[1],table.concat(t))
+end
+while l<len do local s=w[math.random(128)] t[#t+1]=s l=l+#s+1 end
+return redis.call("set",KEYS[1],table.concat(t," "))')
+    [ -n "$sha" ] && bench "$1" 16 30000 -r 1000000 evalsha "$sha" 1 txt:__rand_int__ __rand_int__
+    return 0
 }
 
 # extras <port>: things redis-benchmark cannot express
@@ -465,6 +488,63 @@ redis.register_function('pgoset', function(keys, args) redis.call('hset', keys[1
     sleep 0.3
     # full reads of big collections
     bench "$port" 1 50 hgetall bh:2; bench "$port" 1 50 smembers bis:1; bench "$port" 1 20 lrange bl:1 0 -1
+    # big bitmap: BITCOUNT over megabytes (the popcount loops only get hot
+    # with large inputs), random start offset
+    cli "$port" setbit bigbits 33554431 1 >/dev/null
+    bench "$port" 16 20000 -r 33554432 setbit bigbits __rand_int__ 1
+    sha=$(cli "$port" script load "return redis.call('bitcount',KEYS[1],tonumber(ARGV[1]),-1)")
+    [ -n "$sha" ] && bench "$port" 4 400 -r 4194304 evalsha "$sha" 1 bigbits __rand_int__
+    bench "$port" 1 50 bitcount bigbits
+    # SCAN from random cursors returning many keys per call, type filter
+    bench "$port" 16 2000 -r 1000000 scan __rand_int__ count 500
+    bench "$port" 16 300 -r 1000000 scan __rand_int__ count 5000
+    bench "$port" 16 2000 -r 1000000 scan __rand_int__ count 100 type hash
+    bench "$port" 16 1000 scan 0 type hash
+    # sorted sets: union / intersection of skiplist encoded sets, copying a
+    # big range, long members
+    bench "$port" 16 3000 -r 300 zadd zu:1 __rand_int__ member:__rand_int__
+    bench "$port" 16 3000 -r 300 zadd zu:2 __rand_int__ member:__rand_int__
+    bench "$port" 16 1000 zunion 2 zu:1 zu:2
+    bench "$port" 16 1000 zunionstore zudst 2 zu:1 zu:2
+    bench "$port" 16 500 zinterstore zidst 2 zu:1 zu:2
+    bench "$port" 1 50 zrangestore zrdst bz:1 0 -1
+    bench "$port" 16 20000 -r 20000 zadd bzl:1 __rand_int__ $LONG:__rand_int__
+    bench "$port" 16 5000 zrevrangebyscore bzl:1 20000 1 withscores limit 1 10
+    bench "$port" 1 1000 zrevrangebyscore bzl:1 20000 1 withscores limit 1 10
+    bench "$port" 16 5000 -r 20000 zrank bzl:1 $LONG:__rand_int__
+    bench "$port" 16 5000 -r 1000 zadd z1k:1 __rand_int__ member:__rand_int__
+    bench "$port" 16 5000 zscan z1k:1 0; bench "$port" 1 1000 zscan z1k:1 0
+    # pub/sub fan-out: 10 channels, 40 subscribers on each
+    local chans="" subs="" i=0
+    while [ $i -lt 10 ]; do chans="$chans $(printf 'fan:%012d' $i)"; i=$((i+1)); done
+    i=0; while [ $i -lt 40 ]; do
+        "$CLI" -p "$port" subscribe $chans >/dev/null 2>&1 & subs="$subs $!"; i=$((i+1)); done
+    PIDS="$PIDS $subs"; sleep 0.3
+    bench "$port" 16 20000 -r 10 publish fan:__rand_int__ $V$V$V
+    bench "$port" 1 3000 -r 10 publish fan:__rand_int__ $V$V$V
+    kill $subs 2>/dev/null
+    # client side caching in broadcast mode: writes with listeners tracking a
+    # key prefix, some of them restricted by ACL key patterns
+    cli "$port" acl setuser pgobcast on ">pgopass" "~nomatch:*" "+@all" >/dev/null
+    subs=""; i=0; while [ $i -lt 10 ]; do
+        { echo "hello 3"; echo "client tracking on bcast prefix key:"; sleep 3; } | "$CLI" -p "$port" >/dev/null 2>&1 & subs="$subs $!"
+        { echo "hello 3 auth pgobcast pgopass"; echo "client tracking on bcast prefix key:"; sleep 3; } | "$CLI" -p "$port" >/dev/null 2>&1 & subs="$subs $!"
+        i=$((i+1)); done
+    PIDS="$PIDS $subs"; sleep 0.3
+    bench "$port" 1 4000 set key:__rand_int__ $S
+    bench "$port" 16 20000 set key:__rand_int__ $S
+    kill $subs 2>/dev/null; wait $subs 2>/dev/null
+    cli "$port" acl deluser pgobcast >/dev/null
+    # many members / fields in one command: ZMSCORE on a listpack encoded
+    # set (hits and misses), HSETEX with 50 big fields
+    local zm="" zq="" hf=""; i=1
+    while [ $i -le 100 ]; do zm="$zm $i mem$i"; i=$((i+1)); done
+    i=1; while [ $i -le 25 ]; do zq="$zq mem$i miss$i"; i=$((i+1)); done
+    i=1; while [ $i -le 50 ]; do hf="$hf field:$i $LONG"; i=$((i+1)); done
+    bench "$port" 16 2000 -r 500 zadd zm:__rand_int__ $zm
+    bench "$port" 16 5000 -r 500 zmscore zm:__rand_int__ $zq
+    bench "$port" 1 500 -r 500 zmscore zm:__rand_int__ $zq
+    bench "$port" 4 400 -r 200 hsetex hx:__rand_int__ ex 100000 fields 50 $hf
     # RESP3
     bench "$port" 16 10000 -3 get key:__rand_int__
     bench "$port" 16 10000 -3 hgetall sh:__rand_int__

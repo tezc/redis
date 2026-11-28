@@ -595,7 +595,9 @@ static void *dbDictPrefetchEntryKey(const dictEntry *de) {
 
 static void *dbDictPrefetchEntryValue(const dictEntry *de) {
     kvobj *kv = dictGetKey(de);
-    if (inlineEncodedObject(kv)) return NULL;
+    /* An embedded string is prefetched as well: the object often spans two
+     * cache lines and the value is on the second one. */
+    if (kv->encoding == OBJ_ENCODING_INT) return NULL;
     return kv->ptr;
 }
 

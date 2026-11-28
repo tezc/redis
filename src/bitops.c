@@ -200,6 +200,9 @@ long long redisPopCountAarch64(void *s, long count) {
         if (iters > POPCOUNT_NEON_MAX_ITERS) iters = POPCOUNT_NEON_MAX_ITERS;
         count -= iters * 128;
 
+        /* Unrolling this loop makes it much slower (it is enabled when
+         * building with profile feedback). */
+        #pragma GCC unroll 1
         while (iters--) {
             uint8x16_t d0 = vld1q_u8(p +  0);
             uint8x16_t d1 = vld1q_u8(p + 16);

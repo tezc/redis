@@ -590,6 +590,10 @@ DEP = $(REDIS_SERVER_OBJ:%.o=%.d) $(REDIS_VEC_SETS_OBJ:%.o=%.d) $(REDIS_CLI_OBJ:
 %.o: %.c .make-prerequisites
 	$(REDIS_CC) -MMD -o $@ -c $<
 
+# LZF compression is built without the profile: with it lzf_compress() gets
+# slower (measured on x86: RDB save takes up to 20% longer).
+lzf_c.o: PGO_CFLAGS=
+
 # The following files are checked in and don't normally need to be rebuilt. They
 # are built only if python is available and their prereqs are modified.
 ifneq (,$(PYTHON))
